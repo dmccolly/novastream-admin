@@ -3,8 +3,8 @@ import { Link, useLocation } from "wouter";
 import { 
   LayoutDashboard, 
   Music, 
-  Calendar, 
-  Settings, 
+  Clock, 
+  Settings as SettingsIcon, 
   Radio, 
   LogOut, 
   Menu, 
@@ -23,8 +23,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const navItems = [
     { icon: LayoutDashboard, label: "Overview", href: "/" },
     { icon: Music, label: "Library", href: "/library" },
-    { icon: Calendar, label: "Scheduler", href: "/scheduler" },
-    { icon: Settings, label: "Settings", href: "/settings" },
+    { icon: Clock, label: "Scheduler", href: "/scheduler" },
+    { icon: SettingsIcon, label: "Settings", href: "/settings" },
   ];
 
   return (
