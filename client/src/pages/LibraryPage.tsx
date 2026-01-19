@@ -11,14 +11,11 @@ import {
   Trash2, 
   Tag, 
   Music, 
-  Clock,
   Filter,
   Download,
   Upload
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
-
-
 
 export default function Library() {
   const [tracks, setTracks] = useState<Track[]>([]);
@@ -26,31 +23,48 @@ export default function Library() {
   const [category, setCategory] = useState("all");
   const [loading, setLoading] = useState(false);
   const [selectedTracks, setSelectedTracks] = useState<Set<string>>(new Set());
-
   const [totalTracks, setTotalTracks] = useState(0);
 
   const fetchTracks = async () => {
     try {
       setLoading(true);
+      // Use simple params first to ensure it works
       const response = await tracksApi.getAll({
-        search,
-        category: category === "all" ? undefined : category,
         limit: 50,
+        // Only add search/category if they have values
+        ...(search ? { search } : {}),
+        ...(category !== "all" ? { category } : {})
       });
-      setTracks(response.data);
-      setTotalTracks(response.pagination.total);
+      
+      if (response && Array.isArray(response.data)) {
+        setTracks(response.data);
+        setTotalTracks(response.pagination?.total || 0);
+      } else {
+        setTracks([]);
+        setTotalTracks(0);
+      }
     } catch (error) {
       console.error("Failed to fetch tracks:", error);
       toast.error("Failed to load tracks");
+      setTracks([]);
     } finally {
       setLoading(false);
     }
   };
 
+  // Initial load
   useEffect(() => {
+    fetchTracks();
+  }, []);
+
+  // Debounced search/filter
+  useEffect(() => {
+    // Skip initial render as the first useEffect handles it
+    if (search === "" && category === "all" && tracks.length === 0 && !loading) return;
+
     const debounce = setTimeout(() => {
       fetchTracks();
-    }, 300);
+    }, 500);
     return () => clearTimeout(debounce);
   }, [search, category]);
 
@@ -61,6 +75,17 @@ export default function Library() {
       fetchTracks();
     } catch (error) {
       toast.error("Failed to delete track");
+    }
+  };
+
+  const handleDownload = async (id: string) => {
+    try {
+      toast.info("Starting download...");
+      await tracksApi.download(id);
+      toast.success("Track downloaded");
+      fetchTracks();
+    } catch (error) {
+      toast.error("Failed to download track");
     }
   };
 
@@ -88,7 +113,7 @@ export default function Library() {
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <h1 className="text-3xl font-display font-bold text-foreground">Track Library</h1>
-            <p className="text-muted-foreground mt-1 font-mono text-sm">{tracks.length} tracks shown • {totalTracks} total</p>
+            <p className="text-muted-foreground mt-1 font-mono text-sm">{totalTracks} tracks total</p>
           </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" className="border-primary/20 hover:border-primary hover:bg-primary/10">
@@ -190,6 +215,7 @@ export default function Library() {
                     <th className="px-4 py-3 text-left">Album</th>
                     <th className="px-4 py-3 text-center">Duration</th>
                     <th className="px-4 py-3 text-left">Category</th>
+                    <th className="px-4 py-3 text-center">Status</th>
                     <th className="px-4 py-3 text-right">Actions</th>
                   </tr>
                 </thead>
@@ -240,6 +266,21 @@ export default function Library() {
                           <span className="px-2 py-1 rounded-full bg-primary/10 text-primary text-xs font-mono border border-primary/20">
                             {track.category || "uncategorized"}
                           </span>
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          {track.isDownloaded ? (
+                            <span className="text-green-500 text-xs font-mono">READY</span>
+                          ) : (
+                            <Button 
+                              variant="ghost" 
+                              size="sm" 
+                              className="h-6 text-xs text-blue-400 hover:text-blue-300"
+                              onClick={() => handleDownload(track.id)}
+                            >
+                              <Download className="h-3 w-3 mr-1" />
+                              GET
+                            </Button>
+                          )}
                         </td>
                         <td className="px-4 py-3 text-right">
                           <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">

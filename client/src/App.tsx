@@ -5,9 +5,10 @@ import { Route, Switch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import Home from "./pages/Home";
-import Library from "./pages/Library";
+import Library from "./pages/LibraryPage";
 import Scheduler from "./pages/Scheduler";
 import Settings from "./pages/Settings";
+
 
 
 function Router() {
@@ -17,6 +18,7 @@ function Router() {
       <Route path={"/library"} component={Library} />
       <Route path={"/scheduler"} component={Scheduler} />
       <Route path={"/settings"} component={Settings} />
+
       <Route path={"/404"} component={NotFound} />
       {/* Final fallback route */}
       <Route component={NotFound} />

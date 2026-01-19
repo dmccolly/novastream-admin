@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_URL = 'http://localhost:3001/api';
+const API_URL = 'https://3001-i9k0ogf5gfts8qk8m4gfr-7b1431e0.us2.manus.computer/api';
 
 export const api = axios.create({
   baseURL: API_URL,
@@ -20,6 +20,7 @@ export interface Track {
   tags?: string[];
   format?: string;
   isActive: boolean;
+  isDownloaded: boolean;
   createdAt: number;
 }
 
@@ -39,7 +40,9 @@ export const tracksApi = {
     limit?: number; 
     offset?: number 
   }) => {
-    const response = await api.get<PaginatedResponse<Track>>('/tracks', { params });
+    const response = await api.get<PaginatedResponse<Track>>('/tracks', { 
+      params: { ...params, _t: Date.now() } 
+    });
     return response.data;
   },
 
@@ -55,6 +58,10 @@ export const tracksApi = {
 
   delete: async (id: string) => {
     await api.delete(`/tracks/${id}`);
+  },
+
+  download: async (id: string) => {
+    await api.post(`/tracks/${id}/download`);
   },
 
   sync: async (syncType: 'full' | 'incremental' = 'incremental') => {
