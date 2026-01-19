@@ -41,9 +41,25 @@ export const tracksApi = {
     limit?: number; 
     offset?: number 
   }) => {
-    const response = await api.get<PaginatedResponse<Track>>('/tracks', { 
+    // The backend currently returns a raw array of tracks, NOT a paginated object.
+    // We need to handle this to prevent the frontend from breaking.
+    const response = await api.get<Track[] | PaginatedResponse<Track>>('/tracks', { 
       params: { ...params, _t: Date.now() } 
     });
+    
+    // Check if response is an array (backend format) or object (expected frontend format)
+    if (Array.isArray(response.data)) {
+      return {
+        data: response.data,
+        pagination: {
+          total: response.data.length,
+          limit: params?.limit || 50,
+          offset: params?.offset || 0
+        }
+      };
+    }
+    
+    // If it's already in the expected format
     return response.data;
   },
 
