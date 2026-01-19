@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { tracksApi, Track } from "@/lib/api";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { 
@@ -16,17 +18,7 @@ import {
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
 
-interface Track {
-  id: string;
-  title: string;
-  artist: string;
-  album?: string;
-  duration?: number;
-  category?: string;
-  mood?: string;
-  tags?: string[];
-  format?: string;
-}
+
 
 export default function Library() {
   const [tracks, setTracks] = useState<Track[]>([]);
@@ -35,33 +27,42 @@ export default function Library() {
   const [loading, setLoading] = useState(false);
   const [selectedTracks, setSelectedTracks] = useState<Set<string>>(new Set());
 
-  // Mock data - replace with API calls
-  const mockTracks: Track[] = [
-    { id: "1", title: "Bohemian Rhapsody", artist: "Queen", album: "A Night at the Opera", duration: 355, category: "rock", format: "mp3" },
-    { id: "2", title: "Enter Sandman", artist: "Metallica", album: "The Black Album", duration: 327, category: "metal", format: "mp3" },
-    { id: "3", title: "Stairway to Heaven", artist: "Led Zeppelin", album: "Led Zeppelin IV", duration: 482, category: "rock", format: "flac" },
-    { id: "4", title: "Smells Like Teen Spirit", artist: "Nirvana", album: "Nevermind", duration: 301, category: "grunge", format: "mp3" },
-    { id: "5", title: "Sweet Child O' Mine", artist: "Guns N' Roses", album: "Appetite for Destruction", duration: 356, category: "rock", format: "mp3" },
-  ];
+  const [totalTracks, setTotalTracks] = useState(0);
+
+  const fetchTracks = async () => {
+    try {
+      setLoading(true);
+      const response = await tracksApi.getAll({
+        search,
+        category: category === "all" ? undefined : category,
+        limit: 50,
+      });
+      setTracks(response.data);
+      setTotalTracks(response.pagination.total);
+    } catch (error) {
+      console.error("Failed to fetch tracks:", error);
+      toast.error("Failed to load tracks");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    // Simulate loading tracks
-    setLoading(true);
-    setTimeout(() => {
-      setTracks(mockTracks);
-      setLoading(false);
-    }, 500);
-  }, []);
+    const debounce = setTimeout(() => {
+      fetchTracks();
+    }, 300);
+    return () => clearTimeout(debounce);
+  }, [search, category]);
 
-  const filteredTracks = tracks.filter(track => {
-    const matchesSearch = search === "" || 
-      track.title.toLowerCase().includes(search.toLowerCase()) ||
-      track.artist.toLowerCase().includes(search.toLowerCase());
-    
-    const matchesCategory = category === "all" || track.category === category;
-    
-    return matchesSearch && matchesCategory;
-  });
+  const handleDelete = async (id: string) => {
+    try {
+      await tracksApi.delete(id);
+      toast.success("Track deleted");
+      fetchTracks();
+    } catch (error) {
+      toast.error("Failed to delete track");
+    }
+  };
 
   const toggleTrackSelection = (id: string) => {
     const newSelected = new Set(selectedTracks);
@@ -87,7 +88,7 @@ export default function Library() {
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <h1 className="text-3xl font-display font-bold text-foreground">Track Library</h1>
-            <p className="text-muted-foreground mt-1 font-mono text-sm">{filteredTracks.length} tracks • {tracks.length} total</p>
+            <p className="text-muted-foreground mt-1 font-mono text-sm">{tracks.length} tracks shown • {totalTracks} total</p>
           </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" className="border-primary/20 hover:border-primary hover:bg-primary/10">
@@ -171,18 +172,18 @@ export default function Library() {
                 <thead>
                   <tr className="border-b border-border text-muted-foreground font-mono text-xs uppercase tracking-wider">
                     <th className="px-4 py-3 text-left">
-                      <input 
-                        type="checkbox" 
-                        checked={selectedTracks.size === filteredTracks.length && filteredTracks.length > 0}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            setSelectedTracks(new Set(filteredTracks.map(t => t.id)));
-                          } else {
-                            setSelectedTracks(new Set());
-                          }
-                        }}
-                        className="w-4 h-4 rounded border-border bg-input cursor-pointer"
-                      />
+                        <input 
+                          type="checkbox" 
+                          checked={selectedTracks.size === tracks.length && tracks.length > 0}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedTracks(new Set(tracks.map(t => t.id)));
+                            } else {
+                              setSelectedTracks(new Set());
+                            }
+                          }}
+                          className="w-4 h-4 rounded border-border bg-input cursor-pointer"
+                        />
                     </th>
                     <th className="px-4 py-3 text-left">Title</th>
                     <th className="px-4 py-3 text-left">Artist</th>
@@ -202,14 +203,14 @@ export default function Library() {
                         </div>
                       </td>
                     </tr>
-                  ) : filteredTracks.length === 0 ? (
+                  ) : tracks.length === 0 ? (
                     <tr>
                       <td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">
                         No tracks found
                       </td>
                     </tr>
                   ) : (
-                    filteredTracks.map((track) => (
+                    tracks.map((track) => (
                       <tr 
                         key={track.id} 
                         className="border-b border-border/50 hover:bg-white/5 transition-colors group"
@@ -245,7 +246,12 @@ export default function Library() {
                             <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-primary">
                               <Edit2 className="h-3 w-3" />
                             </Button>
-                            <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-destructive">
+                            <Button 
+                              variant="ghost" 
+                              size="icon" 
+                              className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                              onClick={() => handleDelete(track.id)}
+                            >
                               <Trash2 className="h-3 w-3" />
                             </Button>
                           </div>

@@ -1,24 +1,66 @@
+import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Play, Pause, SkipForward, Users, Clock, Music2, HardDrive } from "lucide-react";
+import { 
+  Activity, 
+  Users, 
+  Music, 
+  Clock, 
+  Play, 
+  Pause,
+  RefreshCw,
+  Server,
+  SkipForward,
+  Music2,
+  HardDrive
+} from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { tracksApi } from "@/lib/api";
 
 export default function Home() {
+  const [stats, setStats] = useState({
+    activeTracks: 0,
+    totalTracks: 0,
+    listeners: 1248,
+    uptime: "14d 02h",
+  });
+
+  useEffect(() => {
+    const loadStats = async () => {
+      try {
+        const data = await tracksApi.getStats();
+        setStats(prev => ({
+          ...prev,
+          activeTracks: data.active,
+          totalTracks: data.total,
+        }));
+      } catch (error) {
+        console.error("Failed to load stats");
+      }
+    };
+    loadStats();
+  }, []);
+
   return (
     <DashboardLayout>
-      <div className="space-y-8">
+      <div className="space-y-6">
         {/* Header */}
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-display font-bold text-foreground">Mission Control</h1>
-            <p className="text-muted-foreground mt-1 font-mono text-sm">System ID: NS-2026-ALPHA // Status: OPERATIONAL</p>
+            <h1 className="text-xs font-mono text-muted-foreground uppercase tracking-widest mb-1">Mission Control</h1>
+            <div className="flex items-center gap-3">
+              <h2 className="text-3xl font-display font-bold text-foreground">System Overview</h2>
+              <span className="px-2 py-0.5 rounded bg-green-500/10 text-green-500 text-xs font-mono border border-green-500/20 animate-pulse">
+                OPERATIONAL
+              </span>
+            </div>
           </div>
-          <div className="flex items-center gap-3">
-            <Button variant="outline" className="border-primary/50 text-primary hover:bg-primary/10 font-mono text-xs">
-              <HardDrive className="h-4 w-4 mr-2" />
+          <div className="flex items-center gap-2">
+            <Button variant="outline" className="border-primary/20 hover:border-primary hover:bg-primary/10">
+              <RefreshCw className="h-4 w-4 mr-2" />
               SYNC DROPBOX
             </Button>
-            <Button className="bg-primary text-primary-foreground hover:bg-primary/90 font-mono text-xs">
+            <Button className="bg-primary text-primary-foreground hover:bg-primary/90 shadow-[0_0_15px_rgba(var(--primary),0.5)]">
               <Play className="h-4 w-4 mr-2" />
               START STREAM
             </Button>
@@ -28,112 +70,91 @@ export default function Home() {
         {/* Stats Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <Card className="glass-panel border-l-4 border-l-primary">
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium font-mono text-muted-foreground">CURRENT LISTENERS</CardTitle>
-              <Users className="h-4 w-4 text-primary" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold font-display neon-text">1,248</div>
-              <p className="text-xs text-muted-foreground mt-1">+12% from last hour</p>
+            <CardContent className="pt-6">
+              <div className="flex items-center justify-between mb-4">
+                <span className="text-xs font-mono text-muted-foreground uppercase">Current Listeners</span>
+                <Users className="h-4 w-4 text-primary" />
+              </div>
+              <div className="text-3xl font-display font-bold text-foreground">{stats.listeners.toLocaleString()}</div>
+              <div className="text-xs text-green-500 mt-1 font-mono">+12% from last hour</div>
             </CardContent>
           </Card>
-          
-          <Card className="glass-panel border-l-4 border-l-cyan-500">
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium font-mono text-muted-foreground">ACTIVE TRACKS</CardTitle>
-              <Music2 className="h-4 w-4 text-cyan-500" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold font-display">3,402</div>
-              <p className="text-xs text-muted-foreground mt-1">32,746 in Cold Storage</p>
+
+          <Card className="glass-panel border-l-4 border-l-blue-500">
+            <CardContent className="pt-6">
+              <div className="flex items-center justify-between mb-4">
+                <span className="text-xs font-mono text-muted-foreground uppercase">Active Tracks</span>
+                <Music className="h-4 w-4 text-blue-500" />
+              </div>
+              <div className="text-3xl font-display font-bold text-foreground">{stats.activeTracks.toLocaleString()}</div>
+              <div className="text-xs text-muted-foreground mt-1 font-mono">{stats.totalTracks.toLocaleString()} in Cold Storage</div>
             </CardContent>
           </Card>
-          
-          <Card className="glass-panel border-l-4 border-l-amber-500">
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium font-mono text-muted-foreground">UPTIME</CardTitle>
-              <Clock className="h-4 w-4 text-amber-500" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold font-display">14d 02h</div>
-              <p className="text-xs text-muted-foreground mt-1">Since last reboot</p>
+
+          <Card className="glass-panel border-l-4 border-l-orange-500">
+            <CardContent className="pt-6">
+              <div className="flex items-center justify-between mb-4">
+                <span className="text-xs font-mono text-muted-foreground uppercase">Uptime</span>
+                <Clock className="h-4 w-4 text-orange-500" />
+              </div>
+              <div className="text-3xl font-display font-bold text-foreground">{stats.uptime}</div>
+              <div className="text-xs text-muted-foreground mt-1 font-mono">Since last reboot</div>
             </CardContent>
           </Card>
-          
+
           <Card className="glass-panel border-l-4 border-l-green-500">
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium font-mono text-muted-foreground">SERVER LOAD</CardTitle>
-              <ActivityIcon className="h-4 w-4 text-green-500" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold font-display">12%</div>
-              <p className="text-xs text-muted-foreground mt-1">CPU Usage</p>
+            <CardContent className="pt-6">
+              <div className="flex items-center justify-between mb-4">
+                <span className="text-xs font-mono text-muted-foreground uppercase">Server Load</span>
+                <Activity className="h-4 w-4 text-green-500" />
+              </div>
+              <div className="text-3xl font-display font-bold text-foreground">12%</div>
+              <div className="text-xs text-muted-foreground mt-1 font-mono">CPU Usage</div>
             </CardContent>
           </Card>
         </div>
 
-        {/* Main Content Area */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        {/* Now Playing & Up Next */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Now Playing */}
-          <Card className="glass-panel lg:col-span-2">
+          <Card className="glass-panel lg:col-span-2 relative overflow-hidden group">
+            <div className="absolute inset-0 bg-gradient-to-r from-primary/5 to-transparent opacity-50" />
             <CardHeader>
-              <CardTitle className="font-display tracking-wider flex items-center">
-                <span className="h-2 w-2 rounded-full bg-primary mr-2 animate-pulse"></span>
-                ON AIR
-              </CardTitle>
+              <div className="flex items-center gap-2">
+                <div className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
+                <span className="text-xs font-mono font-bold text-foreground uppercase tracking-wider">On Air</span>
+              </div>
             </CardHeader>
-            <CardContent>
+            <CardContent className="relative z-10">
               <div className="flex flex-col md:flex-row gap-6 items-center">
-                <div className="w-full md:w-48 h-48 bg-black/50 rounded-lg border border-border flex items-center justify-center relative overflow-hidden group">
-                  <div className="absolute inset-0 bg-gradient-to-br from-primary/20 to-transparent opacity-50"></div>
-                  <Music2 className="h-16 w-16 text-muted-foreground group-hover:text-primary transition-colors" />
-                  
-                  {/* Visualizer Bars (Fake) */}
-                  <div className="absolute bottom-0 left-0 right-0 h-12 flex items-end justify-center gap-1 p-2">
-                    {[...Array(12)].map((_, i) => (
-                      <div 
-                        key={i} 
-                        className="w-2 bg-primary/80 rounded-t-sm animate-pulse"
-                        style={{ 
-                          height: `${Math.random() * 100}%`,
-                          animationDelay: `${i * 0.1}s` 
-                        }}
-                      ></div>
-                    ))}
-                  </div>
+                <div className="h-48 w-48 rounded-lg bg-black/50 border border-border flex items-center justify-center shadow-2xl">
+                  <Music className="h-16 w-16 text-primary/50" />
                 </div>
-                
-                <div className="flex-1 space-y-4 w-full">
-                  <div>
-                    <h3 className="text-2xl font-bold text-foreground">Bohemian Rhapsody</h3>
-                    <p className="text-lg text-primary font-medium">Queen</p>
-                    <p className="text-sm text-muted-foreground font-mono mt-1">A Night at the Opera • 1975</p>
-                  </div>
+                <div className="flex-1 text-center md:text-left space-y-2">
+                  <h3 className="text-4xl font-display font-bold text-foreground">Bohemian Rhapsody</h3>
+                  <p className="text-xl text-primary font-medium">Queen</p>
+                  <p className="text-sm text-muted-foreground font-mono">A Night at the Opera • 1975</p>
                   
-                  {/* Progress Bar */}
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-xs font-mono text-muted-foreground">
-                      <span>02:14</span>
-                      <span>05:55</span>
-                    </div>
-                    <div className="h-2 bg-secondary rounded-full overflow-hidden">
-                      <div className="h-full bg-primary w-[38%] relative">
-                        <div className="absolute right-0 top-0 bottom-0 w-1 bg-white shadow-[0_0_10px_white]"></div>
-                      </div>
+                  <div className="w-full bg-secondary/50 h-1.5 rounded-full mt-6 overflow-hidden">
+                    <div className="bg-primary h-full w-1/3 relative">
+                      <div className="absolute right-0 top-1/2 -translate-y-1/2 h-3 w-3 bg-white rounded-full shadow-lg" />
                     </div>
                   </div>
-                  
-                  {/* Controls */}
-                  <div className="flex items-center gap-4 pt-2">
+                  <div className="flex justify-between text-xs font-mono text-muted-foreground mt-1">
+                    <span>02:14</span>
+                    <span>05:55</span>
+                  </div>
+
+                  <div className="flex items-center justify-center md:justify-start gap-4 mt-4">
                     <Button variant="outline" size="icon" className="h-10 w-10 rounded-full border-primary/20 hover:border-primary hover:bg-primary/10">
                       <Pause className="h-4 w-4" />
                     </Button>
                     <Button variant="outline" size="icon" className="h-10 w-10 rounded-full border-primary/20 hover:border-primary hover:bg-primary/10">
-                      <SkipForward className="h-4 w-4" />
+                      <Play className="h-4 w-4" />
                     </Button>
-                    <div className="ml-auto px-3 py-1 rounded-full bg-red-500/10 border border-red-500/20 text-red-500 text-xs font-bold font-mono flex items-center">
-                      <span className="h-1.5 w-1.5 rounded-full bg-red-500 mr-2 animate-pulse"></span>
-                      LIVE BROADCAST
+                    <div className="ml-auto px-3 py-1 rounded-full bg-red-500/10 border border-red-500/20 text-red-500 text-xs font-bold uppercase tracking-wider flex items-center gap-2">
+                      <div className="h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse" />
+                      Live Broadcast
                     </div>
                   </div>
                 </div>
@@ -141,10 +162,10 @@ export default function Home() {
             </CardContent>
           </Card>
 
-          {/* Queue */}
+          {/* Up Next */}
           <Card className="glass-panel">
             <CardHeader>
-              <CardTitle className="font-display tracking-wider">UP NEXT</CardTitle>
+              <CardTitle className="font-display tracking-wider text-sm uppercase">Up Next</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
@@ -155,17 +176,15 @@ export default function Home() {
                   { title: "Smells Like Teen Spirit", artist: "Nirvana", time: "06:20" },
                   { title: "Whole Lotta Love", artist: "Led Zeppelin", time: "06:25" },
                 ].map((track, i) => (
-                  <div key={i} className="flex items-center justify-between group p-2 rounded hover:bg-white/5 transition-colors cursor-pointer">
-                    <div className="flex items-center gap-3 overflow-hidden">
-                      <div className="h-8 w-8 rounded bg-secondary flex items-center justify-center text-xs font-mono text-muted-foreground">
-                        {i + 1}
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-foreground truncate group-hover:text-primary transition-colors">{track.title}</p>
-                        <p className="text-xs text-muted-foreground truncate">{track.artist}</p>
-                      </div>
+                  <div key={i} className="flex items-center gap-3 p-2 rounded hover:bg-white/5 transition-colors group cursor-pointer">
+                    <div className="h-8 w-8 rounded bg-secondary/50 flex items-center justify-center text-xs font-mono text-muted-foreground group-hover:text-primary group-hover:bg-primary/10 transition-colors">
+                      {i + 1}
                     </div>
-                    <span className="text-xs font-mono text-muted-foreground">{track.time}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-sm text-foreground truncate">{track.title}</div>
+                      <div className="text-xs text-muted-foreground truncate">{track.artist}</div>
+                    </div>
+                    <div className="text-xs font-mono text-muted-foreground">{track.time}</div>
                   </div>
                 ))}
               </div>
@@ -175,23 +194,4 @@ export default function Home() {
       </div>
     </DashboardLayout>
   );
-}
-
-function ActivityIcon(props: any) {
-  return (
-    <svg
-      {...props}
-      xmlns="http://www.w3.org/2000/svg"
-      width="24"
-      height="24"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
-    </svg>
-  )
 }

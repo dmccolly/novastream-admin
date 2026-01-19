@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { tracksApi } from "@/lib/api";
+import { toast } from "sonner";
 import { Input } from "@/components/ui/input";
 import { 
   Settings as SettingsIcon,
@@ -36,17 +38,24 @@ export default function Settings() {
   });
 
   const handleSyncNow = async () => {
-    setSyncStatus({ status: "syncing" });
-    
-    // Simulate sync
-    setTimeout(() => {
+    try {
+      setSyncStatus({ status: "syncing" });
+      const result = await tracksApi.sync("incremental");
+      
       setSyncStatus({
         status: "success",
         lastSync: new Date().toLocaleString(),
-        tracksAdded: 42,
-        tracksUpdated: 128,
+        tracksAdded: result.added,
+        tracksUpdated: result.updated,
       });
-    }, 3000);
+      toast.success("Sync completed successfully");
+    } catch (error) {
+      setSyncStatus({ 
+        status: "error",
+        error: "Failed to sync with Dropbox"
+      });
+      toast.error("Sync failed");
+    }
   };
 
   const copyToClipboard = (text: string) => {
