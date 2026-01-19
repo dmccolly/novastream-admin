@@ -1,13 +1,6 @@
 [build]
-  command = "pnpm build"
-  publish = "client/dist"
-  base = "client"
-
-[dev]
-  command = "pnpm dev"
-  port = 3000
-  targetPort = 3000
-  publish = "dist"
+  command = "npm run build:client"
+  publish = "dist/public"
 
 [[redirects]]
   from = "/*"
