@@ -42,12 +42,10 @@
     "@radix-ui/react-toggle-group": "^1.1.11",
     "@radix-ui/react-tooltip": "^1.2.8",
     "axios": "^1.12.0",
-    "better-sqlite3": "^11.8.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "embla-carousel-react": "^8.6.0",
-    "express": "^4.21.2",
     "framer-motion": "^12.23.22",
     "input-otp": "^1.4.2",
     "lucide-react": "^0.453.0",
@@ -66,6 +64,10 @@
     "vaul": "^1.1.2",
     "wouter": "^3.3.5",
     "zod": "^4.1.12"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.8.1",
+    "express": "^4.21.2"
   },
   "devDependencies": {
     "@builder.io/vite-plugin-jsx-loc": "^0.1.1",
