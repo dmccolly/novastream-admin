@@ -19,7 +19,8 @@ import {
   Pause,
   Loader2,
   Square,
-  Volume2
+  Volume2,
+  Sliders
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { Virtuoso } from "react-virtuoso";
@@ -338,22 +339,34 @@ export default function Library() {
                   <Play className="h-3 w-3" />
                 )}
               </Button>
-              <Button 
-                variant="ghost" 
-                size="icon" 
-                className="h-8 w-8 text-muted-foreground hover:text-primary"
-                onClick={() => setEditingTrack(track)}
-              >
-                <Edit2 className="h-3 w-3" />
-              </Button>
-              <Button 
-                variant="ghost" 
-                size="icon" 
-                className={`h-8 w-8 text-muted-foreground hover:text-blue-400 ${track.status === 'downloading' ? 'animate-pulse text-blue-400' : ''}`}
-                onClick={() => handleDownload(trackId)}
-                disabled={track.status === 'downloading'}
-                title={track.filepath ? "Re-download from Dropbox" : "Download from Dropbox"}
-              >
+                            <Button 
+                              variant="ghost" 
+                              size="icon" 
+                              className="h-8 w-8 text-muted-foreground hover:text-primary"
+                              onClick={() => setEditingTrack(track)}
+                              title="Edit Track Info"
+                            >
+                              <Edit2 className="h-3 w-3" />
+                            </Button>
+                            {track.filepath && (
+                              <Button 
+                                variant="ghost" 
+                                size="icon" 
+                                className="h-8 w-8 text-muted-foreground hover:text-yellow-400"
+                                onClick={() => handleEditCuePoints(track)}
+                                title="Edit Cue Points"
+                              >
+                                <Sliders className="h-3 w-3" />
+                              </Button>
+                            )}
+                            <Button 
+                              variant="ghost" 
+                              size="icon" 
+                              className={`h-8 w-8 text-muted-foreground hover:text-blue-400 ${track.status === 'downloading' ? 'animate-pulse text-blue-400' : ''}`}
+                              onClick={() => handleDownload(trackId)}
+                              disabled={track.status === 'downloading'}
+                              title={track.filepath ? "Re-download from Dropbox" : "Download from Dropbox"}
+                            >
                 {track.status === 'downloading' ? (
                   <Download className="h-3 w-3 animate-bounce" />
                 ) : track.filepath ? (
