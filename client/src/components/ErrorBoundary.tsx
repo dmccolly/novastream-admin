@@ -21,33 +21,68 @@ class ErrorBoundary extends Component<Props, State> {
     return { hasError: true, error };
   }
 
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error("Uncaught error:", error, errorInfo);
+  }
+
   render() {
     if (this.state.hasError) {
       return (
-        <div className="flex items-center justify-center min-h-screen p-8 bg-background">
-          <div className="flex flex-col items-center w-full max-w-2xl p-8">
-            <AlertTriangle
-              size={48}
-              className="text-destructive mb-6 flex-shrink-0"
-            />
+        <div style={{ 
+          display: 'flex', 
+          alignItems: 'center', 
+          justifyContent: 'center', 
+          minHeight: '100vh', 
+          padding: '2rem', 
+          backgroundColor: '#ffffff', 
+          color: '#000000',
+          fontFamily: 'sans-serif'
+        }}>
+          <div style={{ 
+            display: 'flex', 
+            flexDirection: 'column', 
+            alignItems: 'center', 
+            width: '100%', 
+            maxWidth: '800px',
+            border: '2px solid #ff0000',
+            padding: '2rem',
+            borderRadius: '8px'
+          }}>
+            <h2 style={{ fontSize: '1.5rem', marginBottom: '1rem', color: '#ff0000', fontWeight: 'bold' }}>
+              Application Crashed
+            </h2>
 
-            <h2 className="text-xl mb-4">An unexpected error occurred.</h2>
-
-            <div className="p-4 w-full rounded bg-muted overflow-auto mb-6">
-              <pre className="text-sm text-muted-foreground whitespace-break-spaces">
+            <div style={{ 
+              padding: '1rem', 
+              width: '100%', 
+              backgroundColor: '#f0f0f0', 
+              overflow: 'auto', 
+              marginBottom: '1.5rem',
+              border: '1px solid #ccc',
+              borderRadius: '4px',
+              maxHeight: '400px'
+            }}>
+              <p style={{ fontWeight: 'bold', marginBottom: '0.5rem' }}>{this.state.error?.message}</p>
+              <pre style={{ fontSize: '0.875rem', whiteSpace: 'pre-wrap' }}>
                 {this.state.error?.stack}
               </pre>
             </div>
 
             <button
               onClick={() => window.location.reload()}
-              className={cn(
-                "flex items-center gap-2 px-4 py-2 rounded-lg",
-                "bg-primary text-primary-foreground",
-                "hover:opacity-90 cursor-pointer"
-              )}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.5rem',
+                padding: '0.75rem 1.5rem',
+                borderRadius: '0.5rem',
+                backgroundColor: '#000000',
+                color: '#ffffff',
+                border: 'none',
+                cursor: 'pointer',
+                fontSize: '1rem'
+              }}
             >
-              <RotateCcw size={16} />
               Reload Page
             </button>
           </div>

@@ -11,7 +11,8 @@ import {
   X,
   Activity,
   Server,
-  Cloud
+  Cloud,
+  PieChart
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -23,8 +24,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const navItems = [
     { icon: LayoutDashboard, label: "Overview", href: "/" },
     { icon: Music, label: "Library", href: "/library" },
+    { icon: PieChart, label: "Clocks", href: "/clocks" },
     { icon: Clock, label: "Scheduler", href: "/scheduler" },
     { icon: SettingsIcon, label: "Settings", href: "/settings" },
+    { icon: Activity, label: "Play History", href: "/history" },
   ];
 
   return (

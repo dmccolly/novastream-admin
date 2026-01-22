@@ -8,8 +8,8 @@ import Home from "./pages/Home";
 import Library from "./pages/LibraryPage";
 import Scheduler from "./pages/Scheduler";
 import Settings from "./pages/Settings";
-
-
+import ClocksPage from "./pages/ClocksPage";
+import PlayHistory from "./pages/PlayHistory";
 
 function Router() {
   return (
@@ -17,7 +17,9 @@ function Router() {
       <Route path={"/"} component={Home} />
       <Route path={"/library"} component={Library} />
       <Route path={"/scheduler"} component={Scheduler} />
+      <Route path={"/clocks"} component={ClocksPage} />
       <Route path={"/settings"} component={Settings} />
+      <Route path={"/history"} component={PlayHistory} />
 
       <Route path={"/404"} component={NotFound} />
       {/* Final fallback route */}

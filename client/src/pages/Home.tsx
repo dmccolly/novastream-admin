@@ -16,8 +16,11 @@ import {
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { tracksApi } from "@/lib/api";
+import { useToast } from "@/hooks/use-toast";
 
 export default function Home() {
+  const { toast } = useToast();
+  const [isSyncing, setIsSyncing] = useState(false);
   const [stats, setStats] = useState({
     activeTracks: 0,
     totalTracks: 0,
@@ -56,11 +59,40 @@ export default function Home() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="outline" className="border-primary/20 hover:border-primary hover:bg-primary/10">
-              <RefreshCw className="h-4 w-4 mr-2" />
-              SYNC DROPBOX
+            <Button 
+              variant="outline" 
+              className="border-primary/20 hover:border-primary hover:bg-primary/10"
+              onClick={async () => {
+                try {
+                  setIsSyncing(true);
+                  toast({ title: "Sync Started", description: "Indexing Dropbox files..." });
+                  const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:3001'}/api/sync`, { method: 'POST' });
+                  const data = await res.json();
+                  if (data.success) {
+                    toast({ title: "Sync Complete", description: `Indexed ${data.count} new files.` });
+                    // Refresh stats
+                    const statsData = await tracksApi.getStats();
+                    setStats(prev => ({ ...prev, activeTracks: statsData.active, totalTracks: statsData.total }));
+                  } else {
+                    throw new Error(data.error || "Sync failed");
+                  }
+                } catch (e) {
+                  toast({ title: "Sync Failed", description: String(e), variant: "destructive" });
+                } finally {
+                  setIsSyncing(false);
+                }
+              }}
+              disabled={isSyncing}
+            >
+              <RefreshCw className={`h-4 w-4 mr-2 ${isSyncing ? 'animate-spin' : ''}`} />
+              {isSyncing ? 'SYNCING...' : 'SYNC DROPBOX'}
             </Button>
-            <Button className="bg-primary text-primary-foreground hover:bg-primary/90 shadow-[0_0_15px_rgba(var(--primary),0.5)]">
+            <Button 
+              className="bg-primary text-primary-foreground hover:bg-primary/90 shadow-[0_0_15px_rgba(var(--primary),0.5)]"
+              onClick={() => {
+                toast({ title: "Stream Active", description: "The stream is already running. Listen at https://streamofdan.com" });
+              }}
+            >
               <Play className="h-4 w-4 mr-2" />
               START STREAM
             </Button>

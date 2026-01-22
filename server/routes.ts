@@ -1,0 +1,688 @@
+import type { Express } from "express";
+import express from "express";
+import { createServer, type Server } from "http";
+import { db, initDb } from "./db";
+import { importLocalTracks } from "./import_local";
+import { syncDropbox } from "./dropbox";
+import { spawn } from "child_process";
+import cors from "cors";
+import path from "path";
+import fs from "fs";
+import { fileURLToPath } from "url";
+import { getDropboxClient, getAuthUrl, exchangeCodeForToken } from "./auth";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Ensure storage directory exists
+const musicDir = path.resolve(__dirname, "..", "storage", "music");
+if (!fs.existsSync(musicDir)) {
+  fs.mkdirSync(musicDir, { recursive: true });
+}
+
+export function registerRoutes(app: Express): Server {
+  // Initialize DB
+  initDb();
+
+  app.use(cors());
+  app.use(express.json());
+
+  // Health check
+  app.get("/api/health", (_req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
+  app.get("/api/ping", (_req, res) => {
+    res.send("pong");
+  });
+
+  // --- Dropbox Auth Routes ---
+
+  // 1. Get Auth URL
+  app.get("/api/auth/dropbox/url", async (_req, res) => {
+    try {
+      const url = await getAuthUrl(); // Await the promise!
+      res.json({ url });
+    } catch (error) {
+      console.error("Error generating auth URL:", error);
+      res.status(500).json({ error: "Failed to generate auth URL" });
+    }
+  });
+
+  // 2. Exchange Code for Token
+  app.post("/api/auth/dropbox/token", async (req, res) => {
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ error: "Code is required" });
+
+    try {
+      await exchangeCodeForToken(code);
+      res.json({ success: true, message: "Dropbox connected successfully!" });
+    } catch (error) {
+      console.error("Token exchange failed:", error);
+      res.status(500).json({ error: "Failed to exchange token" });
+    }
+  });
+
+  // Sync Dropbox - Scan Dropbox for new files
+  app.post("/api/sync", async (_req, res) => {
+    try {
+      const result = await syncDropbox();
+      res.json(result);
+    } catch (error) {
+      console.error("Sync failed:", error);
+      res.status(500).json({ error: "Sync failed", details: (error as Error).message });
+    }
+  });
+
+  // List Tracks with Pagination and Search
+  app.get("/api/tracks", (req, res) => {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 50;
+      const search = (req.query.search as string) || "";
+      const category = (req.query.category as string) || "all";
+      const offset = (page - 1) * limit;
+      const status = (req.query.status as string) || "all";
+
+      let query = "SELECT t.*, c.name as category_name, s.name as subcategory_name FROM tracks t LEFT JOIN categories c ON t.category_id = c.id LEFT JOIN categories s ON t.subcategory_id = s.id WHERE 1=1";
+      let countQuery = "SELECT COUNT(*) as total FROM tracks WHERE 1=1";
+      const params: any[] = [];
+
+      if (search) {
+        const searchCondition = " AND (title LIKE ? OR artist LIKE ? OR album LIKE ? OR source_url LIKE ?)";
+        query += searchCondition;
+        countQuery += searchCondition;
+        const searchParam = `%${search}%`;
+        params.push(searchParam, searchParam, searchParam, searchParam);
+      }
+
+      if (category !== "all") {
+        // Handle legacy string category or new ID
+        if (isNaN(Number(category))) {
+             const categoryCondition = " AND category = ?";
+             query += categoryCondition;
+             countQuery += categoryCondition;
+             params.push(category);
+        } else {
+             const categoryCondition = " AND (category_id = ? OR subcategory_id = ?)";
+             query += categoryCondition;
+             countQuery += categoryCondition;
+             params.push(category, category);
+        }
+      }
+
+      // Status filter: "on_server" = has filepath, "cloud" = no filepath
+      if (status === "on_server") {
+        const statusCondition = " AND filepath IS NOT NULL";
+        query += statusCondition;
+        countQuery += statusCondition;
+      } else if (status === "cloud") {
+        const statusCondition = " AND filepath IS NULL";
+        query += statusCondition;
+        countQuery += statusCondition;
+      }
+
+      query += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+      const queryParams = [...params, limit, offset];
+
+      const tracks = db.prepare(query).all(...queryParams).map((t: any) => ({
+        ...t,
+        url: t.filepath ? `/music/${path.basename(t.filepath)}` : null
+      }));
+      const totalResult = db.prepare(countQuery).get(...params) as { total: number };
+
+      res.json({
+        data: tracks,
+        pagination: {
+          page,
+          limit,
+          total: totalResult.total,
+          totalPages: Math.ceil(totalResult.total / limit)
+        }
+      });
+    } catch (error) {
+      console.error("Error fetching tracks:", error);
+      res.status(500).json({ error: "Failed to fetch tracks" });
+    }
+  });
+
+  // Get Dropbox Preview Link - for playing cloud-only tracks
+  app.get("/api/tracks/:id/preview", async (req, res) => {
+    console.log("[PREVIEW] Request received for track:", req.params.id);
+    const { id } = req.params;
+    try {
+      console.log("[PREVIEW] Querying database...");
+      const track = db.prepare("SELECT source_url, filepath FROM tracks WHERE id = ?").get(id) as any;
+      console.log("[PREVIEW] Database query complete, track:", track ? "found" : "not found");
+      
+      if (!track) {
+        console.log("[PREVIEW] Track not found, returning 404");
+        return res.status(404).json({ error: "Track not found" });
+      }
+      
+      // If file is on server, return local URL
+      if (track.filepath) {
+        const localUrl = `/music/${path.basename(track.filepath)}`;
+        console.log("[PREVIEW] Track has filepath, returning local URL:", localUrl);
+        return res.json({ url: localUrl });
+      }
+      
+      // Otherwise get temporary Dropbox link
+      if (!track.source_url) {
+        console.log("[PREVIEW] Track has no source_url, returning 400");
+        return res.status(400).json({ error: "Track has no source URL" });
+      }
+
+      console.log("[PREVIEW] Getting Dropbox client...");
+      const dbx = await getDropboxClient();
+      console.log("[PREVIEW] Got Dropbox client, getting temporary link for:", track.source_url);
+      const response = await dbx.filesGetTemporaryLink({ path: track.source_url });
+      console.log("[PREVIEW] Got temporary link, returning response");
+      
+      res.json({ url: response.result.link });
+    } catch (error) {
+      console.error("[PREVIEW] Error getting preview link:", error);
+      res.status(500).json({ error: "Failed to get preview link" });
+    }
+  });
+
+  // Download Track (Existing ID) - UPDATED to use Dropbox API
+  app.post("/api/tracks/:id/download", async (req, res) => {
+    const { id } = req.params;
+    
+    try {
+      const track = db.prepare("SELECT * FROM tracks WHERE id = ?").get(id) as any;
+      
+      if (!track) {
+        return res.status(404).json({ error: "Track not found" });
+      }
+
+      if (!track.source_url) {
+        return res.status(400).json({ error: "Track has no source URL" });
+      }
+
+      console.log(`Starting Dropbox download for track ${id}: ${track.source_url}`);
+      
+      // Update status
+      db.prepare("UPDATE tracks SET status = 'downloading' WHERE id = ?").run(id);
+      
+      // Start async download
+      downloadFromDropbox(Number(id), track.source_url);
+
+      res.json({ id, status: "downloading", message: "Download started" });
+    } catch (error) {
+      console.error("Error starting download for existing track:", error);
+      res.status(500).json({ error: "Failed to start download" });
+    }
+  });
+
+  // Helper function to handle Dropbox download
+  async function downloadFromDropbox(trackId: number, dropboxPath: string) {
+    try {
+      const dbx = await getDropboxClient();
+      const filename = `${trackId}_${Date.now()}.mp3`; // Force MP3 extension for consistency
+      const filepath = path.join(musicDir, filename);
+
+      console.log(`Downloading ${dropboxPath} to ${filepath}...`);
+
+      const response = await dbx.filesDownload({ path: dropboxPath });
+      const fileBinary = (response.result as any).fileBinary;
+
+      if (!fileBinary) {
+        throw new Error("No file data received from Dropbox");
+      }
+
+      fs.writeFileSync(filepath, fileBinary);
+      console.log(`Download ${trackId} completed successfully.`);
+      
+      // Calculate duration (mock for now, ideally use ffprobe)
+      // For now, we assume duration is updated later or during playback
+      // But we can set a default cue_out if duration is known
+      
+      db.prepare("UPDATE tracks SET status = 'ready', filepath = ? WHERE id = ?").run(filepath, trackId);
+
+    } catch (error: any) {
+      console.error(`Download ${trackId} failed:`, error);
+      db.prepare("UPDATE tracks SET status = 'error' WHERE id = ?").run(trackId);
+    }
+  }
+
+  // Update Track Metadata
+  app.put("/api/tracks/:id", (req, res) => {
+    const { id } = req.params;
+    const { title, artist, album, category_id, subcategory_id, cue_out } = req.body;
+    
+    try {
+      // Fetch current track to check category change if needed
+      const currentTrack = db.prepare("SELECT * FROM tracks WHERE id = ?").get(id) as any;
+      if (!currentTrack) return res.status(404).json({ error: "Track not found" });
+
+      let newCueOut = cue_out;
+
+      // Auto-calculate cue_out if not provided but category changed or duration exists
+      if (newCueOut === undefined && currentTrack.duration) {
+        // Check if category is music (id 1 or subcategories of 1)
+        // This is a simplification. Ideally we check the category type.
+        // Let's fetch the category type.
+        const catId = category_id || currentTrack.category_id;
+        if (catId) {
+          const category = db.prepare("SELECT type FROM categories WHERE id = ?").get(catId) as any;
+          if (category) {
+            const offset = category.type === 'music' ? 3.0 : 0.5;
+            newCueOut = Math.max(0, currentTrack.duration - offset);
+          }
+        }
+      }
+
+      db.prepare(`
+        UPDATE tracks 
+        SET title = ?, artist = ?, album = ?, category_id = ?, subcategory_id = ?, cue_out = COALESCE(?, cue_out)
+        WHERE id = ?
+      `).run(title, artist, album, category_id, subcategory_id, newCueOut, id);
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error updating track:", error);
+      res.status(500).json({ error: "Failed to update track", details: error.message });
+    }
+  });
+
+  // Delete Track
+  app.delete("/api/tracks/:id", (req, res) => {
+    const { id } = req.params;
+    try {
+      const track = db.prepare("SELECT filepath FROM tracks WHERE id = ?").get(id) as { filepath: string };
+      
+      if (track && track.filepath && fs.existsSync(track.filepath)) {
+        fs.unlinkSync(track.filepath);
+      }
+      
+      db.prepare("DELETE FROM tracks WHERE id = ?").run(id);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting track:", error);
+      res.status(500).json({ error: "Failed to delete track" });
+    }
+  });
+
+  // --- Categories ---
+  app.get("/api/categories", (_req, res) => {
+    try {
+      const categories = db.prepare("SELECT * FROM categories ORDER BY type, parent_id, name").all();
+      res.json(categories);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch categories" });
+    }
+  });
+
+  // --- Clocks ---
+  app.get("/api/clocks", (_req, res) => {
+    try {
+      const clocks = db.prepare("SELECT * FROM clocks").all();
+      res.json(clocks);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch clocks" });
+    }
+  });
+
+  app.post("/api/clocks", (req, res) => {
+    const { name, color } = req.body;
+    try {
+      const result = db.prepare("INSERT INTO clocks (name, color) VALUES (?, ?)").run(name, color);
+      res.json({ id: result.lastInsertRowid, name, color });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to create clock" });
+    }
+  });
+
+  app.get("/api/clocks/:id", (req, res) => {
+    const { id } = req.params;
+    try {
+      const clock = db.prepare("SELECT * FROM clocks WHERE id = ?").get(id);
+      if (!clock) return res.status(404).json({ error: "Clock not found" });
+      
+      const items = db.prepare(`
+        SELECT ci.*, c.name as category_name, c.color as category_color 
+        FROM clock_items ci 
+        JOIN categories c ON ci.category_id = c.id 
+        WHERE ci.clock_id = ? 
+        ORDER BY ci.position
+      `).all(id);
+      
+      res.json({ ...clock, items });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch clock" });
+    }
+  });
+
+  app.post("/api/clocks/:id/items", (req, res) => {
+    const { id } = req.params;
+    const { items } = req.body; // Array of { category_id, duration_target }
+    
+    const insert = db.prepare("INSERT INTO clock_items (clock_id, position, category_id, duration_target) VALUES (?, ?, ?, ?)");
+    const deleteOld = db.prepare("DELETE FROM clock_items WHERE clock_id = ?");
+
+    const transaction = db.transaction((clockId, newItems) => {
+      deleteOld.run(clockId);
+      newItems.forEach((item: any, index: number) => {
+        insert.run(clockId, index, item.category_id, item.duration_target || null);
+      });
+    });
+
+    try {
+      transaction(id, items);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error updating clock items:", error);
+      res.status(500).json({ error: "Failed to update clock items" });
+    }
+  });
+
+  app.delete("/api/clocks/:id", (req, res) => {
+      const { id } = req.params;
+      try {
+          db.prepare("DELETE FROM clocks WHERE id = ?").run(id);
+          res.json({ success: true });
+      } catch (error) {
+          res.status(500).json({ error: "Failed to delete clock" });
+      }
+  });
+
+  // --- Schedule Grid ---
+  app.get("/api/schedule/grid", (_req, res) => {
+    try {
+      const grid = db.prepare(`
+        SELECT sg.*, c.name as clock_name, c.color as clock_color 
+        FROM schedule_grid sg 
+        JOIN clocks c ON sg.clock_id = c.id
+      `).all();
+      res.json(grid);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch schedule grid" });
+    }
+  });
+
+  app.post("/api/schedule/grid", (req, res) => {
+    const { assignments } = req.body; // Array of { day, hour, clock_id }
+    
+    const insert = db.prepare("INSERT OR REPLACE INTO schedule_grid (day_of_week, hour, clock_id) VALUES (?, ?, ?)");
+    
+    const transaction = db.transaction((items) => {
+      items.forEach((item: any) => {
+        insert.run(item.day, item.hour, item.clock_id);
+      });
+    });
+
+    try {
+      transaction(assignments);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to update schedule grid" });
+    }
+  });
+
+  // --- Rules ---
+  app.get("/api/rules", (_req, res) => {
+    try {
+      const rules = db.prepare("SELECT * FROM rules").all();
+      res.json(rules);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch rules" });
+    }
+  });
+
+  app.post("/api/rules", (req, res) => {
+    const { category_id, min_separation, tempo_range_min, tempo_range_max, selection_mode } = req.body;
+    try {
+      const existing = db.prepare("SELECT id FROM rules WHERE category_id = ?").get(category_id);
+      if (existing) {
+        db.prepare("UPDATE rules SET min_separation = ?, tempo_range_min = ?, tempo_range_max = ?, selection_mode = ? WHERE category_id = ?")
+          .run(min_separation, tempo_range_min, tempo_range_max, selection_mode, category_id);
+      } else {
+        db.prepare("INSERT INTO rules (category_id, min_separation, tempo_range_min, tempo_range_max, selection_mode) VALUES (?, ?, ?, ?, ?)")
+          .run(category_id, min_separation, tempo_range_min, tempo_range_max, selection_mode);
+      }
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to save rule" });
+    }
+  });
+
+  // --- Preview Generation ---
+  app.post("/api/schedule/preview", (req, res) => {
+    const { clock_id } = req.body;
+    
+    try {
+      // 1. Get Clock Items
+      const items = db.prepare(`
+        SELECT ci.*, c.name as category_name 
+        FROM clock_items ci 
+        JOIN categories c ON ci.category_id = c.id 
+        WHERE ci.clock_id = ? 
+        ORDER BY ci.position
+      `).all(clock_id) as any[];
+
+      if (items.length === 0) {
+        return res.json({ log: [] });
+      }
+
+      // 2. Generate Log
+      const log: any[] = [];
+      let currentTime = 0; // Relative seconds from start of hour
+
+      for (const item of items) {
+        // Find a track for this category
+        // Simple logic: Random track from category (or subcategory)
+        // TODO: Implement full rules engine (separation, etc.)
+        
+        const track = db.prepare(`
+          SELECT * FROM tracks 
+          WHERE (category_id = ? OR subcategory_id = ?) 
+          AND status = 'ready'
+          ORDER BY RANDOM() 
+          LIMIT 1
+        `).get(item.category_id, item.category_id) as any;
+
+        if (track) {
+          log.push({
+            position: item.position,
+            time_offset: currentTime,
+            track: {
+              title: track.title,
+              artist: track.artist,
+              duration: track.duration,
+              category: item.category_name
+            }
+          });
+          currentTime += (track.duration || 180); // Default 3 mins if unknown
+        } else {
+          log.push({
+            position: item.position,
+            time_offset: currentTime,
+            track: null,
+            message: `No track found for category: ${item.category_name}`
+          });
+        }
+      }
+
+      res.json({ log });
+    } catch (error) {
+      console.error("Preview generation failed:", error);
+      res.status(500).json({ error: "Failed to generate preview" });
+    }
+  });
+
+
+
+  // --- Stream Next Track API for Liquidsoap with Separation Rules ---
+  // Track current clock position in memory (resets on server restart)
+  let currentClockPosition = 0;
+  
+  app.get("/api/stream/next-track", (req, res) => {
+    try {
+      // Get the first clock
+      const clock = db.prepare("SELECT id FROM clocks ORDER BY id LIMIT 1").get() as any;
+      if (!clock) return res.json({ track: null, error: "No clock configured" });
+      
+      // Get clock items
+      const clockItems = db.prepare(`
+        SELECT ci.*, c.name as category_name 
+        FROM clock_items ci 
+        JOIN categories c ON ci.category_id = c.id 
+        WHERE ci.clock_id = ? 
+        ORDER BY ci.position
+      `).all(clock.id) as any[];
+      
+      if (clockItems.length === 0) return res.json({ track: null, error: "No items in clock" });
+      
+      // Get the current clock item based on position (cycle through sequentially)
+      const currentItem = clockItems[currentClockPosition % clockItems.length];
+      
+      // Move to next position for next call
+      currentClockPosition = (currentClockPosition + 1) % clockItems.length;
+      
+      // Get separation rules for this category (default 120 minutes = 2 hours)
+      const rule = db.prepare("SELECT * FROM rules WHERE category_id = ?").get(currentItem.category_id) as any;
+      const minSeparationMinutes = rule?.min_separation || 120;
+      
+      // Get recently played artists (within separation window)
+      const recentArtists = db.prepare(`
+        SELECT DISTINCT artist FROM play_history 
+        WHERE played_at > datetime('now', '-' || ? || ' minutes')
+        AND artist IS NOT NULL AND artist != '' AND artist != 'Unknown Artist'
+      `).all(minSeparationMinutes) as any[];
+      const recentArtistList = recentArtists.map((r: any) => r.artist);
+      
+      // Get recently played track IDs (within separation window)
+      const recentTracks = db.prepare(`
+        SELECT DISTINCT track_id FROM play_history 
+        WHERE played_at > datetime('now', '-' || ? || ' minutes')
+      `).all(minSeparationMinutes) as any[];
+      const recentTrackIds = recentTracks.map((r: any) => r.track_id);
+      
+      // Build query to find eligible tracks
+      let trackQuery = `
+        SELECT * FROM tracks 
+        WHERE (category_id = ? OR subcategory_id = ?) 
+        AND filepath IS NOT NULL
+        AND status = 'ready'
+      `;
+      const params: any[] = [currentItem.category_id, currentItem.category_id];
+      
+      // Exclude recently played tracks
+      if (recentTrackIds.length > 0) {
+        trackQuery += ` AND id NOT IN (${recentTrackIds.join(',')})`;
+      }
+      
+      // Exclude recently played artists
+      if (recentArtistList.length > 0) {
+        const placeholders = recentArtistList.map(() => '?').join(',');
+        trackQuery += ` AND (artist IS NULL OR artist = '' OR artist = 'Unknown Artist' OR artist NOT IN (${placeholders}))`;
+        params.push(...recentArtistList);
+      }
+      
+      trackQuery += " ORDER BY RANDOM() LIMIT 1";
+      
+      let track = db.prepare(trackQuery).get(...params) as any;
+      
+      // Fallback 1: try without artist restriction
+      if (!track) {
+        let fallbackQuery = `
+          SELECT * FROM tracks 
+          WHERE (category_id = ? OR subcategory_id = ?) 
+          AND filepath IS NOT NULL
+          AND status = 'ready'
+        `;
+        if (recentTrackIds.length > 0) {
+          fallbackQuery += ` AND id NOT IN (${recentTrackIds.join(',')})`;
+        }
+        fallbackQuery += " ORDER BY RANDOM() LIMIT 1";
+        track = db.prepare(fallbackQuery).get(currentItem.category_id, currentItem.category_id) as any;
+      }
+      
+      // Fallback 2: Pick the LEAST RECENTLY PLAYED track from this category
+      // This ensures maximum separation even when all tracks have been played
+      if (!track) {
+        track = db.prepare(`
+          SELECT t.* FROM tracks t
+          LEFT JOIN (
+            SELECT track_id, MAX(played_at) as last_played 
+            FROM play_history 
+            GROUP BY track_id
+          ) ph ON t.id = ph.track_id
+          WHERE (t.category_id = ? OR t.subcategory_id = ?)
+          AND t.filepath IS NOT NULL
+          AND t.status = 'ready'
+          ORDER BY ph.last_played ASC NULLS FIRST
+          LIMIT 1
+        `).get(currentItem.category_id, currentItem.category_id) as any;
+      }
+      
+      if (!track) return res.json({ track: null, error: "No tracks available for category: " + currentItem.category_name });
+      
+      // Log to play history
+      db.prepare(`
+        INSERT INTO play_history (track_id, title, artist, category_id, played_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
+      `).run(track.id, track.title, track.artist, track.category_id);
+      
+      const cue_out = track.segue_start || (track.duration && track.duration > 3 ? track.duration - 3 : null);
+      res.json({ track: { ...track, cue_out }, clock_position: currentClockPosition, category: currentItem.category_name });
+    } catch (error) {
+      console.error("Next track API failed:", error);
+      res.status(500).json({ track: null, error: "Failed to get next track" });
+    }
+  });
+
+  // --- Play History API ---
+  app.get("/api/stream/history", (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 100;
+      const offset = parseInt(req.query.offset as string) || 0;
+      const history = db.prepare(`
+        SELECT ph.*, t.album, t.filepath, c.name as category_name
+        FROM play_history ph
+        LEFT JOIN tracks t ON ph.track_id = t.id
+        LEFT JOIN categories c ON ph.category_id = c.id
+        ORDER BY ph.played_at DESC
+        LIMIT ? OFFSET ?
+      `).all(limit, offset);
+      const total = (db.prepare("SELECT COUNT(*) as count FROM play_history").get() as any).count;
+      res.json({ history, total, limit, offset });
+    } catch (error) {
+      console.error("Play history API failed:", error);
+      res.status(500).json({ error: "Failed to get play history" });
+    }
+  });
+
+  // --- Play History CSV Export ---
+  app.get("/api/stream/history/export", (req, res) => {
+    try {
+      const history = db.prepare(`
+        SELECT ph.played_at, ph.title, ph.artist, c.name as category
+        FROM play_history ph
+        LEFT JOIN categories c ON ph.category_id = c.id
+        ORDER BY ph.played_at DESC
+      `).all() as any[];
+      
+      let csv = "Played At,Title,Artist,Category\n";
+      for (const row of history) {
+        const playedAt = row.played_at || '';
+        const title = (row.title || '').replace(/"/g, '""');
+        const artist = (row.artist || '').replace(/"/g, '""');
+        const category = (row.category || '').replace(/"/g, '""');
+        csv += `"${playedAt}","${title}","${artist}","${category}"\n`;
+      }
+      
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="play_history.csv"');
+      res.send(csv);
+    } catch (error) {
+      console.error("Play history export failed:", error);
+      res.status(500).json({ error: "Failed to export play history" });
+    }
+  });
+
+  const httpServer = createServer(app);
+  return httpServer;
+}

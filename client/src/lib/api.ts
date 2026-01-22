@@ -1,7 +1,7 @@
 import axios from 'axios';
 
-// Use the secure domain by default
-const API_URL = import.meta.env.VITE_API_URL || 'https://api.danielmccolly.com/api';
+// Use relative path so Vite proxy handles the connection to localhost:3001
+const API_URL = '/api';
 
 export const api = axios.create({
   baseURL: API_URL,
@@ -10,6 +10,14 @@ export const api = axios.create({
   },
 });
 
+export interface Category {
+  id: number;
+  name: string;
+  parent_id: number | null;
+  type: string;
+  color: string;
+}
+
 export interface Track {
   id: string;
   title: string;
@@ -17,12 +25,22 @@ export interface Track {
   album?: string;
   duration?: number;
   category?: string;
+    status?: string; // Legacy
+  category_id?: number;
+  subcategory_id?: number;
+  category_name?: string;
+  subcategory_name?: string;
+  cue_out?: number; // Segue point in seconds
   mood?: string;
   tags?: string[];
   format?: string;
   isActive: boolean;
   isDownloaded: boolean;
   createdAt: number;
+  status?: string;
+  filepath?: string | null;
+  source_url?: string;
+  url?: string | null;
 }
 
 export interface PaginatedResponse<T> {
@@ -37,17 +55,17 @@ export interface PaginatedResponse<T> {
 export const tracksApi = {
   getAll: async (params?: { 
     search?: string; 
-    category?: string; 
+    category?: string;
+    status?: string; 
     limit?: number; 
+    page?: number;
     offset?: number 
   }) => {
-    // The backend currently returns a raw array of tracks, NOT a paginated object.
-    // We need to handle this to prevent the frontend from breaking.
-    const response = await api.get<Track[] | PaginatedResponse<Track>>('/tracks', { 
+    const response = await api.get<any>('/tracks', { 
       params: { ...params, _t: Date.now() } 
     });
     
-    // Check if response is an array (backend format) or object (expected frontend format)
+    // Handle both old (array) and new (paginated object) formats
     if (Array.isArray(response.data)) {
       return {
         data: response.data,
@@ -59,7 +77,6 @@ export const tracksApi = {
       };
     }
     
-    // If it's already in the expected format
     return response.data;
   },
 
@@ -69,7 +86,7 @@ export const tracksApi = {
   },
 
   update: async (id: string, data: Partial<Track>) => {
-    const response = await api.patch<Track>(`/tracks/${id}`, data);
+    const response = await api.put<Track>(`/tracks/${id}`, data);
     return response.data;
   },
 
@@ -90,4 +107,64 @@ export const tracksApi = {
     const response = await api.get('/tracks/stats');
     return response.data;
   },
+
+  getPreviewUrl: async (id: string): Promise<string> => {
+    const response = await api.get<{ url: string }>(`/tracks/${id}/preview`);
+    return response.data.url;
+  },
+};
+
+export const categoriesApi = {
+  getAll: async () => {
+    const response = await api.get<Category[]>('/categories');
+    return response.data;
+  }
+};
+
+export const clocksApi = {
+  getAll: async () => {
+    const response = await api.get('/clocks');
+    return response.data;
+  },
+  getById: async (id: number) => {
+    const response = await api.get(`/clocks/${id}`);
+    return response.data;
+  },
+  create: async (data: { name: string; color: string }) => {
+    const response = await api.post('/clocks', data);
+    return response.data;
+  },
+  updateItems: async (id: number, items: any[]) => {
+    const response = await api.post(`/clocks/${id}/items`, { items });
+    return response.data;
+  },
+  delete: async (id: number) => {
+    await api.delete(`/clocks/${id}`);
+  }
+};
+
+export const scheduleApi = {
+  getGrid: async () => {
+    const response = await api.get('/schedule/grid');
+    return response.data;
+  },
+  updateGrid: async (assignments: any[]) => {
+    const response = await api.post('/schedule/grid', { assignments });
+    return response.data;
+  },
+  generatePreview: async (clockId: number) => {
+    const response = await api.post('/schedule/preview', { clock_id: clockId });
+    return response.data;
+  }
+};
+
+export const rulesApi = {
+  getAll: async () => {
+    const response = await api.get('/rules');
+    return response.data;
+  },
+  save: async (data: any) => {
+    const response = await api.post('/rules', data);
+    return response.data;
+  }
 };
