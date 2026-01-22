@@ -7,11 +7,6 @@ settings:
 overrides:
   tailwindcss>nanoid: 3.3.7
 
-patchedDependencies:
-  wouter@3.7.1:
-    hash: 4utoqymkqegp7ldbtu4ndzqvum
-    path: patches/wouter@3.7.1.patch
-
 importers:
 
   .:
@@ -165,17 +160,10 @@ importers:
         version: 7.12.1
       wouter:
         specifier: 3.7.1
-        version: 3.7.1(patch_hash=4utoqymkqegp7ldbtu4ndzqvum)(react@19.2.3)
+        version: 3.7.1(react@19.2.3)
       zod:
         specifier: ^4.1.12
         version: 4.3.6
-    optionalDependencies:
-      better-sqlite3:
-        specifier: ^11.8.1
-        version: 11.10.0
-      express:
-        specifier: ^4.21.2
-        version: 4.22.1
     devDependencies:
       '@builder.io/vite-plugin-jsx-loc':
         specifier: ^0.1.1
@@ -243,6 +231,13 @@ importers:
       vitest:
         specifier: ^2.1.4
         version: 2.1.9(@types/node@24.10.9)(lightningcss@1.30.2)
+    optionalDependencies:
+      better-sqlite3:
+        specifier: ^11.8.1
+        version: 11.10.0
+      express:
+        specifier: ^4.21.2
+        version: 4.22.1
 
 packages:
 
@@ -7869,7 +7864,7 @@ snapshots:
       siginfo: 2.0.0
       stackback: 0.0.2
 
-  wouter@3.7.1(patch_hash=4utoqymkqegp7ldbtu4ndzqvum)(react@19.2.3):
+  wouter@3.7.1(react@19.2.3):
     dependencies:
       mitt: 3.0.1
       react: 19.2.3
