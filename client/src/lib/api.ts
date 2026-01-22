@@ -25,12 +25,13 @@ export interface Track {
   album?: string;
   duration?: number;
   category?: string;
-    status?: string; // Legacy
   category_id?: number;
   subcategory_id?: number;
   category_name?: string;
   subcategory_name?: string;
   cue_out?: number; // Segue point in seconds
+  cue_in?: number; // Start point in seconds
+  segue_duration?: number; // Crossfade duration in seconds
   mood?: string;
   tags?: string[];
   format?: string;
@@ -111,6 +112,15 @@ export const tracksApi = {
   getPreviewUrl: async (id: string): Promise<string> => {
     const response = await api.get<{ url: string }>(`/tracks/${id}/preview`);
     return response.data.url;
+  },
+
+  updateCuePoints: async (id: string, cuePoints: { 
+    cueIn: number; 
+    cueOut: number; 
+    segueDuration: number 
+  }) => {
+    const response = await api.patch<Track>(`/tracks/${id}/cuepoints`, cuePoints);
+    return response.data;
   },
 };
 

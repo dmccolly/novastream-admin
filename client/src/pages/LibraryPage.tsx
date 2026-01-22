@@ -25,6 +25,7 @@ import DashboardLayout from "@/components/DashboardLayout";
 import { Virtuoso } from "react-virtuoso";
 import { Badge } from "@/components/ui/badge";
 import { EditTrackDialog } from "@/components/EditTrackDialog";
+import CuePointEditor from "@/components/CuePointEditor";
 
 export default function Library() {
   const [tracks, setTracks] = useState<Track[]>([]);
@@ -38,8 +39,10 @@ export default function Library() {
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [total, setTotal] = useState(0);
-  const [editingTrack, setEditingTrack] = useState<Track | null>(null);
-  const [playingTrackId, setPlayingTrackId] = useState<string | null>(null);
+    const [editingTrack, setEditingTrack] = useState<Track | null>(null);
+    const [cueEditingTrack, setCueEditingTrack] = useState<Track | null>(null);
+    const [showCueEditor, setShowCueEditor] = useState(false);
+    const [playingTrackId, setPlayingTrackId] = useState<string | null>(null);
   const [playingTrack, setPlayingTrack] = useState<Track | null>(null);
   const [loadingPreviewId, setLoadingPreviewId] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -237,14 +240,35 @@ export default function Library() {
     setPlayingTrack(null);
   };
 
-  const formatDuration = (seconds?: number) => {
-    if (!seconds) return "--:--";
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
-  };
+    const formatDuration = (seconds?: number) => {
+      if (!seconds) return "--:--";
+      const mins = Math.floor(seconds / 60);
+      const secs = Math.floor(seconds % 60);
+      return `${mins}:${secs.toString().padStart(2, "0")}`;
+    };
 
-  const Row = (index: number) => {
+    const handleEditCuePoints = (track: Track) => {
+      setCueEditingTrack(track);
+      setShowCueEditor(true);
+    };
+
+    const handleSaveCuePoints = async (cuePoints: { 
+      cueIn: number; 
+      cueOut: number; 
+      segueDuration: number 
+    }) => {
+      if (!cueEditingTrack) return;
+    
+      try {
+        await tracksApi.updateCuePoints(String(cueEditingTrack.id), cuePoints);
+        toast.success("Cue points saved successfully");
+        loadTracks(page, false);
+      } catch (error) {
+        toast.error("Failed to save cue points");
+      }
+    };
+
+    const Row = (index: number) => {
     try {
       const track = tracks[index];
       if (!track) return null;
@@ -511,12 +535,28 @@ export default function Library() {
         </div>
       )}
 
-      <EditTrackDialog 
-        track={editingTrack} 
-        open={!!editingTrack} 
-        onOpenChange={(open) => !open && setEditingTrack(null)}
-        onSuccess={() => loadTracks(page, false)}
-      />
-    </DashboardLayout>
+          <EditTrackDialog 
+            track={editingTrack} 
+            open={!!editingTrack} 
+            onOpenChange={(open) => !open && setEditingTrack(null)}
+            onSuccess={() => loadTracks(page, false)}
+          />
+
+          {cueEditingTrack && (
+            <CuePointEditor
+              open={showCueEditor}
+              onOpenChange={setShowCueEditor}
+              trackId={String(cueEditingTrack.id)}
+              trackTitle={cueEditingTrack.title || "Unknown Track"}
+              audioUrl={cueEditingTrack.filepath ? `/api/tracks/${cueEditingTrack.id}/stream` : ""}
+              initialCuePoints={{
+                cueIn: cueEditingTrack.cue_in || 0,
+                cueOut: cueEditingTrack.cue_out || cueEditingTrack.duration || 0,
+                segueDuration: cueEditingTrack.segue_duration || (cueEditingTrack.category_name === 'Music' ? 3 : 0.5),
+              }}
+              onSave={handleSaveCuePoints}
+            />
+          )}
+        </DashboardLayout>
   );
 }

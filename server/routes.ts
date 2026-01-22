@@ -287,8 +287,31 @@ export function registerRoutes(app: Express): Server {
     }
   });
 
-  // Delete Track
-  app.delete("/api/tracks/:id", (req, res) => {
+    // Update Track Cue Points
+    app.patch("/api/tracks/:id/cuepoints", (req, res) => {
+      const { id } = req.params;
+      const { cueIn, cueOut, segueDuration } = req.body;
+    
+      try {
+        const track = db.prepare("SELECT * FROM tracks WHERE id = ?").get(id) as any;
+        if (!track) return res.status(404).json({ error: "Track not found" });
+
+        db.prepare(`
+          UPDATE tracks 
+          SET cue_in = ?, cue_out = ?, segue_duration = ?
+          WHERE id = ?
+        `).run(cueIn, cueOut, segueDuration, id);
+      
+        const updatedTrack = db.prepare("SELECT * FROM tracks WHERE id = ?").get(id);
+        res.json(updatedTrack);
+      } catch (error: any) {
+        console.error("Error updating cue points:", error);
+        res.status(500).json({ error: "Failed to update cue points", details: error.message });
+      }
+    });
+
+    // Delete Track
+    app.delete("/api/tracks/:id", (req, res) => {
     const { id } = req.params;
     try {
       const track = db.prepare("SELECT filepath FROM tracks WHERE id = ?").get(id) as { filepath: string };

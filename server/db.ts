@@ -106,10 +106,20 @@ export function initDb() {
     db.exec("ALTER TABLE tracks ADD COLUMN category_id INTEGER REFERENCES categories(id)");
   }
 
-  if (!columns.some((col: any) => col.name === "subcategory_id")) {
-    console.log("Migrating: Adding subcategory_id column to tracks table...");
-    db.exec("ALTER TABLE tracks ADD COLUMN subcategory_id INTEGER REFERENCES categories(id)");
-  }
+    if (!columns.some((col: any) => col.name === "subcategory_id")) {
+      console.log("Migrating: Adding subcategory_id column to tracks table...");
+      db.exec("ALTER TABLE tracks ADD COLUMN subcategory_id INTEGER REFERENCES categories(id)");
+    }
+
+    if (!columns.some((col: any) => col.name === "cue_in")) {
+      console.log("Migrating: Adding cue_in column to tracks table...");
+      db.exec("ALTER TABLE tracks ADD COLUMN cue_in REAL DEFAULT 0");
+    }
+
+    if (!columns.some((col: any) => col.name === "segue_duration")) {
+      console.log("Migrating: Adding segue_duration column to tracks table...");
+      db.exec("ALTER TABLE tracks ADD COLUMN segue_duration REAL DEFAULT 3.0");
+    }
 
   // Seed default categories if empty
   const count = db.prepare("SELECT COUNT(*) as count FROM categories").get();
