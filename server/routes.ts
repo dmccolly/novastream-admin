@@ -560,6 +560,14 @@ export function registerRoutes(app: Express): Server {
       `).all(minSeparationMinutes) as any[];
       const recentTrackIds = recentTracks.map((r: any) => r.track_id);
       
+      // Get recently played titles (within separation window) - handles duplicate tracks with different IDs
+      const recentTitles = db.prepare(`
+        SELECT DISTINCT title FROM play_history 
+        WHERE played_at > datetime('now', '-' || ? || ' minutes')
+        AND title IS NOT NULL AND title != ''
+      `).all(minSeparationMinutes) as any[];
+      const recentTitleList = recentTitles.map((r: any) => r.title);
+      
       // Build query to find eligible tracks
       let trackQuery = `
         SELECT * FROM tracks 
@@ -569,9 +577,16 @@ export function registerRoutes(app: Express): Server {
       `;
       const params: any[] = [currentItem.category_id, currentItem.category_id];
       
-      // Exclude recently played tracks
+      // Exclude recently played tracks by ID
       if (recentTrackIds.length > 0) {
         trackQuery += ` AND id NOT IN (${recentTrackIds.join(',')})`;
+      }
+      
+      // Exclude recently played tracks by title (handles duplicates with different IDs)
+      if (recentTitleList.length > 0) {
+        const titlePlaceholders = recentTitleList.map(() => '?').join(',');
+        trackQuery += ` AND (title IS NULL OR title NOT IN (${titlePlaceholders}))`;
+        params.push(...recentTitleList);
       }
       
       // Exclude recently played artists
@@ -585,7 +600,7 @@ export function registerRoutes(app: Express): Server {
       
       let track = db.prepare(trackQuery).get(...params) as any;
       
-      // Fallback 1: try without artist restriction
+      // Fallback 1: try without artist restriction but still respect title separation
       if (!track) {
         let fallbackQuery = `
           SELECT * FROM tracks 
@@ -593,11 +608,18 @@ export function registerRoutes(app: Express): Server {
           AND filepath IS NOT NULL
           AND status = 'ready'
         `;
+        const fallbackParams: any[] = [currentItem.category_id, currentItem.category_id];
         if (recentTrackIds.length > 0) {
           fallbackQuery += ` AND id NOT IN (${recentTrackIds.join(',')})`;
         }
+        // Still exclude recently played titles
+        if (recentTitleList.length > 0) {
+          const titlePlaceholders = recentTitleList.map(() => '?').join(',');
+          fallbackQuery += ` AND (title IS NULL OR title NOT IN (${titlePlaceholders}))`;
+          fallbackParams.push(...recentTitleList);
+        }
         fallbackQuery += " ORDER BY RANDOM() LIMIT 1";
-        track = db.prepare(fallbackQuery).get(currentItem.category_id, currentItem.category_id) as any;
+        track = db.prepare(fallbackQuery).get(...fallbackParams) as any;
       }
       
       // Fallback 2: Pick the LEAST RECENTLY PLAYED track from this category
@@ -626,8 +648,17 @@ export function registerRoutes(app: Express): Server {
         VALUES (?, ?, ?, ?, datetime('now'))
       `).run(track.id, track.title, track.artist, track.category_id);
       
-      const cue_out = track.segue_start || (track.duration && track.duration > 3 ? track.duration - 3 : null);
-      res.json({ track: { ...track, cue_out }, clock_position: currentClockPosition, category: currentItem.category_name });
+      // Calculate cue_out: use existing value, or calculate based on category type
+      // Music gets 3 second segue (start next track 3 seconds before end)
+      // Everything else gets 0.5 second segue
+      let calculatedCueOut = track.cue_out;
+      if (!calculatedCueOut && track.duration && track.duration > 3) {
+        // Get category type to determine segue offset
+        const category = db.prepare("SELECT type FROM categories WHERE id = ?").get(track.category_id) as any;
+        const segueOffset = (category?.type === 'music') ? 3.0 : 0.5;
+        calculatedCueOut = track.duration - segueOffset;
+      }
+      res.json({ track: { ...track, cue_out: calculatedCueOut }, clock_position: currentClockPosition, category: currentItem.category_name });
     } catch (error) {
       console.error("Next track API failed:", error);
       res.status(500).json({ track: null, error: "Failed to get next track" });
