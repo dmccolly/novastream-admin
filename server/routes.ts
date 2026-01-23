@@ -328,6 +328,12 @@ export function registerRoutes(app: Express): Server {
         const fileSize = stat.size;
         const range = req.headers.range;
 
+        // Set CORS headers for WaveSurfer.js WebAudio backend
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Range');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length');
+
         if (range) {
           const parts = range.replace(/bytes=/, "").split("-");
           const start = parseInt(parts[0], 10);

@@ -38,7 +38,7 @@ export default function CuePointEditor({
   initialCuePoints,
   onSave,
 }: CuePointEditorProps) {
-  const waveformRef = useRef<HTMLDivElement>(null);
+  const [waveformContainer, setWaveformContainer] = useState<HTMLDivElement | null>(null);
   const wavesurfer = useRef<WaveSurfer | null>(null);
   const regionsPlugin = useRef<RegionsPlugin | null>(null);
 
@@ -51,13 +51,26 @@ export default function CuePointEditor({
   const [cueOut, setCueOut] = useState(initialCuePoints?.cueOut || 0);
   const [segueDuration, setSegueDuration] = useState(initialCuePoints?.segueDuration || 3);
 
-  // Initialize WaveSurfer
+  // Callback ref to capture the container element when it mounts
+  const waveformRef = (node: HTMLDivElement | null) => {
+    if (node !== null) {
+      setWaveformContainer(node);
+    }
+  };
+
+  // Initialize WaveSurfer when container is available
   useEffect(() => {
-    if (!open || !waveformRef.current) return;
+    if (!open || !waveformContainer || !audioUrl) {
+      console.log("CuePointEditor: Waiting for conditions - open:", open, "container:", !!waveformContainer, "audioUrl:", audioUrl);
+      return;
+    }
+    
+    console.log("CuePointEditor: All conditions met, creating WaveSurfer...");
+    console.log("CuePointEditor: audioUrl =", audioUrl);
 
     // Create WaveSurfer instance
     wavesurfer.current = WaveSurfer.create({
-      container: waveformRef.current,
+      container: waveformContainer,
       waveColor: "rgb(147, 51, 234)",
       progressColor: "rgb(168, 85, 247)",
       cursorColor: "rgb(255, 255, 255)",
@@ -65,14 +78,15 @@ export default function CuePointEditor({
       barGap: 1,
       height: 128,
       normalize: true,
-      backend: "WebAudio",
     });
+    
+    console.log("CuePointEditor: WaveSurfer created, loading audio...");
+    
+    // Load audio after creation
+    wavesurfer.current.load(audioUrl);
 
     // Add regions plugin for cue point markers
     regionsPlugin.current = wavesurfer.current.registerPlugin(RegionsPlugin.create());
-
-    // Load audio
-    wavesurfer.current.load(audioUrl);
 
     // Event listeners
     wavesurfer.current.on("ready", () => {
@@ -94,11 +108,15 @@ export default function CuePointEditor({
 
     wavesurfer.current.on("play", () => setIsPlaying(true));
     wavesurfer.current.on("pause", () => setIsPlaying(false));
+    wavesurfer.current.on("error", (error) => {
+      console.error("WaveSurfer error:", error);
+      toast.error("Failed to load audio waveform");
+    });
 
     return () => {
       wavesurfer.current?.destroy();
     };
-  }, [open, audioUrl]);
+  }, [open, audioUrl, waveformContainer]);
 
   // Create visual regions for cue points
   const createRegions = () => {
@@ -182,7 +200,7 @@ export default function CuePointEditor({
         <div className="space-y-6">
           {/* Waveform Display */}
           <div className="bg-background/50 rounded-lg p-4 border border-border">
-            <div ref={waveformRef} className="w-full" />
+            <div ref={waveformRef} className="w-full min-h-[128px]" />
             
             {/* Playback Controls */}
             <div className="flex items-center justify-between mt-4">
