@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Dialog,
   DialogContent,
@@ -9,11 +9,9 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Slider } from "@/components/ui/slider";
 import { Play, Pause, SkipBack, SkipForward, Save } from "lucide-react";
 import { toast } from "sonner";
 import WaveSurfer from "wavesurfer.js";
-import RegionsPlugin from "wavesurfer.js/dist/plugins/regions.js";
 
 interface CuePointEditorProps {
   open: boolean;
@@ -40,10 +38,7 @@ export default function CuePointEditor({
 }: CuePointEditorProps) {
   const [waveformContainer, setWaveformContainer] = useState<HTMLDivElement | null>(null);
   const wavesurfer = useRef<WaveSurfer | null>(null);
-  const regionsPlugin = useRef<RegionsPlugin | null>(null);
-  const cueInRegion = useRef<any>(null);
-  const cueOutRegion = useRef<any>(null);
-  const fadeRegion = useRef<any>(null);
+  const waveformWrapperRef = useRef<HTMLDivElement | null>(null);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
@@ -53,6 +48,9 @@ export default function CuePointEditor({
   const [cueIn, setCueIn] = useState(initialCuePoints?.cueIn || 0);
   const [cueOut, setCueOut] = useState(initialCuePoints?.cueOut || 0);
   const [segueDuration, setSegueDuration] = useState(initialCuePoints?.segueDuration || 3);
+
+  // Dragging state
+  const [draggingMarker, setDraggingMarker] = useState<'cueIn' | 'fadeStart' | 'cueOut' | null>(null);
 
   // Callback ref to capture the container element when it mounts
   const waveformRef = (node: HTMLDivElement | null) => {
@@ -64,12 +62,8 @@ export default function CuePointEditor({
   // Initialize WaveSurfer when container is available
   useEffect(() => {
     if (!open || !waveformContainer || !audioUrl) {
-      console.log("CuePointEditor: Waiting for conditions - open:", open, "container:", !!waveformContainer, "audioUrl:", audioUrl);
       return;
     }
-    
-    console.log("CuePointEditor: All conditions met, creating WaveSurfer...");
-    console.log("CuePointEditor: audioUrl =", audioUrl);
 
     // Create WaveSurfer instance
     wavesurfer.current = WaveSurfer.create({
@@ -82,14 +76,9 @@ export default function CuePointEditor({
       height: 128,
       normalize: true,
     });
-    
-    console.log("CuePointEditor: WaveSurfer created, loading audio...");
-    
+
     // Load audio after creation
     wavesurfer.current.load(audioUrl);
-
-    // Add regions plugin for cue point markers
-    regionsPlugin.current = wavesurfer.current.registerPlugin(RegionsPlugin.create());
 
     // Event listeners
     wavesurfer.current.on("ready", () => {
@@ -100,9 +89,6 @@ export default function CuePointEditor({
       if (!initialCuePoints?.cueOut) {
         setCueOut(dur);
       }
-
-      // Create initial regions
-      createRegions();
     });
 
     wavesurfer.current.on("timeupdate", (time) => {
@@ -121,70 +107,57 @@ export default function CuePointEditor({
     };
   }, [open, audioUrl, waveformContainer]);
 
-  // Create visual regions for cue points
-  const createRegions = useCallback(() => {
-    if (!regionsPlugin.current || !wavesurfer.current) return;
+  // Convert time to pixel position
+  const timeToPixel = (time: number): number => {
+    if (!waveformWrapperRef.current || duration === 0) return 0;
+    const width = waveformWrapperRef.current.clientWidth;
+    return (time / duration) * width;
+  };
 
-    // Clear existing regions
-    regionsPlugin.current.clearRegions();
+  // Convert pixel position to time
+  const pixelToTime = (pixel: number): number => {
+    if (!waveformWrapperRef.current || duration === 0) return 0;
+    const width = waveformWrapperRef.current.clientWidth;
+    return (pixel / width) * duration;
+  };
 
-    const dur = wavesurfer.current.getDuration();
-    if (!dur || dur === 0) return;
+  // Handle marker drag start
+  const handleMarkerMouseDown = (marker: 'cueIn' | 'fadeStart' | 'cueOut') => (e: React.MouseEvent) => {
+    e.preventDefault();
+    setDraggingMarker(marker);
+  };
 
-    // Cue In marker (green) - File Start
-    cueInRegion.current = regionsPlugin.current.addRegion({
-      start: cueIn,
-      end: cueIn + 0.5,
-      color: "rgba(34, 197, 94, 0.5)",
-      drag: true,
-      resize: false,
-      content: "START",
-    });
-
-    // Cue Out marker (red) - File End
-    cueOutRegion.current = regionsPlugin.current.addRegion({
-      start: cueOut - 0.25,
-      end: cueOut + 0.25,
-      color: "rgba(239, 68, 68, 0.5)",
-      drag: true,
-      resize: false,
-      content: "END",
-    });
-
-    // Segue/Fade region (yellow) - Fade Duration
-    const segueStart = Math.max(0, cueOut - segueDuration);
-    fadeRegion.current = regionsPlugin.current.addRegion({
-      start: segueStart,
-      end: cueOut,
-      color: "rgba(234, 179, 8, 0.3)",
-      drag: false,
-      resize: true,
-      content: "FADE",
-    });
-
-    // Add event listeners for region updates
-    cueInRegion.current.on('update-end', () => {
-      const newStart = cueInRegion.current.start;
-      setCueIn(Math.max(0, Math.min(newStart, cueOut - 1)));
-    });
-
-    cueOutRegion.current.on('update-end', () => {
-      const newEnd = cueOutRegion.current.end;
-      setCueOut(Math.max(cueIn + 1, Math.min(newEnd, dur)));
-    });
-
-    fadeRegion.current.on('update-end', () => {
-      const newDuration = fadeRegion.current.end - fadeRegion.current.start;
-      setSegueDuration(Math.max(0, Math.min(newDuration, 10)));
-    });
-  }, [cueIn, cueOut, segueDuration]);
-
-  // Update regions when cue points change
+  // Handle mouse move for dragging
   useEffect(() => {
-    if (regionsPlugin.current && duration > 0) {
-      createRegions();
-    }
-  }, [createRegions, duration]);
+    if (!draggingMarker || !waveformWrapperRef.current) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const rect = waveformWrapperRef.current!.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const time = Math.max(0, Math.min(duration, pixelToTime(x)));
+
+      if (draggingMarker === 'cueIn') {
+        setCueIn(Math.min(time, cueOut - 0.5));
+      } else if (draggingMarker === 'fadeStart') {
+        const newFadeDuration = cueOut - time;
+        setSegueDuration(Math.max(0, Math.min(10, newFadeDuration)));
+      } else if (draggingMarker === 'cueOut') {
+        setCueOut(Math.max(time, cueIn + 0.5));
+      }
+    };
+
+    const handleMouseUp = () => {
+      setDraggingMarker(null);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [draggingMarker, duration, cueIn, cueOut]);
 
   const togglePlayPause = () => {
     wavesurfer.current?.playPause();
@@ -195,7 +168,7 @@ export default function CuePointEditor({
   };
 
   const seekToCueOut = () => {
-    wavesurfer.current?.setTime(Math.max(0, cueOut - 5)); // 5 seconds before cue out
+    wavesurfer.current?.setTime(Math.max(0, cueOut - 5));
   };
 
   const handleSave = () => {
@@ -211,6 +184,8 @@ export default function CuePointEditor({
     return `${mins}:${secs.toString().padStart(2, "0")}.${ms.toString().padStart(2, "0")}`;
   };
 
+  const fadeStart = cueOut - segueDuration;
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
@@ -221,18 +196,73 @@ export default function CuePointEditor({
         </DialogHeader>
 
         <div className="space-y-6">
-          {/* Waveform Display */}
+          {/* Waveform Display with Custom Markers */}
           <div className="bg-background/50 rounded-lg p-4 border border-border">
-            <div ref={waveformRef} className="w-full min-h-[128px]" />
+            <div className="relative" ref={waveformWrapperRef}>
+              <div ref={waveformRef} className="w-full min-h-[128px]" />
+              
+              {/* Custom Marker Overlays */}
+              {duration > 0 && (
+                <>
+                  {/* Fade Region (Yellow shaded area) */}
+                  <div
+                    className="absolute top-0 bottom-0 bg-yellow-500/20 border-l-2 border-r-2 border-yellow-500 pointer-events-none"
+                    style={{
+                      left: `${timeToPixel(fadeStart)}px`,
+                      width: `${timeToPixel(cueOut) - timeToPixel(fadeStart)}px`,
+                    }}
+                  />
+
+                  {/* Cue In Marker (Green) */}
+                  <div
+                    className="absolute top-0 bottom-0 w-0.5 bg-green-500 cursor-ew-resize"
+                    style={{ left: `${timeToPixel(cueIn)}px` }}
+                  >
+                    <div
+                      className="absolute -top-8 left-1/2 -translate-x-1/2 bg-green-500 text-white px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap cursor-grab active:cursor-grabbing shadow-lg"
+                      onMouseDown={handleMarkerMouseDown('cueIn')}
+                    >
+                      ▼ PLAY START
+                    </div>
+                  </div>
+
+                  {/* Fade Start Marker (Yellow) */}
+                  <div
+                    className="absolute top-0 bottom-0 w-0.5 bg-yellow-500 cursor-ew-resize"
+                    style={{ left: `${timeToPixel(fadeStart)}px` }}
+                  >
+                    <div
+                      className="absolute -top-8 left-1/2 -translate-x-1/2 bg-yellow-500 text-black px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap cursor-grab active:cursor-grabbing shadow-lg"
+                      onMouseDown={handleMarkerMouseDown('fadeStart')}
+                    >
+                      ▼ FADE START
+                    </div>
+                  </div>
+
+                  {/* Cue Out Marker (Red) */}
+                  <div
+                    className="absolute top-0 bottom-0 w-0.5 bg-red-500 cursor-ew-resize"
+                    style={{ left: `${timeToPixel(cueOut)}px` }}
+                  >
+                    <div
+                      className="absolute -top-8 left-1/2 -translate-x-1/2 bg-red-500 text-white px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap cursor-grab active:cursor-grabbing shadow-lg"
+                      onMouseDown={handleMarkerMouseDown('cueOut')}
+                    >
+                      ▼ PLAY END
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
             
             {/* Playback Controls */}
-            <div className="flex items-center justify-between mt-4">
+            <div className="flex items-center justify-between mt-12">
               <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
                   size="icon"
                   onClick={seekToCueIn}
-                  title="Jump to Cue In"
+                  title="Jump to Play Start"
                 >
                   <SkipBack className="h-4 w-4" />
                 </Button>
@@ -251,7 +281,7 @@ export default function CuePointEditor({
                   variant="outline"
                   size="icon"
                   onClick={seekToCueOut}
-                  title="Jump to Cue Out (5s before)"
+                  title="Jump to Play End (5s before)"
                 >
                   <SkipForward className="h-4 w-4" />
                 </Button>
@@ -264,87 +294,66 @@ export default function CuePointEditor({
 
           {/* Cue Point Controls */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            {/* Cue In */}
+            {/* Play Start */}
             <div className="space-y-2">
-              <Label className="text-green-500 font-display">CUE IN (Start Point)</Label>
+              <Label className="text-green-500 font-display text-base">PLAY START</Label>
               <Input
                 type="number"
                 step="0.1"
-                value={cueIn.toFixed(1)}
-                onChange={(e) => setCueIn(parseFloat(e.target.value) || 0)}
-                className="font-mono"
+                value={cueIn.toFixed(2)}
+                onChange={(e) => setCueIn(Math.max(0, Math.min(parseFloat(e.target.value) || 0, cueOut - 0.5)))}
+                className="font-mono text-lg"
               />
-              <Slider
-                value={[cueIn]}
-                onValueChange={([value]) => setCueIn(value)}
-                max={duration}
-                step={0.1}
-                className="mt-2"
-              />
-              <p className="text-xs text-muted-foreground font-mono">
-                {formatTime(cueIn)}
+              <p className="text-sm text-muted-foreground">
+                Track begins playing at {formatTime(cueIn)}
               </p>
             </div>
 
-            {/* Cue Out */}
+            {/* Fade Duration */}
             <div className="space-y-2">
-              <Label className="text-red-500 font-display">CUE OUT (End Point)</Label>
-              <Input
-                type="number"
-                step="0.1"
-                value={cueOut.toFixed(1)}
-                onChange={(e) => setCueOut(parseFloat(e.target.value) || duration)}
-                className="font-mono"
-              />
-              <Slider
-                value={[cueOut]}
-                onValueChange={([value]) => setCueOut(value)}
-                max={duration}
-                step={0.1}
-                className="mt-2"
-              />
-              <p className="text-xs text-muted-foreground font-mono">
-                {formatTime(cueOut)}
-              </p>
-            </div>
-
-            {/* Segue Duration */}
-            <div className="space-y-2">
-              <Label className="text-yellow-500 font-display">SEGUE (Fade Duration)</Label>
+              <Label className="text-yellow-500 font-display text-base">FADE DURATION</Label>
               <Input
                 type="number"
                 step="0.5"
                 value={segueDuration.toFixed(1)}
-                onChange={(e) => setSegueDuration(parseFloat(e.target.value) || 0)}
-                className="font-mono"
+                onChange={(e) => setSegueDuration(Math.max(0, Math.min(parseFloat(e.target.value) || 0, 10)))}
+                className="font-mono text-lg"
               />
-              <Slider
-                value={[segueDuration]}
-                onValueChange={([value]) => setSegueDuration(value)}
-                max={10}
-                step={0.5}
-                className="mt-2"
+              <p className="text-sm text-muted-foreground">
+                {segueDuration.toFixed(1)}s crossfade before end
+              </p>
+            </div>
+
+            {/* Play End */}
+            <div className="space-y-2">
+              <Label className="text-red-500 font-display text-base">PLAY END</Label>
+              <Input
+                type="number"
+                step="0.1"
+                value={cueOut.toFixed(2)}
+                onChange={(e) => setCueOut(Math.max(cueIn + 0.5, Math.min(parseFloat(e.target.value) || duration, duration)))}
+                className="font-mono text-lg"
               />
-              <p className="text-xs text-muted-foreground font-mono">
-                {segueDuration.toFixed(1)}s fade
+              <p className="text-sm text-muted-foreground">
+                Track stops playing at {formatTime(cueOut)}
               </p>
             </div>
           </div>
 
           {/* Info Display */}
           <div className="bg-primary/5 border border-primary/20 rounded-lg p-4">
-            <div className="grid grid-cols-3 gap-4 text-sm font-mono">
-              <div>
-                <span className="text-muted-foreground">Playback Start:</span>
-                <div className="text-green-500 font-bold">{formatTime(cueIn)}</div>
-              </div>
-              <div>
-                <span className="text-muted-foreground">Playback End:</span>
-                <div className="text-red-500 font-bold">{formatTime(cueOut)}</div>
-              </div>
+            <div className="grid grid-cols-3 gap-4 text-sm">
               <div>
                 <span className="text-muted-foreground">Effective Duration:</span>
-                <div className="text-primary font-bold">{formatTime(cueOut - cueIn)}</div>
+                <div className="text-primary font-bold font-mono text-lg">{formatTime(cueOut - cueIn)}</div>
+              </div>
+              <div>
+                <span className="text-muted-foreground">Fade Starts At:</span>
+                <div className="text-yellow-500 font-bold font-mono text-lg">{formatTime(fadeStart)}</div>
+              </div>
+              <div>
+                <span className="text-muted-foreground">Next Track Cue:</span>
+                <div className="text-blue-500 font-bold font-mono text-lg">{formatTime(fadeStart)}</div>
               </div>
             </div>
           </div>
