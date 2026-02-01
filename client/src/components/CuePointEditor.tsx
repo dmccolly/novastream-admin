@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Dialog,
   DialogContent,
@@ -119,13 +119,14 @@ export default function CuePointEditor({
   }, [open, audioUrl, waveformContainer]);
 
   // Create visual regions for cue points
-  const createRegions = () => {
+  const createRegions = useCallback(() => {
     if (!regionsPlugin.current || !wavesurfer.current) return;
 
     // Clear existing regions
     regionsPlugin.current.clearRegions();
 
     const dur = wavesurfer.current.getDuration();
+    if (!dur || dur === 0) return;
 
     // Cue In marker (green)
     regionsPlugin.current.addRegion({
@@ -154,14 +155,14 @@ export default function CuePointEditor({
       drag: false,
       resize: false,
     });
-  };
+  }, [cueIn, cueOut, segueDuration]);
 
   // Update regions when cue points change
   useEffect(() => {
     if (regionsPlugin.current && duration > 0) {
       createRegions();
     }
-  }, [cueIn, cueOut, segueDuration, duration]);
+  }, [createRegions, duration]);
 
   const togglePlayPause = () => {
     wavesurfer.current?.playPause();
