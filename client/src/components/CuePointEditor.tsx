@@ -41,6 +41,9 @@ export default function CuePointEditor({
   const [waveformContainer, setWaveformContainer] = useState<HTMLDivElement | null>(null);
   const wavesurfer = useRef<WaveSurfer | null>(null);
   const regionsPlugin = useRef<RegionsPlugin | null>(null);
+  const cueInRegion = useRef<any>(null);
+  const cueOutRegion = useRef<any>(null);
+  const fadeRegion = useRef<any>(null);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
@@ -128,32 +131,51 @@ export default function CuePointEditor({
     const dur = wavesurfer.current.getDuration();
     if (!dur || dur === 0) return;
 
-    // Cue In marker (green)
-    regionsPlugin.current.addRegion({
+    // Cue In marker (green) - File Start
+    cueInRegion.current = regionsPlugin.current.addRegion({
       start: cueIn,
-      end: cueIn + 0.1,
-      color: "rgba(34, 197, 94, 0.3)",
+      end: cueIn + 0.5,
+      color: "rgba(34, 197, 94, 0.5)",
       drag: true,
       resize: false,
+      content: "START",
     });
 
-    // Cue Out marker (red)
-    regionsPlugin.current.addRegion({
-      start: cueOut,
-      end: cueOut + 0.1,
-      color: "rgba(239, 68, 68, 0.3)",
+    // Cue Out marker (red) - File End
+    cueOutRegion.current = regionsPlugin.current.addRegion({
+      start: cueOut - 0.25,
+      end: cueOut + 0.25,
+      color: "rgba(239, 68, 68, 0.5)",
       drag: true,
       resize: false,
+      content: "END",
     });
 
-    // Segue/Fade region (yellow)
+    // Segue/Fade region (yellow) - Fade Duration
     const segueStart = Math.max(0, cueOut - segueDuration);
-    regionsPlugin.current.addRegion({
+    fadeRegion.current = regionsPlugin.current.addRegion({
       start: segueStart,
       end: cueOut,
-      color: "rgba(234, 179, 8, 0.2)",
+      color: "rgba(234, 179, 8, 0.3)",
       drag: false,
-      resize: false,
+      resize: true,
+      content: "FADE",
+    });
+
+    // Add event listeners for region updates
+    cueInRegion.current.on('update-end', () => {
+      const newStart = cueInRegion.current.start;
+      setCueIn(Math.max(0, Math.min(newStart, cueOut - 1)));
+    });
+
+    cueOutRegion.current.on('update-end', () => {
+      const newEnd = cueOutRegion.current.end;
+      setCueOut(Math.max(cueIn + 1, Math.min(newEnd, dur)));
+    });
+
+    fadeRegion.current.on('update-end', () => {
+      const newDuration = fadeRegion.current.end - fadeRegion.current.start;
+      setSegueDuration(Math.max(0, Math.min(newDuration, 10)));
     });
   }, [cueIn, cueOut, segueDuration]);
 
