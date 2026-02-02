@@ -362,17 +362,22 @@ export function registerRoutes(app: Express): Server {
       }
     });
 
-    // Delete Track
+    // Delete Track - Only removes file from server, keeps track in database
     app.delete("/api/tracks/:id", (req, res) => {
     const { id } = req.params;
     try {
       const track = db.prepare("SELECT filepath FROM tracks WHERE id = ?").get(id) as { filepath: string };
       
+      // Delete physical file from server if it exists
       if (track && track.filepath && fs.existsSync(track.filepath)) {
         fs.unlinkSync(track.filepath);
+        console.log(`Deleted file from server: ${track.filepath}`);
       }
       
-      db.prepare("DELETE FROM tracks WHERE id = ?").run(id);
+      // Update database to clear filepath and status, but keep the track record
+      db.prepare("UPDATE tracks SET filepath = NULL, status = NULL WHERE id = ?").run(id);
+      console.log(`Track ${id} removed from server, remains in database as cloud-only`);
+      
       res.json({ success: true });
     } catch (error) {
       console.error("Error deleting track:", error);

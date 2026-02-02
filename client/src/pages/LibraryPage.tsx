@@ -161,9 +161,9 @@ export default function Library() {
   const handleDelete = async (id: string) => {
     try {
       await tracksApi.delete(id);
-      toast.success("Track deleted");
-      // Fix: Convert t.id to string for comparison
-      setTracks(prev => prev.filter(t => String(t.id) !== id));
+      toast.success("Track removed from server");
+      // Reload tracks to show updated status (track will now show as "Cloud Only")
+      loadTracks(page, false);
     } catch (error) {
       toast.error("Failed to delete track");
     }
