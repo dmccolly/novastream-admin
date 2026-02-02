@@ -202,10 +202,13 @@ export default function Library() {
         audioRef.current.pause();
       }
       
-      let url = track.url;
+      let url: string | undefined;
       
-      // If no local URL, fetch preview URL from Dropbox
-      if (!url) {
+      // If track is on server, use streaming endpoint
+      if (track.filepath) {
+        url = `/api/tracks/${trackId}/stream`;
+      } else {
+        // Otherwise, fetch preview URL from Dropbox
         try {
           setLoadingPreviewId(trackId);
           url = await tracksApi.getPreviewUrl(trackId);
