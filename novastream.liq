@@ -37,10 +37,14 @@ def get_next_track() =
       ann_parts := list.append(ann_parts(), ["liq_cue_out=\"" ^ cue_out_str ^ "\""])
     end
     
-    # Add segue duration for crossfade
+    # CRITICAL FIX: Use liq_fade_out and liq_fade_in instead of liq_segue_duration
+    # liq_fade_out = segue_duration (how long to fade out the outgoing track)
+    # liq_fade_in = 0 (tracks start COLD at full volume)
     if segue_str != "" and segue_str != "null" then
-      ann_parts := list.append(ann_parts(), ["liq_segue_duration=\"" ^ segue_str ^ "\""])
+      ann_parts := list.append(ann_parts(), ["liq_fade_out=\"" ^ segue_str ^ "\""])
     end
+    # Always set fade_in to 0 - tracks start cold
+    ann_parts := list.append(ann_parts(), ["liq_fade_in=\"0\""])
     
     # Build URI with annotations
     if list.length(ann_parts()) > 0 then
@@ -61,11 +65,12 @@ end
 # Create dynamic source
 radio = request.dynamic(id="main", get_next_track)
 
-# Use built-in crossfade with:
-# - duration: how long to crossfade (3 seconds default)
-# - fade_out: fade out the old track (3 seconds)
-# - fade_in: NO FADE IN (0 seconds) - tracks start COLD at full volume
-radio = crossfade(duration=3., fade_out=3., fade_in=0., radio)
+# Cue points are automatically respected by the request system via annotations
+# No need for cue_cut operator in this version
+
+# Apply crossfade - it will automatically use liq_fade_in and liq_fade_out from each track's metadata
+# No need to specify duration, fade_in, fade_out here - they come from metadata now!
+radio = crossfade(radio)
 
 # Audio processing for consistent volume
 radio = compress(ratio=4., threshold=-20., attack=10., release=100., radio)
