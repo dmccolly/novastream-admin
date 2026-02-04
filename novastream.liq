@@ -61,9 +61,11 @@ end
 # Create dynamic source
 radio = request.dynamic(id="main", get_next_track)
 
-# Use built-in crossfade with sine curves for smooth transitions
-# This creates the "trail out" effect on the ending track
-radio = crossfade(duration=3., fade_out=3., fade_in=3., radio)
+# Use built-in crossfade with:
+# - duration: how long to crossfade (3 seconds default)
+# - fade_out: fade out the old track (3 seconds)
+# - fade_in: NO FADE IN (0 seconds) - tracks start COLD at full volume
+radio = crossfade(duration=3., fade_out=3., fade_in=0., radio)
 
 # Audio processing for consistent volume
 radio = compress(ratio=4., threshold=-20., attack=10., release=100., radio)
