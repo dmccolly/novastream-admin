@@ -184,4 +184,13 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at);
   CREATE INDEX IF NOT EXISTS idx_play_history_artist ON play_history(artist);
   CREATE INDEX IF NOT EXISTS idx_play_history_track_id ON play_history(track_id);
+
+  -- Playback State (Persistent Clock Position)
+  CREATE TABLE IF NOT EXISTS playback_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    current_clock_id INTEGER,
+    current_position INTEGER DEFAULT 0,
+    last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (current_clock_id) REFERENCES clocks(id) ON DELETE SET NULL
+  );
 `);

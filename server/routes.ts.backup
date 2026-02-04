@@ -595,10 +595,12 @@ export function registerRoutes(app: Express): Server {
 
 
   // --- Stream Next Track API for Liquidsoap with Separation Rules ---
+  // Track current clock position in memory (resets on server restart)
+  let currentClockPosition = 0;
   
   app.get("/api/stream/next-track", (req, res) => {
     try {
-      // Get the first clock (TODO: support schedule grid and master clock mode)
+      // Get the first clock
       const clock = db.prepare("SELECT id FROM clocks ORDER BY id LIMIT 1").get() as any;
       if (!clock) return res.json({ track: null, error: "No clock configured" });
       
@@ -613,31 +615,11 @@ export function registerRoutes(app: Express): Server {
       
       if (clockItems.length === 0) return res.json({ track: null, error: "No items in clock" });
       
-      // Get or initialize playback state from database
-      let state = db.prepare("SELECT * FROM playback_state WHERE id = 1").get() as any;
-      if (!state) {
-        // Initialize state if it doesn't exist
-        db.prepare("INSERT INTO playback_state (id, current_clock_id, current_position) VALUES (1, ?, 0)")
-          .run(clock.id);
-        state = { id: 1, current_clock_id: clock.id, current_position: 0 };
-      }
-      
-      // Reset position if clock changed
-      if (state.current_clock_id !== clock.id) {
-        db.prepare("UPDATE playback_state SET current_clock_id = ?, current_position = 0, last_updated = datetime('now') WHERE id = 1")
-          .run(clock.id);
-        state.current_position = 0;
-        state.current_clock_id = clock.id;
-      }
-      
       // Get the current clock item based on position (cycle through sequentially)
-      const currentPosition = state.current_position % clockItems.length;
-      const currentItem = clockItems[currentPosition];
+      const currentItem = clockItems[currentClockPosition % clockItems.length];
       
-      // Calculate next position and update database
-      const nextPosition = (state.current_position + 1) % clockItems.length;
-      db.prepare("UPDATE playback_state SET current_position = ?, last_updated = datetime('now') WHERE id = 1")
-        .run(nextPosition);
+      // Move to next position for next call
+      currentClockPosition = (currentClockPosition + 1) % clockItems.length;
       
       // Get separation rules for this category (default 120 minutes = 2 hours)
       const rule = db.prepare("SELECT * FROM rules WHERE category_id = ?").get(currentItem.category_id) as any;
@@ -756,7 +738,7 @@ export function registerRoutes(app: Express): Server {
         const segueOffset = (category?.type === 'music') ? 3.0 : 0.5;
         calculatedCueOut = track.duration - segueOffset;
       }
-      res.json({ track: { ...track, cue_out: calculatedCueOut }, clock_position: currentPosition, category: currentItem.category_name });
+      res.json({ track: { ...track, cue_out: calculatedCueOut }, clock_position: currentClockPosition, category: currentItem.category_name });
     } catch (error) {
       console.error("Next track API failed:", error);
       res.status(500).json({ track: null, error: "Failed to get next track" });
