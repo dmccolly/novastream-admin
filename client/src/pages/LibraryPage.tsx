@@ -570,7 +570,7 @@ export default function Library() {
                 cueOut: cueEditingTrack.cue_out || cueEditingTrack.duration || 0,
                 segueDuration: cueEditingTrack.segue_duration || (cueEditingTrack.category_name === 'Music' ? 3 : 0.5),
               }}
-              onSave={handleSaveCuePoints}
+              trackType={cueEditingTrack.category_name === 'Music' ? 'song' : 'other'}
             />
           )}
         </DashboardLayout>
