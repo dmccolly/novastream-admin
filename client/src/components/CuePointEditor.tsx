@@ -97,6 +97,23 @@ export default function CuePointEditor({
 
   // Generate waveform visualization
   const generateWaveform = async (audio: HTMLAudioElement) => {
+    // Create a realistic-looking waveform pattern immediately
+    const samples = 500;
+    const waveform: number[] = [];
+    
+    for (let i = 0; i < samples; i++) {
+      // Create a natural-looking waveform with variation
+      const position = i / samples;
+      const base = 0.3 + Math.sin(position * Math.PI * 8) * 0.2;
+      const variation = Math.random() * 0.3;
+      const fadeIn = Math.min(position * 5, 1);
+      const fadeOut = Math.min((1 - position) * 5, 1);
+      waveform.push((base + variation) * fadeIn * fadeOut);
+    }
+    
+    setWaveformData(waveform);
+    
+    // Try to generate real waveform in background (non-blocking)
     try {
       const response = await fetch(audio.src);
       const arrayBuffer = await response.arrayBuffer();
@@ -104,7 +121,6 @@ export default function CuePointEditor({
       const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
       
       const rawData = audioBuffer.getChannelData(0);
-      const samples = 500;
       const blockSize = Math.floor(rawData.length / samples);
       const filteredData: number[] = [];
       
@@ -121,9 +137,8 @@ export default function CuePointEditor({
       const normalized = filteredData.map(n => n / max);
       setWaveformData(normalized);
     } catch (error) {
-      console.error('Error generating waveform:', error);
-      const placeholder = Array.from({ length: 500 }, () => Math.random() * 0.5 + 0.25);
-      setWaveformData(placeholder);
+      // Keep the placeholder waveform if real generation fails
+      console.error('Could not generate real waveform:', error);
     }
   };
 
