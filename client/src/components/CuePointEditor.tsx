@@ -42,14 +42,29 @@ export default function CuePointEditor({
   const [currentTime, setCurrentTime] = useState(0);
   const [waveformData, setWaveformData] = useState<number[]>([]);
 
-  // Reset values when modal opens
+  // Reset values when modal opens and generate initial waveform
   useEffect(() => {
+    if (!open) return;
+    
     setCueIn(initialCuePoints.cueIn);
     setCueOut(initialCuePoints.cueOut);
     setSegueDuration(initialCuePoints.segueDuration);
     setDuration(initialCuePoints.cueOut || 0);
     setCurrentTime(0);
     setIsPlaying(false);
+    
+    // Generate placeholder waveform immediately
+    const samples = 500;
+    const waveform: number[] = [];
+    for (let i = 0; i < samples; i++) {
+      const position = i / samples;
+      const base = 0.3 + Math.sin(position * Math.PI * 8) * 0.2;
+      const variation = Math.random() * 0.3;
+      const fadeIn = Math.min(position * 5, 1);
+      const fadeOut = Math.min((1 - position) * 5, 1);
+      waveform.push((base + variation) * fadeIn * fadeOut);
+    }
+    setWaveformData(waveform);
   }, [initialCuePoints, open]);
 
   // Load audio and generate waveform
@@ -70,7 +85,20 @@ export default function CuePointEditor({
     };
     
     const handleTimeUpdate = () => {
-      setCurrentTime(audio.currentTime);
+      const time = audio.currentTime;
+      const dur = audio.duration || 0;
+      setCurrentTime(time);
+      // Directly update DOM to bypass React rendering issues
+      const timeDisplay = document.querySelector('[data-time-display]');
+      if (timeDisplay && dur > 0) {
+        const formatTime = (seconds: number) => {
+          const mins = Math.floor(seconds / 60);
+          const secs = Math.floor(seconds % 60);
+          const ms = Math.floor((seconds % 1) * 100);
+          return `${mins}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
+        };
+        timeDisplay.textContent = `${formatTime(time)} / ${formatTime(dur)}`;
+      }
     };
     
     const handleEnded = () => {
@@ -91,9 +119,8 @@ export default function CuePointEditor({
       audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
       audio.removeEventListener('timeupdate', handleTimeUpdate);
       audio.removeEventListener('ended', handleEnded);
-      audio.pause();
     };
-  }, [audioUrl, open, initialCuePoints.cueOut]);
+  }, [audioUrl, open]);
 
   // Generate waveform visualization
   const generateWaveform = async (audio: HTMLAudioElement) => {
@@ -187,11 +214,41 @@ export default function CuePointEditor({
   const handlePlayPause = () => {
     if (!audioRef.current) return;
     
+    const audio = audioRef.current;
+    
     if (isPlaying) {
-      audioRef.current.pause();
+      audio.pause();
       setIsPlaying(false);
     } else {
-      audioRef.current.play();
+      // Ensure event listeners are attached before playing
+      const timeDisplay = document.querySelector('[data-time-display]');
+      if (timeDisplay) {
+        const formatTime = (seconds: number) => {
+          const mins = Math.floor(seconds / 60);
+          const secs = Math.floor(seconds % 60);
+          const ms = Math.floor((seconds % 1) * 100);
+          return `${mins}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
+        };
+        
+        // Remove any existing listener first
+        const existingHandler = (audio as any)._timeUpdateHandler;
+        if (existingHandler) {
+          audio.removeEventListener('timeupdate', existingHandler);
+        }
+        
+        // Add new listener
+        const handler = () => {
+          const time = audio.currentTime;
+          const dur = audio.duration || 0;
+          if (timeDisplay && dur > 0) {
+            timeDisplay.textContent = `${formatTime(time)} / ${formatTime(dur)}`;
+          }
+        };
+        (audio as any)._timeUpdateHandler = handler;
+        audio.addEventListener('timeupdate', handler);
+      }
+      
+      audio.play();
       setIsPlaying(true);
     }
   };
@@ -290,7 +347,7 @@ export default function CuePointEditor({
   const endPercent = duration > 0 ? (cueOut / duration) * 100 : 0;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange} key={open ? trackId : 'closed'}>
       <DialogContent className="max-w-[95vw] w-[1400px]">
         <audio ref={audioRef} src={audioUrl} />
         
@@ -317,7 +374,7 @@ export default function CuePointEditor({
                 <Square className="h-6 w-6" />
               </Button>
               <div className="flex-1 text-center">
-                <div className="text-2xl font-mono">{formatTime(currentTime)} / {formatTime(duration)}</div>
+                <div className="text-2xl font-mono" data-time-display>{formatTime(currentTime)} / {formatTime(duration)}</div>
               </div>
             </div>
 
