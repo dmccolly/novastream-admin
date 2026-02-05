@@ -19,6 +19,7 @@ interface CuePointEditorProps {
     cueOut: number;
     segueDuration: number;
   };
+  trackType?: string; // "song" or other types
 }
 
 export default function CuePointEditor({
@@ -28,6 +29,7 @@ export default function CuePointEditor({
   trackTitle,
   audioUrl,
   initialCuePoints,
+  trackType = "other", // Default to "other" if not specified
 }: CuePointEditorProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -48,7 +50,11 @@ export default function CuePointEditor({
     
     setCueIn(initialCuePoints.cueIn);
     setCueOut(initialCuePoints.cueOut);
-    setSegueDuration(initialCuePoints.segueDuration);
+    
+    // Set default segueDuration based on track type if not already set
+    const defaultSegue = trackType === "song" ? 3.0 : 0.5;
+    setSegueDuration(initialCuePoints.segueDuration || defaultSegue);
+    
     setDuration(initialCuePoints.cueOut || 0);
     setCurrentTime(0);
     setIsPlaying(false);
@@ -65,7 +71,7 @@ export default function CuePointEditor({
       waveform.push((base + variation) * fadeIn * fadeOut);
     }
     setWaveformData(waveform);
-  }, [initialCuePoints, open]);
+  }, [initialCuePoints, open, trackType]);
 
   // Load audio and generate waveform
   useEffect(() => {
@@ -82,8 +88,16 @@ export default function CuePointEditor({
     
     const updateDurationDisplay = (dur: number) => {
       setDuration(dur);
+      
+      // Set default cueOut if not already set
       if (initialCuePoints.cueOut === 0 || !initialCuePoints.cueOut) {
         setCueOut(dur);
+      }
+      
+      // Set default segueDuration if not already set (or if it's 0)
+      if (initialCuePoints.segueDuration === 0 || !initialCuePoints.segueDuration) {
+        const defaultSegue = trackType === "song" ? 3.0 : 0.5;
+        setSegueDuration(defaultSegue);
       }
       
       // Update DOM directly for immediate feedback
