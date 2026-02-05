@@ -348,15 +348,15 @@ export default function CuePointEditor({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange} key={open ? trackId : 'closed'}>
-      <DialogContent className="max-w-[95vw] w-[1400px] max-h-[90vh] overflow-y-auto">
+      <DialogContent className="max-w-[95vw] w-[1400px]">
         <audio ref={audioRef} src={audioUrl} />
         
-        <div className="bg-gray-900 text-white">
+        <div className="bg-gray-900 text-white max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-2xl">{trackTitle}</DialogTitle>
           </DialogHeader>
 
-          <div className="space-y-6 mt-4">
+          <div className="space-y-3 mt-2">
             {/* Playback Controls */}
             <div className="flex items-center gap-4 bg-gray-800 p-4 rounded-lg">
               <Button
@@ -379,13 +379,13 @@ export default function CuePointEditor({
             </div>
 
             {/* Waveform Visualization */}
-            <div className="bg-gray-800 p-6 rounded-lg">
-              <h3 className="font-bold mb-4 text-lg">WAVEFORM</h3>
+            <div className="bg-gray-800 p-3 rounded-lg">
+              <h3 className="font-bold mb-2 text-base">WAVEFORM</h3>
               <canvas
                 ref={canvasRef}
                 width={1300}
-                height={200}
-                className="w-full h-[200px] bg-gray-900 rounded cursor-crosshair"
+                height={120}
+                className="w-full h-[120px] bg-gray-900 rounded cursor-crosshair"
                 onClick={(e) => {
                   if (!canvasRef.current || !audioRef.current || duration === 0) return;
                   const rect = canvasRef.current.getBoundingClientRect();
@@ -398,9 +398,9 @@ export default function CuePointEditor({
             </div>
 
             {/* Timeline with Markers */}
-            <div className="bg-gray-800 p-6 rounded-lg">
-              <h3 className="font-bold mb-4 text-lg">TIMELINE MARKERS</h3>
-              <div className="bg-gray-800 p-4 rounded">
+            <div className="bg-gray-800 p-3 rounded-lg">
+              <h3 className="font-bold mb-2 text-base">TIMELINE MARKERS</h3>
+              <div className="bg-gray-800 p-2 rounded">
                 <div className="flex justify-between text-sm mb-2">
                   <span>0:00</span>
                   <span>{formatTime(duration)}</span>
@@ -408,7 +408,7 @@ export default function CuePointEditor({
 
                 <div
                   ref={timelineRef}
-                  className="relative h-24 bg-gray-700 rounded cursor-pointer"
+                  className="relative h-16 bg-gray-700 rounded cursor-pointer"
                   onClick={handleTimelineClick}
                 >
                   {/* Cue In Marker */}
@@ -466,7 +466,7 @@ export default function CuePointEditor({
                   type="number"
                   value={cueIn.toFixed(2)}
                   onChange={(e) => setCueIn(parseFloat(e.target.value) || 0)}
-                  className="w-full bg-gray-900 border-2 border-green-500 rounded px-4 py-3 text-lg font-mono"
+                  className="w-full bg-gray-900 border-2 border-green-500 rounded px-3 py-2 text-base font-mono"
                   step="0.1"
                 />
               </div>
@@ -481,7 +481,7 @@ export default function CuePointEditor({
                   onChange={(e) =>
                     setSegueDuration(parseFloat(e.target.value) || 0)
                   }
-                  className="w-full bg-gray-900 border-2 border-yellow-500 rounded px-4 py-3 text-lg font-mono"
+                  className="w-full bg-gray-900 border-2 border-yellow-500 rounded px-3 py-2 text-base font-mono"
                   step="0.1"
                 />
               </div>
@@ -494,7 +494,7 @@ export default function CuePointEditor({
                   type="number"
                   value={cueOut.toFixed(2)}
                   onChange={(e) => setCueOut(parseFloat(e.target.value) || 0)}
-                  className="w-full bg-gray-900 border-2 border-red-500 rounded px-4 py-3 text-lg font-mono"
+                  className="w-full bg-gray-900 border-2 border-red-500 rounded px-3 py-2 text-base font-mono"
                   step="0.1"
                 />
               </div>
@@ -505,14 +505,14 @@ export default function CuePointEditor({
               <Button
                 variant="outline"
                 onClick={() => onOpenChange(false)}
-                className="border-gray-700 text-lg px-8 py-6"
+                className="border-gray-700 text-base px-6 py-3"
                 size="lg"
               >
                 CANCEL
               </Button>
               <Button
                 onClick={handleSave}
-                className="bg-blue-600 hover:bg-blue-700 text-lg px-8 py-6"
+                className="bg-blue-600 hover:bg-blue-700 text-base px-6 py-3"
                 size="lg"
               >
                 SAVE CUE POINTS
