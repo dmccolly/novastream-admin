@@ -162,7 +162,7 @@ export default function CuePointEditor({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-7xl">
-        {isLoading && duration === 0 ? (
+        {isLoading ? (
           <div className="flex items-center justify-center p-20">
             <div className="text-center">
               <div className="text-lg mb-2">Loading track information...</div>
