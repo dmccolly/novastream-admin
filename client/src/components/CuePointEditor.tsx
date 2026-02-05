@@ -164,6 +164,8 @@ export default function CuePointEditor({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-7xl">
+        {/* Audio element must be rendered for useEffect to work */}
+        <audio ref={audioRef} src={audioUrl} style={{display: 'none'}} />
         {isLoading ? (
           <div className="flex items-center justify-center p-20">
             <div className="text-center">
@@ -176,8 +178,6 @@ export default function CuePointEditor({
         <DialogHeader>
           <DialogTitle className="text-xl">Edit Cue Points: {trackTitle}</DialogTitle>
         </DialogHeader>
-
-        <audio ref={audioRef} src={audioUrl} />
 
         <div className="space-y-6">
           <div className="bg-blue-600 p-4 rounded">
