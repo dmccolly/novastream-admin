@@ -348,7 +348,7 @@ export default function CuePointEditor({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange} key={open ? trackId : 'closed'}>
-      <DialogContent className="max-w-[95vw] w-[1400px]">
+      <DialogContent className="max-w-[95vw] w-[1400px] max-h-[90vh] overflow-y-auto">
         <audio ref={audioRef} src={audioUrl} />
         
         <div className="bg-gray-900 text-white">
