@@ -44,7 +44,7 @@ export default function CuePointEditor({
   }, [initialCuePoints, open]);
 
   useEffect(() => {
-    if (audioRef.current) {
+    if (audioRef.current && open) {
       const audio = audioRef.current;
       
       const updateDuration = () => {
@@ -55,6 +55,10 @@ export default function CuePointEditor({
           if (initialCuePoints.cueOut === 0 || !initialCuePoints.cueOut) {
             setCueOut(dur);
           }
+          setIsLoading(false);
+        } else if (initialCuePoints.cueOut > 0) {
+          // Use cueOut as fallback duration
+          setDuration(initialCuePoints.cueOut);
           setIsLoading(false);
         }
       };
@@ -70,24 +74,28 @@ export default function CuePointEditor({
       
       const handleError = () => {
         console.error('Audio failed to load');
+        // Use cueOut as fallback
+        if (initialCuePoints.cueOut > 0) {
+          setDuration(initialCuePoints.cueOut);
+        }
         setIsLoading(false);
       };
       
       audio.addEventListener('loadedmetadata', handleLoadedMetadata);
       audio.addEventListener('error', handleError);
       
-      // Timeout fallback: if audio doesn't load in 5 seconds, show error
+      // Timeout fallback: always stop loading after 3 seconds
       const timeout = setTimeout(() => {
-        if (duration === 0) {
-          console.error('Audio loading timeout');
-          // Try one more time to get duration
-          if (audio.duration > 0) {
-            updateDuration();
-          } else {
-            setIsLoading(false);
-          }
+        console.log('Audio loading timeout, using fallback');
+        // Try one more time to get duration
+        if (audio.duration > 0 && !isNaN(audio.duration)) {
+          setDuration(audio.duration);
+        } else if (initialCuePoints.cueOut > 0) {
+          // Use cueOut as fallback
+          setDuration(initialCuePoints.cueOut);
         }
-      }, 5000);
+        setIsLoading(false);
+      }, 3000);
       
       return () => {
         audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
@@ -95,7 +103,7 @@ export default function CuePointEditor({
         clearTimeout(timeout);
       };
     }
-  }, [audioUrl, open]);
+  }, [audioUrl, open, initialCuePoints.cueOut]);
 
   const handleSave = async () => {
     try {
