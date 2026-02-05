@@ -46,6 +46,7 @@ export default function CuePointEditor({
   useEffect(() => {
     if (audioRef.current && open) {
       const audio = audioRef.current;
+      console.log('CuePointEditor: Setting up audio loading');
       
       const updateDuration = () => {
         const dur = audio.duration || 0;
@@ -86,7 +87,7 @@ export default function CuePointEditor({
       
       // Timeout fallback: always stop loading after 3 seconds
       const timeout = setTimeout(() => {
-        console.log('Audio loading timeout, using fallback');
+        console.log('Audio loading timeout fired, using fallback');
         // Try one more time to get duration
         if (audio.duration > 0 && !isNaN(audio.duration)) {
           setDuration(audio.duration);
@@ -98,6 +99,7 @@ export default function CuePointEditor({
       }, 3000);
       
       return () => {
+        console.log('CuePointEditor: Cleaning up audio loading');
         audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
         audio.removeEventListener('error', handleError);
         clearTimeout(timeout);
