@@ -6,6 +6,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Play, Pause, Square } from "lucide-react";
 
 interface CuePointEditorProps {
   open: boolean;
@@ -29,60 +30,164 @@ export default function CuePointEditor({
   initialCuePoints,
 }: CuePointEditorProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   
-  // Initialize duration with cueOut if available, otherwise 0
   const [duration, setDuration] = useState(initialCuePoints.cueOut || 0);
   const [cueIn, setCueIn] = useState(initialCuePoints.cueIn);
   const [cueOut, setCueOut] = useState(initialCuePoints.cueOut);
   const [segueDuration, setSegueDuration] = useState(initialCuePoints.segueDuration);
   const [dragging, setDragging] = useState<string | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [waveformData, setWaveformData] = useState<number[]>([]);
 
-  // Reset values when modal opens or initialCuePoints change
+  // Reset values when modal opens
   useEffect(() => {
     setCueIn(initialCuePoints.cueIn);
     setCueOut(initialCuePoints.cueOut);
     setSegueDuration(initialCuePoints.segueDuration);
     setDuration(initialCuePoints.cueOut || 0);
+    setCurrentTime(0);
+    setIsPlaying(false);
   }, [initialCuePoints, open]);
 
-  // Try to load audio metadata in the background
+  // Load audio and generate waveform
   useEffect(() => {
-    if (audioRef.current && open) {
-      const audio = audioRef.current;
-      
-      const handleLoadedMetadata = () => {
-        const dur = audio.duration || 0;
-        if (dur > 0 && !isNaN(dur)) {
-          setDuration(dur);
-          // If no cueOut was set, use full duration
-          if (initialCuePoints.cueOut === 0 || !initialCuePoints.cueOut) {
-            setCueOut(dur);
-          }
+    if (!audioRef.current || !open) return;
+    
+    const audio = audioRef.current;
+    
+    const handleLoadedMetadata = () => {
+      const dur = audio.duration || 0;
+      if (dur > 0 && !isNaN(dur)) {
+        setDuration(dur);
+        if (initialCuePoints.cueOut === 0 || !initialCuePoints.cueOut) {
+          setCueOut(dur);
         }
-      };
+        generateWaveform(audio);
+      }
+    };
+    
+    const handleTimeUpdate = () => {
+      setCurrentTime(audio.currentTime);
+    };
+    
+    const handleEnded = () => {
+      setIsPlaying(false);
+      setCurrentTime(0);
+      audio.currentTime = 0;
+    };
+    
+    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
+    audio.addEventListener('timeupdate', handleTimeUpdate);
+    audio.addEventListener('ended', handleEnded);
+    
+    if (audio.readyState >= 1) {
+      handleLoadedMetadata();
+    }
+    
+    return () => {
+      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      audio.removeEventListener('timeupdate', handleTimeUpdate);
+      audio.removeEventListener('ended', handleEnded);
+      audio.pause();
+    };
+  }, [audioUrl, open, initialCuePoints.cueOut]);
+
+  // Generate waveform visualization
+  const generateWaveform = async (audio: HTMLAudioElement) => {
+    try {
+      const response = await fetch(audio.src);
+      const arrayBuffer = await response.arrayBuffer();
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
       
-      const handleError = () => {
-        // On error, keep using the fallback duration from cueOut
-        if (initialCuePoints.cueOut > 0) {
-          setDuration(initialCuePoints.cueOut);
+      const rawData = audioBuffer.getChannelData(0);
+      const samples = 500;
+      const blockSize = Math.floor(rawData.length / samples);
+      const filteredData: number[] = [];
+      
+      for (let i = 0; i < samples; i++) {
+        let blockStart = blockSize * i;
+        let sum = 0;
+        for (let j = 0; j < blockSize; j++) {
+          sum += Math.abs(rawData[blockStart + j]);
         }
-      };
-      
-      audio.addEventListener('loadedmetadata', handleLoadedMetadata);
-      audio.addEventListener('error', handleError);
-      
-      // Try to load immediately if already loaded
-      if (audio.readyState >= 1) {
-        handleLoadedMetadata();
+        filteredData.push(sum / blockSize);
       }
       
-      return () => {
-        audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
-        audio.removeEventListener('error', handleError);
-      };
+      const max = Math.max(...filteredData);
+      const normalized = filteredData.map(n => n / max);
+      setWaveformData(normalized);
+    } catch (error) {
+      console.error('Error generating waveform:', error);
+      const placeholder = Array.from({ length: 500 }, () => Math.random() * 0.5 + 0.25);
+      setWaveformData(placeholder);
     }
-  }, [audioUrl, open, initialCuePoints.cueOut]);
+  };
+
+  // Draw waveform on canvas
+  useEffect(() => {
+    if (!canvasRef.current || waveformData.length === 0) return;
+    
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    const width = canvas.width;
+    const height = canvas.height;
+    const barWidth = width / waveformData.length;
+    
+    ctx.clearRect(0, 0, width, height);
+    
+    waveformData.forEach((value, index) => {
+      const barHeight = value * height * 0.8;
+      const x = index * barWidth;
+      const y = (height - barHeight) / 2;
+      
+      const time = (index / waveformData.length) * duration;
+      if (time < cueIn || time > cueOut) {
+        ctx.fillStyle = 'rgba(100, 100, 100, 0.3)';
+      } else if (time >= cueOut - segueDuration) {
+        ctx.fillStyle = 'rgba(251, 191, 36, 0.8)';
+      } else {
+        ctx.fillStyle = 'rgba(59, 130, 246, 0.8)';
+      }
+      
+      ctx.fillRect(x, y, barWidth - 1, barHeight);
+    });
+    
+    if (currentTime > 0) {
+      const x = (currentTime / duration) * width;
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, height);
+      ctx.stroke();
+    }
+  }, [waveformData, cueIn, cueOut, segueDuration, duration, currentTime]);
+
+  const handlePlayPause = () => {
+    if (!audioRef.current) return;
+    
+    if (isPlaying) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+    } else {
+      audioRef.current.play();
+      setIsPlaying(true);
+    }
+  };
+
+  const handleStop = () => {
+    if (!audioRef.current) return;
+    audioRef.current.pause();
+    audioRef.current.currentTime = 0;
+    setCurrentTime(0);
+    setIsPlaying(false);
+  };
 
   const handleSave = async () => {
     try {
@@ -107,7 +212,8 @@ export default function CuePointEditor({
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
+    const ms = Math.floor((seconds % 1) * 100);
+    return `${mins}:${secs.toString().padStart(2, "0")}.${ms.toString().padStart(2, "0")}`;
   };
 
   const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -170,27 +276,58 @@ export default function CuePointEditor({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-7xl">
-        {/* Hidden audio element for loading metadata */}
-        <audio ref={audioRef} src={audioUrl} style={{display: 'none'}} />
+      <DialogContent className="max-w-[95vw] w-[1400px]">
+        <audio ref={audioRef} src={audioUrl} />
         
         <div className="bg-gray-900 text-white">
           <DialogHeader>
-            <DialogTitle className="text-xl">Edit Cue Points: {trackTitle}</DialogTitle>
+            <DialogTitle className="text-2xl">{trackTitle}</DialogTitle>
           </DialogHeader>
 
-          <div className="space-y-6">
-            <div className="bg-blue-600 p-4 rounded">
-              <h3 className="font-bold mb-2">How to Set Cue Points</h3>
-              <ol className="text-sm space-y-1">
-                <li>1. Drag the colored markers on the timeline to set positions</li>
-                <li>2. Green = Cue In (start), Yellow = Fade Start, Red = Cue Out (end)</li>
-                <li>3. Click "SAVE" to apply changes</li>
-              </ol>
+          <div className="space-y-6 mt-4">
+            {/* Playback Controls */}
+            <div className="flex items-center gap-4 bg-gray-800 p-4 rounded-lg">
+              <Button
+                onClick={handlePlayPause}
+                className="bg-blue-600 hover:bg-blue-700"
+                size="lg"
+              >
+                {isPlaying ? <Pause className="h-6 w-6" /> : <Play className="h-6 w-6" />}
+              </Button>
+              <Button
+                onClick={handleStop}
+                className="bg-gray-700 hover:bg-gray-600"
+                size="lg"
+              >
+                <Square className="h-6 w-6" />
+              </Button>
+              <div className="flex-1 text-center">
+                <div className="text-2xl font-mono">{formatTime(currentTime)} / {formatTime(duration)}</div>
+              </div>
             </div>
 
-            <div>
-              <h3 className="font-bold mb-2">Timeline</h3>
+            {/* Waveform Visualization */}
+            <div className="bg-gray-800 p-6 rounded-lg">
+              <h3 className="font-bold mb-4 text-lg">WAVEFORM</h3>
+              <canvas
+                ref={canvasRef}
+                width={1300}
+                height={200}
+                className="w-full h-[200px] bg-gray-900 rounded cursor-crosshair"
+                onClick={(e) => {
+                  if (!canvasRef.current || !audioRef.current || duration === 0) return;
+                  const rect = canvasRef.current.getBoundingClientRect();
+                  const x = e.clientX - rect.left;
+                  const percent = x / rect.width;
+                  const time = percent * duration;
+                  audioRef.current.currentTime = time;
+                }}
+              />
+            </div>
+
+            {/* Timeline with Markers */}
+            <div className="bg-gray-800 p-6 rounded-lg">
+              <h3 className="font-bold mb-4 text-lg">TIMELINE MARKERS</h3>
               <div className="bg-gray-800 p-4 rounded">
                 <div className="flex justify-between text-sm mb-2">
                   <span>0:00</span>
@@ -199,39 +336,39 @@ export default function CuePointEditor({
 
                 <div
                   ref={timelineRef}
-                  className="relative h-16 bg-gray-700 rounded cursor-pointer"
+                  className="relative h-24 bg-gray-700 rounded cursor-pointer"
                   onClick={handleTimelineClick}
                 >
                   {/* Cue In Marker */}
                   <div
-                    className="absolute top-0 bottom-0 w-1 bg-green-500 cursor-ew-resize hover:w-2 transition-all"
+                    className="absolute top-0 bottom-0 w-2 bg-green-500 cursor-ew-resize hover:w-3 transition-all z-10"
                     style={{ left: `${startPercent}%` }}
                     onMouseDown={(e) => handleMarkerDrag(e, "cueIn")}
                   >
-                    <div className="absolute -top-6 left-1/2 -translate-x-1/2 text-xs whitespace-nowrap">
-                      {formatTime(cueIn)}
+                    <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-xs whitespace-nowrap bg-green-500 px-2 py-1 rounded">
+                      START: {formatTime(cueIn)}
                     </div>
                   </div>
 
                   {/* Fade Start Marker */}
                   <div
-                    className="absolute top-0 bottom-0 w-1 bg-yellow-500 cursor-ew-resize hover:w-2 transition-all"
+                    className="absolute top-0 bottom-0 w-2 bg-yellow-500 cursor-ew-resize hover:w-3 transition-all z-10"
                     style={{ left: `${fadePercent}%` }}
                     onMouseDown={(e) => handleMarkerDrag(e, "fadeStart")}
                   >
-                    <div className="absolute -top-6 left-1/2 -translate-x-1/2 text-xs whitespace-nowrap">
-                      {formatTime(cueOut - segueDuration)}
+                    <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-xs whitespace-nowrap bg-yellow-500 px-2 py-1 rounded text-black">
+                      FADE: {formatTime(cueOut - segueDuration)}
                     </div>
                   </div>
 
                   {/* Cue Out Marker */}
                   <div
-                    className="absolute top-0 bottom-0 w-1 bg-red-500 cursor-ew-resize hover:w-2 transition-all"
+                    className="absolute top-0 bottom-0 w-2 bg-red-500 cursor-ew-resize hover:w-3 transition-all z-10"
                     style={{ left: `${endPercent}%` }}
                     onMouseDown={(e) => handleMarkerDrag(e, "cueOut")}
                   >
-                    <div className="absolute -top-6 left-1/2 -translate-x-1/2 text-xs whitespace-nowrap">
-                      {formatTime(cueOut)}
+                    <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-xs whitespace-nowrap bg-red-500 px-2 py-1 rounded">
+                      END: {formatTime(cueOut)}
                     </div>
                   </div>
 
@@ -247,23 +384,24 @@ export default function CuePointEditor({
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-4">
+            {/* Numerical Inputs */}
+            <div className="grid grid-cols-3 gap-6 bg-gray-800 p-6 rounded-lg">
               <div>
-                <label className="block text-sm font-medium mb-2">
-                  Cue In (Start)
+                <label className="block text-sm font-bold mb-2 text-green-400">
+                  CUE IN (Start)
                 </label>
                 <input
                   type="number"
                   value={cueIn.toFixed(2)}
                   onChange={(e) => setCueIn(parseFloat(e.target.value) || 0)}
-                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
+                  className="w-full bg-gray-900 border-2 border-green-500 rounded px-4 py-3 text-lg font-mono"
                   step="0.1"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium mb-2">
-                  Segue Duration
+                <label className="block text-sm font-bold mb-2 text-yellow-400">
+                  SEGUE DURATION (Fade Length)
                 </label>
                 <input
                   type="number"
@@ -271,38 +409,41 @@ export default function CuePointEditor({
                   onChange={(e) =>
                     setSegueDuration(parseFloat(e.target.value) || 0)
                   }
-                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
+                  className="w-full bg-gray-900 border-2 border-yellow-500 rounded px-4 py-3 text-lg font-mono"
                   step="0.1"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium mb-2">
-                  Cue Out (End)
+                <label className="block text-sm font-bold mb-2 text-red-400">
+                  CUE OUT (End)
                 </label>
                 <input
                   type="number"
                   value={cueOut.toFixed(2)}
                   onChange={(e) => setCueOut(parseFloat(e.target.value) || 0)}
-                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2"
+                  className="w-full bg-gray-900 border-2 border-red-500 rounded px-4 py-3 text-lg font-mono"
                   step="0.1"
                 />
               </div>
             </div>
 
-            <div className="flex justify-end gap-2">
+            {/* Action Buttons */}
+            <div className="flex justify-end gap-4">
               <Button
                 variant="outline"
                 onClick={() => onOpenChange(false)}
-                className="border-gray-700"
+                className="border-gray-700 text-lg px-8 py-6"
+                size="lg"
               >
                 CANCEL
               </Button>
               <Button
                 onClick={handleSave}
-                className="bg-blue-600 hover:bg-blue-700"
+                className="bg-blue-600 hover:bg-blue-700 text-lg px-8 py-6"
+                size="lg"
               >
-                SAVE
+                SAVE CUE POINTS
               </Button>
             </div>
           </div>
