@@ -35,6 +35,9 @@ export default function CuePointEditor({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   
+  // Track if cueOut was initially zero - we'll need to update it when duration loads
+  const cueOutWasZeroRef = useRef(initialCuePoints.cueOut === 0 || !initialCuePoints.cueOut);
+  
   const [duration, setDuration] = useState(initialCuePoints.cueOut || 0);
   const [cueIn, setCueIn] = useState(initialCuePoints.cueIn);
   const [cueOut, setCueOut] = useState(initialCuePoints.cueOut);
@@ -51,27 +54,19 @@ export default function CuePointEditor({
   useEffect(() => {
     if (!open) return;
     
+    // Update the ref to track if cueOut was initially zero
+    cueOutWasZeroRef.current = initialCuePoints.cueOut === 0 || !initialCuePoints.cueOut;
+    
     setCueIn(initialCuePoints.cueIn);
     setCueOut(initialCuePoints.cueOut);
-    setSegueDuration(initialCuePoints.segueDuration);
     
-    // CRITICAL: Use initialCuePoints.cueOut as the initial duration
-    // This is the track's actual duration from the database
+    // Set default segueDuration based on track type if not already set
+    const defaultSegue = trackType === "song" ? 3.0 : 0.5;
+    setSegueDuration(initialCuePoints.segueDuration || defaultSegue);
+    
+    // Use initialCuePoints.cueOut as the initial duration
     const initialDuration = initialCuePoints.cueOut || 0;
     setDuration(initialDuration);
-    
-    // Update display immediately with database duration
-    const formatTime = (seconds: number) => {
-      const mins = Math.floor(seconds / 60);
-      const secs = Math.floor(seconds % 60);
-      const ms = Math.floor((seconds % 1) * 100);
-      return `${mins}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
-    };
-    
-    if (initialDuration > 0) {
-      // Duration will be set by the polling mechanism
-      // No DOM manipulation needed
-    }
     
     setCurrentTime(0);
     setIsPlaying(false);
@@ -104,24 +99,28 @@ export default function CuePointEditor({
     };
     
     const updateDurationDisplay = (dur: number) => {
+      console.log('[CuePointEditor] Duration loaded:', dur, 'cueOutWasZero:', cueOutWasZeroRef.current);
+      
       setDuration(dur);
       
-      // Set default cueOut if not already set
-      if (initialCuePoints.cueOut === 0 || !initialCuePoints.cueOut) {
+      // CRITICAL FIX: Always update cueOut if it was initially zero
+      if (cueOutWasZeroRef.current) {
+        console.log('[CuePointEditor] Setting cueOut to:', dur);
         setCueOut(dur);
+        cueOutWasZeroRef.current = false; // Only do this once
       }
       
       // Set default segueDuration if not already set (or if it's 0)
       if (initialCuePoints.segueDuration === 0 || !initialCuePoints.segueDuration) {
         const defaultSegue = trackType === "song" ? 3.0 : 0.5;
+        console.log('[CuePointEditor] Setting default segue duration:', defaultSegue);
         setSegueDuration(defaultSegue);
       }
-      
-      // NO DOM MANIPULATION - Let React handle the rendering
     };
     
     const handleLoadedMetadata = () => {
       const dur = audio.duration || 0;
+      console.log('[CuePointEditor] loadedmetadata event, duration:', dur);
       if (dur > 0 && !isNaN(dur)) {
         updateDurationDisplay(dur);
         generateWaveform(audio);
@@ -131,7 +130,6 @@ export default function CuePointEditor({
     const handleTimeUpdate = () => {
       const time = audio.currentTime;
       setCurrentTime(time);
-      // React will handle rendering - no DOM manipulation needed
     };
     
     const handleEnded = () => {
@@ -151,9 +149,11 @@ export default function CuePointEditor({
     
     const checkDuration = () => {
       attempts++;
+      console.log(`[CuePointEditor] Poll attempt ${attempts}, readyState: ${audio.readyState}, duration: ${audio.duration}`);
       
       if (audio.readyState >= 1 && audio.duration > 0 && !isNaN(audio.duration)) {
         // Duration is available!
+        console.log('[CuePointEditor] Duration available via polling:', audio.duration);
         updateDurationDisplay(audio.duration);
         generateWaveform(audio);
         if (pollInterval !== null) {
@@ -165,12 +165,15 @@ export default function CuePointEditor({
       
       if (attempts >= maxAttempts) {
         // Give up and use initialCuePoints.cueOut as fallback
+        console.log('[CuePointEditor] Polling timeout, using fallback:', initialCuePoints.cueOut);
         if (pollInterval !== null) {
           clearInterval(pollInterval);
           pollInterval = null;
         }
         if (initialCuePoints.cueOut > 0) {
           updateDurationDisplay(initialCuePoints.cueOut);
+        } else {
+          console.error('[CuePointEditor] No duration available and no fallback - editor may not work properly');
         }
         return false;
       }
@@ -179,6 +182,7 @@ export default function CuePointEditor({
     };
     
     // Start polling immediately
+    console.log('[CuePointEditor] Starting audio load and polling');
     audio.load();
     
     // Try immediately
@@ -195,7 +199,7 @@ export default function CuePointEditor({
         clearInterval(pollInterval);
       }
     };
-  }, [audioUrl, open, initialCuePoints]);
+  }, [audioUrl, open, initialCuePoints, trackType]);
 
   // Generate waveform visualization
   const generateWaveform = async (audio: HTMLAudioElement) => {
@@ -533,7 +537,7 @@ export default function CuePointEditor({
                 <Square className="h-6 w-6" />
               </Button>
               <div className="flex-1 text-center">
-                <div className="text-2xl font-mono" data-time-display>{formatTime(currentTime)} / {formatTime(duration)}</div>
+                <div className="text-2xl font-mono">{formatTime(currentTime)} / {formatTime(duration)}</div>
               </div>
             </div>
 
