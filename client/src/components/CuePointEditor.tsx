@@ -318,6 +318,7 @@ export default function CuePointEditor({
   };
 
   const handleSave = async () => {
+    console.log("Saving cue points:", { trackId, cueIn, cueOut, segueDuration });
     try {
       const response = await fetch(`/api/tracks/${trackId}/cuepoints`, {
         method: "PUT",
@@ -329,28 +330,30 @@ export default function CuePointEditor({
         }),
       });
 
+      console.log("Save response:", response.status, response.ok);
+
       if (response.ok) {
+        console.log("Showing success toast");
         toast({
           title: "Success",
           description: "Cue points saved successfully",
-          duration: 3000,
         });
-        onOpenChange(false);
+        setTimeout(() => onOpenChange(false), 500);
       } else {
+        console.log("Showing error toast - response not ok");
         toast({
           title: "Error",
-          description: "Failed to save cue points",
+          description: `Failed to save cue points (${response.status})`,
           variant: "destructive",
-          duration: 3000,
         });
       }
     } catch (error) {
       console.error("Failed to save cue points:", error);
+      console.log("Showing error toast - exception");
       toast({
         title: "Error",
         description: "Failed to save cue points",
         variant: "destructive",
-        duration: 3000,
       });
     }
   };
