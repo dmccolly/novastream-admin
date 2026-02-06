@@ -75,7 +75,16 @@ app.use((req, res, next) => {
     console.log(`Serving music from: ${musicDir}`);
     app.use("/music", express.static(musicDir));
 
-    app.use(express.static(distPath));
+    // Add cache-busting headers for JS and CSS files
+    app.use(express.static(distPath, {
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.js') || filePath.endsWith('.css')) {
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          res.setHeader('Pragma', 'no-cache');
+          res.setHeader('Expires', '0');
+        }
+      }
+    }));
     app.get("*", (_req, res) => {
       if (!_req.path.startsWith("/api")) {
         res.sendFile(path.join(distPath, "index.html"));
