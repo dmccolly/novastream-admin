@@ -10,6 +10,7 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import { getDropboxClient, getAuthUrl, exchangeCodeForToken } from "./auth";
+import { extractDuration } from "./duration";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -235,11 +236,32 @@ export function registerRoutes(app: Express): Server {
       fs.writeFileSync(filepath, fileBinary);
       console.log(`Download ${trackId} completed successfully.`);
       
-      // Calculate duration (mock for now, ideally use ffprobe)
-      // For now, we assume duration is updated later or during playback
-      // But we can set a default cue_out if duration is known
+      // Extract duration using ffprobe
+      const duration = await extractDuration(filepath);
       
-      db.prepare("UPDATE tracks SET status = 'ready', filepath = ? WHERE id = ?").run(filepath, trackId);
+      if (duration) {
+        console.log(`[Download] Extracted duration for track ${trackId}: ${duration}s`);
+        
+        // Get track category to determine default segue
+        const track = db.prepare("SELECT category_id FROM tracks WHERE id = ?").get(trackId) as any;
+        let defaultCueOut = duration;
+        
+        if (track && track.category_id) {
+          const category = db.prepare("SELECT type FROM categories WHERE id = ?").get(track.category_id) as any;
+          if (category) {
+            const segueOffset = category.type === 'music' ? 3.0 : 0.5;
+            defaultCueOut = Math.max(0, duration - segueOffset);
+            console.log(`[Download] Setting cue_out to ${defaultCueOut}s (duration ${duration}s - segue ${segueOffset}s)`);
+          }
+        }
+        
+        db.prepare(
+          "UPDATE tracks SET status = 'ready', filepath = ?, duration = ?, cue_out = ? WHERE id = ?"
+        ).run(filepath, duration, defaultCueOut, trackId);
+      } else {
+        console.warn(`[Download] Could not extract duration for track ${trackId}, setting without duration`);
+        db.prepare("UPDATE tracks SET status = 'ready', filepath = ? WHERE id = ?").run(filepath, trackId);
+      }
 
     } catch (error: any) {
       console.error(`Download ${trackId} failed:`, error);
@@ -307,6 +329,139 @@ export function registerRoutes(app: Express): Server {
       } catch (error: any) {
         console.error("Error updating cue points:", error);
         res.status(500).json({ error: "Failed to update cue points", details: error.message });
+      }
+    });
+
+    // Extract Duration for Track (manual trigger for existing tracks)
+    app.post("/api/tracks/:id/extract-duration", async (req, res) => {
+      const { id } = req.params;
+      
+      try {
+        const track = db.prepare("SELECT * FROM tracks WHERE id = ?").get(id) as any;
+        
+        if (!track) {
+          return res.status(404).json({ error: "Track not found" });
+        }
+        
+        if (!track.filepath || !fs.existsSync(track.filepath)) {
+          return res.status(400).json({ error: "Track file not found on server" });
+        }
+        
+        console.log(`[ExtractDuration] Extracting duration for track ${id}: ${track.filepath}`);
+        
+        const duration = await extractDuration(track.filepath);
+        
+        if (!duration) {
+          return res.status(500).json({ error: "Failed to extract duration" });
+        }
+        
+        console.log(`[ExtractDuration] Extracted duration for track ${id}: ${duration}s`);
+        
+        // Get track category to determine default cue_out
+        let defaultCueOut = duration;
+        
+        if (track.category_id) {
+          const category = db.prepare("SELECT type FROM categories WHERE id = ?").get(track.category_id) as any;
+          if (category) {
+            const segueOffset = category.type === 'music' ? 3.0 : 0.5;
+            defaultCueOut = Math.max(0, duration - segueOffset);
+            console.log(`[ExtractDuration] Setting cue_out to ${defaultCueOut}s (duration ${duration}s - segue ${segueOffset}s)`);
+          }
+        }
+        
+        // Only update cue_out if it's currently 0 or null
+        const updateCueOut = !track.cue_out || track.cue_out === 0;
+        
+        if (updateCueOut) {
+          db.prepare(
+            "UPDATE tracks SET duration = ?, cue_out = ? WHERE id = ?"
+          ).run(duration, defaultCueOut, id);
+        } else {
+          db.prepare(
+            "UPDATE tracks SET duration = ? WHERE id = ?"
+          ).run(duration, id);
+        }
+        
+        const updatedTrack = db.prepare("SELECT * FROM tracks WHERE id = ?").get(id);
+        res.json(updatedTrack);
+      } catch (error: any) {
+        console.error("Error extracting duration:", error);
+        res.status(500).json({ error: "Failed to extract duration", details: error.message });
+      }
+    });
+
+    // Batch Extract Duration for All Tracks
+    app.post("/api/tracks/extract-duration-batch", async (req, res) => {
+      try {
+        const tracks = db.prepare(
+          "SELECT id, filepath, category_id, duration, cue_out FROM tracks WHERE filepath IS NOT NULL AND filepath != ''"
+        ).all() as any[];
+        
+        console.log(`[BatchExtractDuration] Processing ${tracks.length} tracks`);
+        
+        let processed = 0;
+        let updated = 0;
+        let failed = 0;
+        
+        for (const track of tracks) {
+          if (!fs.existsSync(track.filepath)) {
+            console.warn(`[BatchExtractDuration] File not found for track ${track.id}: ${track.filepath}`);
+            failed++;
+            continue;
+          }
+          
+          const duration = await extractDuration(track.filepath);
+          
+          if (duration) {
+            let defaultCueOut = duration;
+            
+            if (track.category_id) {
+              const category = db.prepare("SELECT type FROM categories WHERE id = ?").get(track.category_id) as any;
+              if (category) {
+                const segueOffset = category.type === 'music' ? 3.0 : 0.5;
+                defaultCueOut = Math.max(0, duration - segueOffset);
+              }
+            }
+            
+            // Only update cue_out if it's currently 0 or null
+            const updateCueOut = !track.cue_out || track.cue_out === 0;
+            
+            if (updateCueOut) {
+              db.prepare(
+                "UPDATE tracks SET duration = ?, cue_out = ? WHERE id = ?"
+              ).run(duration, defaultCueOut, track.id);
+            } else {
+              db.prepare(
+                "UPDATE tracks SET duration = ? WHERE id = ?"
+              ).run(duration, track.id);
+            }
+            
+            updated++;
+            console.log(`[BatchExtractDuration] Updated track ${track.id}: ${duration}s`);
+          } else {
+            failed++;
+            console.warn(`[BatchExtractDuration] Failed to extract duration for track ${track.id}`);
+          }
+          
+          processed++;
+          
+          // Send progress update every 10 tracks
+          if (processed % 10 === 0) {
+            console.log(`[BatchExtractDuration] Progress: ${processed}/${tracks.length} (${updated} updated, ${failed} failed)`);
+          }
+        }
+        
+        console.log(`[BatchExtractDuration] Complete: ${processed} processed, ${updated} updated, ${failed} failed`);
+        
+        res.json({
+          processed,
+          updated,
+          failed,
+          total: tracks.length
+        });
+      } catch (error: any) {
+        console.error("Error in batch duration extraction:", error);
+        res.status(500).json({ error: "Failed to extract durations", details: error.message });
       }
     });
 
