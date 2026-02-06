@@ -6,7 +6,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Play, Pause, Square } from "lucide-react";
+import { Play, Pause, Square, Check, X } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 
 interface CuePointEditorProps {
   open: boolean;
@@ -34,6 +35,7 @@ export default function CuePointEditor({
   const audioRef = useRef<HTMLAudioElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const { toast } = useToast();
   
   const [duration, setDuration] = useState(initialCuePoints.cueOut || 0);
   const [cueIn, setCueIn] = useState(initialCuePoints.cueIn);
@@ -328,62 +330,28 @@ export default function CuePointEditor({
       });
 
       if (response.ok) {
-        // Show success notification
-        const notification = document.createElement('div');
-        notification.className = 'fixed bottom-4 right-4 bg-green-600 text-white px-6 py-3 rounded-lg shadow-lg z-50 flex items-center gap-2';
-        notification.innerHTML = `
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
-          </svg>
-          <span>Cue points saved successfully</span>
-        `;
-        document.body.appendChild(notification);
-        
-        // Remove notification after 3 seconds
-        setTimeout(() => {
-          notification.style.opacity = '0';
-          notification.style.transition = 'opacity 0.3s';
-          setTimeout(() => notification.remove(), 300);
-        }, 3000);
-        
+        toast({
+          title: "Success",
+          description: "Cue points saved successfully",
+          duration: 3000,
+        });
         onOpenChange(false);
       } else {
-        // Show error notification
-        const notification = document.createElement('div');
-        notification.className = 'fixed bottom-4 right-4 bg-red-600 text-white px-6 py-3 rounded-lg shadow-lg z-50 flex items-center gap-2';
-        notification.innerHTML = `
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-          </svg>
-          <span>Failed to save cue points</span>
-        `;
-        document.body.appendChild(notification);
-        
-        setTimeout(() => {
-          notification.style.opacity = '0';
-          notification.style.transition = 'opacity 0.3s';
-          setTimeout(() => notification.remove(), 300);
-        }, 3000);
+        toast({
+          title: "Error",
+          description: "Failed to save cue points",
+          variant: "destructive",
+          duration: 3000,
+        });
       }
     } catch (error) {
       console.error("Failed to save cue points:", error);
-      
-      // Show error notification
-      const notification = document.createElement('div');
-      notification.className = 'fixed bottom-4 right-4 bg-red-600 text-white px-6 py-3 rounded-lg shadow-lg z-50 flex items-center gap-2';
-      notification.innerHTML = `
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-        </svg>
-        <span>Failed to save cue points</span>
-      `;
-      document.body.appendChild(notification);
-      
-      setTimeout(() => {
-        notification.style.opacity = '0';
-        notification.style.transition = 'opacity 0.3s';
-        setTimeout(() => notification.remove(), 300);
-      }, 3000);
+      toast({
+        title: "Error",
+        description: "Failed to save cue points",
+        variant: "destructive",
+        duration: 3000,
+      });
     }
   };
 
