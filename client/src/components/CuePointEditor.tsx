@@ -53,12 +53,26 @@ export default function CuePointEditor({
     
     setCueIn(initialCuePoints.cueIn);
     setCueOut(initialCuePoints.cueOut);
+    setSegueDuration(initialCuePoints.segueDuration);
     
-    // Set default segueDuration based on track type if not already set
-    const defaultSegue = trackType === "song" ? 3.0 : 0.5;
-    setSegueDuration(initialCuePoints.segueDuration || defaultSegue);
+    // CRITICAL: Use initialCuePoints.cueOut as the initial duration
+    // This is the track's actual duration from the database
+    const initialDuration = initialCuePoints.cueOut || 0;
+    setDuration(initialDuration);
     
-    setDuration(initialCuePoints.cueOut || 0);
+    // Update display immediately with database duration
+    const formatTime = (seconds: number) => {
+      const mins = Math.floor(seconds / 60);
+      const secs = Math.floor(seconds % 60);
+      const ms = Math.floor((seconds % 1) * 100);
+      return `${mins}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
+    };
+    
+    if (initialDuration > 0) {
+      // Duration will be set by the polling mechanism
+      // No DOM manipulation needed
+    }
+    
     setCurrentTime(0);
     setIsPlaying(false);
     
@@ -103,11 +117,7 @@ export default function CuePointEditor({
         setSegueDuration(defaultSegue);
       }
       
-      // Update DOM directly for immediate feedback
-      const timeDisplay = document.querySelector('[data-time-display]');
-      if (timeDisplay) {
-        timeDisplay.textContent = `0:00.00 / ${formatTime(dur)}`;
-      }
+      // NO DOM MANIPULATION - Let React handle the rendering
     };
     
     const handleLoadedMetadata = () => {
@@ -120,13 +130,8 @@ export default function CuePointEditor({
     
     const handleTimeUpdate = () => {
       const time = audio.currentTime;
-      const dur = audio.duration || 0;
       setCurrentTime(time);
-      // Directly update DOM to bypass React rendering issues
-      const timeDisplay = document.querySelector('[data-time-display]');
-      if (timeDisplay && dur > 0) {
-        timeDisplay.textContent = `${formatTime(time)} / ${formatTime(dur)}`;
-      }
+      // React will handle rendering - no DOM manipulation needed
     };
     
     const handleEnded = () => {
