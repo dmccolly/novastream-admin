@@ -43,6 +43,9 @@ export default function CuePointEditor({
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [waveformData, setWaveformData] = useState<number[]>([]);
+  const [isScrubbing, setIsScrubbing] = useState(false);
+  const [wasPlayingBeforeScrub, setWasPlayingBeforeScrub] = useState(false);
+  const [isTimelineScrubbing, setIsTimelineScrubbing] = useState(false);
 
   // Reset values when modal opens and generate initial waveform
   useEffect(() => {
@@ -338,6 +341,127 @@ export default function CuePointEditor({
     audioRef.current.currentTime = time;
   };
 
+  const handleWaveformMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!canvasRef.current || !audioRef.current || duration === 0) return;
+    
+    setIsScrubbing(true);
+    setWasPlayingBeforeScrub(isPlaying);
+    
+    // Pause audio while scrubbing
+    if (isPlaying) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+    }
+    
+    // Set initial position
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const percent = Math.max(0, Math.min(x / rect.width, 1));
+    const time = percent * duration;
+    audioRef.current.currentTime = time;
+    setCurrentTime(time);
+  };
+
+  const handleWaveformMouseMove = (e: MouseEvent) => {
+    if (!isScrubbing || !canvasRef.current || !audioRef.current || duration === 0) return;
+    
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const percent = Math.max(0, Math.min(x / rect.width, 1));
+    const time = percent * duration;
+    audioRef.current.currentTime = time;
+    setCurrentTime(time);
+  };
+
+  const handleWaveformMouseUp = () => {
+    if (!isScrubbing) return;
+    
+    setIsScrubbing(false);
+    
+    // Resume playback if it was playing before scrubbing
+    if (wasPlayingBeforeScrub && audioRef.current) {
+      audioRef.current.play();
+      setIsPlaying(true);
+    }
+    
+    setWasPlayingBeforeScrub(false);
+  };
+
+  // Add global mouse listeners for scrubbing
+  useEffect(() => {
+    if (isScrubbing) {
+      document.addEventListener('mousemove', handleWaveformMouseMove);
+      document.addEventListener('mouseup', handleWaveformMouseUp);
+      
+      return () => {
+        document.removeEventListener('mousemove', handleWaveformMouseMove);
+        document.removeEventListener('mouseup', handleWaveformMouseUp);
+      };
+    }
+  }, [isScrubbing, duration]);
+
+  const handleTimelineMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    // Don't interfere with marker dragging
+    if ((e.target as HTMLElement).closest('.cursor-ew-resize')) return;
+    
+    if (!timelineRef.current || !audioRef.current || duration === 0) return;
+    
+    setIsTimelineScrubbing(true);
+    setWasPlayingBeforeScrub(isPlaying);
+    
+    // Pause audio while scrubbing
+    if (isPlaying) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+    }
+    
+    // Set initial position
+    const rect = timelineRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const percent = Math.max(0, Math.min(x / rect.width, 1));
+    const time = percent * duration;
+    audioRef.current.currentTime = time;
+    setCurrentTime(time);
+  };
+
+  const handleTimelineMouseMove = (e: MouseEvent) => {
+    if (!isTimelineScrubbing || !timelineRef.current || !audioRef.current || duration === 0) return;
+    
+    const rect = timelineRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const percent = Math.max(0, Math.min(x / rect.width, 1));
+    const time = percent * duration;
+    audioRef.current.currentTime = time;
+    setCurrentTime(time);
+  };
+
+  const handleTimelineMouseUp = () => {
+    if (!isTimelineScrubbing) return;
+    
+    setIsTimelineScrubbing(false);
+    
+    // Resume playback if it was playing before scrubbing
+    if (wasPlayingBeforeScrub && audioRef.current) {
+      audioRef.current.play();
+      setIsPlaying(true);
+    }
+    
+    setWasPlayingBeforeScrub(false);
+  };
+
+  // Add global mouse listeners for timeline scrubbing
+  useEffect(() => {
+    if (isTimelineScrubbing) {
+      document.addEventListener('mousemove', handleTimelineMouseMove);
+      document.addEventListener('mouseup', handleTimelineMouseUp);
+      
+      return () => {
+        document.removeEventListener('mousemove', handleTimelineMouseMove);
+        document.removeEventListener('mouseup', handleTimelineMouseUp);
+      };
+    }
+  }, [isTimelineScrubbing, duration]);
+
   const handleMarkerDrag = (
     e: React.MouseEvent<HTMLDivElement>,
     marker: "cueIn" | "fadeStart" | "cueOut"
@@ -416,14 +540,7 @@ export default function CuePointEditor({
                 width={1300}
                 height={120}
                 className="w-full h-[120px] bg-gray-900 rounded cursor-crosshair"
-                onClick={(e) => {
-                  if (!canvasRef.current || !audioRef.current || duration === 0) return;
-                  const rect = canvasRef.current.getBoundingClientRect();
-                  const x = e.clientX - rect.left;
-                  const percent = x / rect.width;
-                  const time = percent * duration;
-                  audioRef.current.currentTime = time;
-                }}
+                onMouseDown={handleWaveformMouseDown}
               />
             </div>
 
@@ -439,7 +556,7 @@ export default function CuePointEditor({
                 <div
                   ref={timelineRef}
                   className="relative h-16 bg-gray-700 rounded cursor-pointer"
-                  onClick={handleTimelineClick}
+                  onMouseDown={handleTimelineMouseDown}
                 >
                   {/* Cue In Marker */}
                   <div
