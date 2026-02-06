@@ -6,7 +6,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Play, Pause, Square, RefreshCw, AlertCircle } from "lucide-react";
+import { Play, Pause, Square } from "lucide-react";
 
 interface CuePointEditorProps {
   open: boolean;
@@ -35,9 +35,6 @@ export default function CuePointEditor({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   
-  // Track if cueOut was initially zero - we'll need to update it when duration loads
-  const cueOutWasZeroRef = useRef(initialCuePoints.cueOut === 0 || !initialCuePoints.cueOut);
-  
   const [duration, setDuration] = useState(initialCuePoints.cueOut || 0);
   const [cueIn, setCueIn] = useState(initialCuePoints.cueIn);
   const [cueOut, setCueOut] = useState(initialCuePoints.cueOut);
@@ -49,33 +46,35 @@ export default function CuePointEditor({
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [wasPlayingBeforeScrub, setWasPlayingBeforeScrub] = useState(false);
   const [isTimelineScrubbing, setIsTimelineScrubbing] = useState(false);
-  const [isLoadingDuration, setIsLoadingDuration] = useState(false);
-  const [durationLoadFailed, setDurationLoadFailed] = useState(false);
-  const [manualDurationEntry, setManualDurationEntry] = useState("");
 
   // Reset values when modal opens and generate initial waveform
   useEffect(() => {
     if (!open) return;
     
-    // Update the ref to track if cueOut was initially zero
-    cueOutWasZeroRef.current = initialCuePoints.cueOut === 0 || !initialCuePoints.cueOut;
-    
     setCueIn(initialCuePoints.cueIn);
     setCueOut(initialCuePoints.cueOut);
+    setSegueDuration(initialCuePoints.segueDuration);
     
-    // Set default segueDuration based on track type if not already set
-    const defaultSegue = trackType === "song" ? 3.0 : 0.5;
-    setSegueDuration(initialCuePoints.segueDuration || defaultSegue);
-    
-    // Use initialCuePoints.cueOut as the initial duration
+    // CRITICAL: Use initialCuePoints.cueOut as the initial duration
+    // This is the track's actual duration from the database
     const initialDuration = initialCuePoints.cueOut || 0;
     setDuration(initialDuration);
     
+    // Update display immediately with database duration
+    const formatTime = (seconds: number) => {
+      const mins = Math.floor(seconds / 60);
+      const secs = Math.floor(seconds % 60);
+      const ms = Math.floor((seconds % 1) * 100);
+      return `${mins}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
+    };
+    
+    if (initialDuration > 0) {
+      // Duration will be set by the polling mechanism
+      // No DOM manipulation needed
+    }
+    
     setCurrentTime(0);
     setIsPlaying(false);
-    setIsLoadingDuration(initialDuration === 0);
-    setDurationLoadFailed(false);
-    setManualDurationEntry("");
     
     // Generate placeholder waveform immediately
     const samples = 500;
@@ -93,7 +92,7 @@ export default function CuePointEditor({
 
   // Load audio and generate waveform
   useEffect(() => {
-    if (!audioRef.current || !open || !audioUrl) return;
+    if (!audioRef.current || !open) return;
     
     const audio = audioRef.current;
     
@@ -105,30 +104,24 @@ export default function CuePointEditor({
     };
     
     const updateDurationDisplay = (dur: number) => {
-      console.log('[CuePointEditor] Duration loaded:', dur, 'cueOutWasZero:', cueOutWasZeroRef.current);
-      
       setDuration(dur);
-      setIsLoadingDuration(false);
-      setDurationLoadFailed(false);
       
-      // CRITICAL FIX: Always update cueOut if it was initially zero
-      if (cueOutWasZeroRef.current) {
-        console.log('[CuePointEditor] Setting cueOut to:', dur);
+      // Set default cueOut if not already set
+      if (initialCuePoints.cueOut === 0 || !initialCuePoints.cueOut) {
         setCueOut(dur);
-        cueOutWasZeroRef.current = false; // Only do this once
       }
       
       // Set default segueDuration if not already set (or if it's 0)
       if (initialCuePoints.segueDuration === 0 || !initialCuePoints.segueDuration) {
         const defaultSegue = trackType === "song" ? 3.0 : 0.5;
-        console.log('[CuePointEditor] Setting default segue duration:', defaultSegue);
         setSegueDuration(defaultSegue);
       }
+      
+      // NO DOM MANIPULATION - Let React handle the rendering
     };
     
     const handleLoadedMetadata = () => {
       const dur = audio.duration || 0;
-      console.log('[CuePointEditor] loadedmetadata event, duration:', dur);
       if (dur > 0 && !isNaN(dur)) {
         updateDurationDisplay(dur);
         generateWaveform(audio);
@@ -138,13 +131,7 @@ export default function CuePointEditor({
     const handleTimeUpdate = () => {
       const time = audio.currentTime;
       setCurrentTime(time);
-      
-      // If duration wasn't available on load but becomes available during playback
-      if (duration === 0 && audio.duration > 0 && !isNaN(audio.duration)) {
-        console.log('[CuePointEditor] Duration became available during playback:', audio.duration);
-        updateDurationDisplay(audio.duration);
-        generateWaveform(audio);
-      }
+      // React will handle rendering - no DOM manipulation needed
     };
     
     const handleEnded = () => {
@@ -157,21 +144,16 @@ export default function CuePointEditor({
     audio.addEventListener('timeupdate', handleTimeUpdate);
     audio.addEventListener('ended', handleEnded);
     
-    // CRITICAL FIX: Poll for duration availability with longer timeout
+    // CRITICAL FIX: Poll for duration availability
     let attempts = 0;
-    const maxAttempts = 200; // 200 attempts * 50ms = 10 seconds max (increased from 2.5s)
+    const maxAttempts = 50; // 50 attempts * 50ms = 2.5 seconds max
     let pollInterval: number | null = null;
     
     const checkDuration = () => {
       attempts++;
       
-      if (attempts % 20 === 0) { // Log every second
-        console.log(`[CuePointEditor] Poll attempt ${attempts}/200, readyState: ${audio.readyState}, duration: ${audio.duration}`);
-      }
-      
       if (audio.readyState >= 1 && audio.duration > 0 && !isNaN(audio.duration)) {
         // Duration is available!
-        console.log('[CuePointEditor] Duration available via polling:', audio.duration);
         updateDurationDisplay(audio.duration);
         generateWaveform(audio);
         if (pollInterval !== null) {
@@ -183,17 +165,12 @@ export default function CuePointEditor({
       
       if (attempts >= maxAttempts) {
         // Give up and use initialCuePoints.cueOut as fallback
-        console.log('[CuePointEditor] Polling timeout after 10 seconds, using fallback:', initialCuePoints.cueOut);
         if (pollInterval !== null) {
           clearInterval(pollInterval);
           pollInterval = null;
         }
         if (initialCuePoints.cueOut > 0) {
           updateDurationDisplay(initialCuePoints.cueOut);
-        } else {
-          console.error('[CuePointEditor] No duration available and no fallback');
-          setIsLoadingDuration(false);
-          setDurationLoadFailed(true);
         }
         return false;
       }
@@ -202,8 +179,6 @@ export default function CuePointEditor({
     };
     
     // Start polling immediately
-    console.log('[CuePointEditor] Starting audio load and polling, audioUrl:', audioUrl);
-    setIsLoadingDuration(duration === 0);
     audio.load();
     
     // Try immediately
@@ -220,7 +195,7 @@ export default function CuePointEditor({
         clearInterval(pollInterval);
       }
     };
-  }, [audioUrl, open, initialCuePoints, trackType]);
+  }, [audioUrl, open, initialCuePoints]);
 
   // Generate waveform visualization
   const generateWaveform = async (audio: HTMLAudioElement) => {
@@ -247,18 +222,6 @@ export default function CuePointEditor({
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
       
-      // If we didn't have duration before, get it from the audio buffer
-      if (duration === 0 && audioBuffer.duration > 0) {
-        console.log('[CuePointEditor] Got duration from Web Audio API:', audioBuffer.duration);
-        setDuration(audioBuffer.duration);
-        if (cueOutWasZeroRef.current) {
-          setCueOut(audioBuffer.duration);
-          cueOutWasZeroRef.current = false;
-        }
-        setIsLoadingDuration(false);
-        setDurationLoadFailed(false);
-      }
-      
       const rawData = audioBuffer.getChannelData(0);
       const blockSize = Math.floor(rawData.length / samples);
       const filteredData: number[] = [];
@@ -276,7 +239,7 @@ export default function CuePointEditor({
       const normalized = filteredData.map(n => n / max);
       setWaveformData(normalized);
     } catch (error) {
-      console.log('Could not generate detailed waveform, using placeholder:', error);
+      console.log('Could not generate detailed waveform, using placeholder');
     }
   };
 
@@ -350,47 +313,6 @@ export default function CuePointEditor({
     audioRef.current.currentTime = 0;
     setIsPlaying(false);
     setCurrentTime(0);
-  };
-
-  const handleRetryLoadDuration = () => {
-    if (!audioRef.current) return;
-    console.log('[CuePointEditor] Manually retrying duration load');
-    setIsLoadingDuration(true);
-    setDurationLoadFailed(false);
-    audioRef.current.load();
-    
-    // Try to get duration from audio element
-    setTimeout(() => {
-      if (audioRef.current && audioRef.current.duration > 0) {
-        const dur = audioRef.current.duration;
-        console.log('[CuePointEditor] Duration loaded on retry:', dur);
-        setDuration(dur);
-        if (cueOutWasZeroRef.current) {
-          setCueOut(dur);
-          cueOutWasZeroRef.current = false;
-        }
-        setIsLoadingDuration(false);
-        setDurationLoadFailed(false);
-      } else {
-        setIsLoadingDuration(false);
-        setDurationLoadFailed(true);
-      }
-    }, 1000);
-  };
-
-  const handleManualDurationSubmit = () => {
-    const dur = parseFloat(manualDurationEntry);
-    if (!isNaN(dur) && dur > 0) {
-      console.log('[CuePointEditor] Manually set duration:', dur);
-      setDuration(dur);
-      if (cueOutWasZeroRef.current) {
-        setCueOut(dur);
-        cueOutWasZeroRef.current = false;
-      }
-      setIsLoadingDuration(false);
-      setDurationLoadFailed(false);
-      setManualDurationEntry("");
-    }
   };
 
   const handleSave = async () => {
@@ -594,58 +516,12 @@ export default function CuePointEditor({
           </DialogHeader>
 
           <div className="space-y-3 mt-2">
-            {/* Duration Loading/Error Status */}
-            {isLoadingDuration && (
-              <div className="bg-blue-900 border border-blue-500 p-3 rounded-lg flex items-center gap-3">
-                <RefreshCw className="h-5 w-5 animate-spin" />
-                <span>Loading audio duration... (this may take up to 10 seconds)</span>
-              </div>
-            )}
-            
-            {durationLoadFailed && (
-              <div className="bg-yellow-900 border border-yellow-500 p-3 rounded-lg">
-                <div className="flex items-center gap-3 mb-3">
-                  <AlertCircle className="h-5 w-5" />
-                  <span className="font-bold">Unable to detect audio duration automatically</span>
-                </div>
-                <div className="flex gap-3 items-center">
-                  <Button
-                    onClick={handleRetryLoadDuration}
-                    className="bg-blue-600 hover:bg-blue-700"
-                    size="sm"
-                  >
-                    <RefreshCw className="h-4 w-4 mr-2" />
-                    Retry
-                  </Button>
-                  <span className="text-sm">or enter duration manually:</span>
-                  <input
-                    type="number"
-                    value={manualDurationEntry}
-                    onChange={(e) => setManualDurationEntry(e.target.value)}
-                    placeholder="e.g., 180.5"
-                    className="bg-gray-800 border border-gray-600 rounded px-3 py-1 w-32 text-sm"
-                    step="0.1"
-                  />
-                  <span className="text-sm">seconds</span>
-                  <Button
-                    onClick={handleManualDurationSubmit}
-                    className="bg-green-600 hover:bg-green-700"
-                    size="sm"
-                    disabled={!manualDurationEntry}
-                  >
-                    Set
-                  </Button>
-                </div>
-              </div>
-            )}
-
             {/* Playback Controls */}
             <div className="flex items-center gap-4 bg-gray-800 p-4 rounded-lg">
               <Button
                 onClick={handlePlayPause}
                 className="bg-blue-600 hover:bg-blue-700"
                 size="lg"
-                disabled={!audioUrl || duration === 0}
               >
                 {isPlaying ? <Pause className="h-6 w-6" /> : <Play className="h-6 w-6" />}
               </Button>
@@ -653,12 +529,11 @@ export default function CuePointEditor({
                 onClick={handleStop}
                 className="bg-gray-700 hover:bg-gray-600"
                 size="lg"
-                disabled={!audioUrl || duration === 0}
               >
                 <Square className="h-6 w-6" />
               </Button>
               <div className="flex-1 text-center">
-                <div className="text-2xl font-mono">{formatTime(currentTime)} / {formatTime(duration)}</div>
+                <div className="text-2xl font-mono" data-time-display>{formatTime(currentTime)} / {formatTime(duration)}</div>
               </div>
             </div>
 
