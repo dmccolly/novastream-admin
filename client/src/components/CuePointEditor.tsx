@@ -21,6 +21,7 @@ interface CuePointEditorProps {
     segueDuration: number;
   };
   trackType?: string; // "song" or other types
+  onSuccess?: () => void; // Callback after successful save
 }
 
 export default function CuePointEditor({
@@ -31,6 +32,7 @@ export default function CuePointEditor({
   audioUrl,
   initialCuePoints,
   trackType = "other", // Default to "other" if not specified
+  onSuccess,
 }: CuePointEditorProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -338,6 +340,9 @@ export default function CuePointEditor({
           title: "Success",
           description: "Cue points saved successfully",
         });
+        if (onSuccess) {
+          onSuccess(); // Trigger refetch of track data
+        }
         setTimeout(() => onOpenChange(false), 500);
       } else {
         console.log("Showing error toast - response not ok");

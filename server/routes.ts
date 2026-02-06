@@ -147,6 +147,29 @@ export function registerRoutes(app: Express): Server {
     }
   });
 
+  // Get Single Track by ID
+  app.get("/api/tracks/:id", (req, res) => {
+    const { id } = req.params;
+    try {
+      const track = db.prepare(`
+        SELECT t.*, c.name as category_name, s.name as subcategory_name 
+        FROM tracks t 
+        LEFT JOIN categories c ON t.category_id = c.id 
+        LEFT JOIN categories s ON t.subcategory_id = s.id 
+        WHERE t.id = ?
+      `).get(id);
+      
+      if (!track) {
+        return res.status(404).json({ error: "Track not found" });
+      }
+      
+      res.json(track);
+    } catch (error: any) {
+      console.error("Error fetching track:", error);
+      res.status(500).json({ error: "Failed to fetch track", details: error.message });
+    }
+  });
+
   // Get Dropbox Preview Link - for playing cloud-only tracks
   app.get("/api/tracks/:id/preview", async (req, res) => {
     console.log("[PREVIEW] Request received for track:", req.params.id);

@@ -571,6 +571,16 @@ export default function Library() {
                 segueDuration: cueEditingTrack.segue_duration || (cueEditingTrack.category_name === 'Music' ? 3 : 0.5),
               }}
               trackType={cueEditingTrack.category_name === 'Music' ? 'song' : 'other'}
+              onSuccess={async () => {
+                // Refetch the specific track to get updated cue points
+                const updatedTrack = await tracksApi.getById(cueEditingTrack.id);
+                // Update the track in the tracks array
+                setTracks(prevTracks => 
+                  prevTracks.map(t => t.id === updatedTrack.id ? updatedTrack : t)
+                );
+                // Update cueEditingTrack so if modal is reopened, it has fresh data
+                setCueEditingTrack(updatedTrack);
+              }}
             />
           )}
         </DashboardLayout>
