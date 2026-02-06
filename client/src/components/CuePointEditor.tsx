@@ -280,13 +280,42 @@ export default function CuePointEditor({
         color = "#6b7280"; // gray
       }
 
-      // Highlight current playback position
-      if (Math.abs(position - currentTime) < duration / waveformData.length) {
-        color = "#ef4444"; // red
-      }
-
       ctx.fillStyle = color;
       ctx.fillRect(x, y, barWidth - 1, barHeight);
+    });
+
+    // Draw borders around fade section for visibility
+    if (segueDuration > 0 && cueOut > 0) {
+      const fadeStartX = ((cueOut - segueDuration) / duration) * width;
+      const fadeEndX = (cueOut / duration) * width;
+      
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 3]);
+      ctx.beginPath();
+      ctx.moveTo(fadeStartX, 0);
+      ctx.lineTo(fadeStartX, height);
+      ctx.stroke();
+      
+      ctx.beginPath();
+      ctx.moveTo(fadeEndX, 0);
+      ctx.lineTo(fadeEndX, height);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Draw playback cursor line
+    if (currentTime > 0 && duration > 0) {
+      const cursorX = (currentTime / duration) * width;
+      ctx.strokeStyle = "#ef4444";
+      ctx.lineWidth = 3;
+      ctx.shadowColor = "#ef4444";
+      ctx.shadowBlur = 8;
+      ctx.beginPath();
+      ctx.moveTo(cursorX, 0);
+      ctx.lineTo(cursorX, height);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
     });
   }, [waveformData, cueIn, cueOut, segueDuration, currentTime, duration]);
 
