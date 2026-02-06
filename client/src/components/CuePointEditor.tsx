@@ -50,6 +50,7 @@ export default function CuePointEditor({
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [wasPlayingBeforeScrub, setWasPlayingBeforeScrub] = useState(false);
   const [isTimelineScrubbing, setIsTimelineScrubbing] = useState(false);
+  const animationFrameRef = useRef<number | null>(null);
 
   // Reset values when modal opens and generate initial waveform
   useEffect(() => {
@@ -316,8 +317,39 @@ export default function CuePointEditor({
       ctx.lineTo(cursorX, height);
       ctx.stroke();
       ctx.shadowBlur = 0;
-    });
+    }
   }, [waveformData, cueIn, cueOut, segueDuration, currentTime, duration]);
+
+  // Animation loop for smooth playback cursor
+  useEffect(() => {
+    if (!isPlaying || !audioRef.current || !canvasRef.current) {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+      return;
+    }
+
+    const animate = () => {
+      if (audioRef.current && canvasRef.current) {
+        // Update currentTime from audio element for smooth animation
+        const time = audioRef.current.currentTime;
+        setCurrentTime(time);
+      }
+      
+      if (isPlaying) {
+        animationFrameRef.current = requestAnimationFrame(animate);
+      }
+    };
+
+    animationFrameRef.current = requestAnimationFrame(animate);
+
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+  }, [isPlaying]);
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
