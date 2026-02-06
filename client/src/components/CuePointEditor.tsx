@@ -6,7 +6,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Play, Pause, Square } from "lucide-react";
+import { Play, Pause, Square, RefreshCw, AlertCircle } from "lucide-react";
 
 interface CuePointEditorProps {
   open: boolean;
@@ -49,6 +49,9 @@ export default function CuePointEditor({
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [wasPlayingBeforeScrub, setWasPlayingBeforeScrub] = useState(false);
   const [isTimelineScrubbing, setIsTimelineScrubbing] = useState(false);
+  const [isLoadingDuration, setIsLoadingDuration] = useState(false);
+  const [durationLoadFailed, setDurationLoadFailed] = useState(false);
+  const [manualDurationEntry, setManualDurationEntry] = useState("");
 
   // Reset values when modal opens and generate initial waveform
   useEffect(() => {
@@ -70,6 +73,9 @@ export default function CuePointEditor({
     
     setCurrentTime(0);
     setIsPlaying(false);
+    setIsLoadingDuration(initialDuration === 0);
+    setDurationLoadFailed(false);
+    setManualDurationEntry("");
     
     // Generate placeholder waveform immediately
     const samples = 500;
@@ -87,7 +93,7 @@ export default function CuePointEditor({
 
   // Load audio and generate waveform
   useEffect(() => {
-    if (!audioRef.current || !open) return;
+    if (!audioRef.current || !open || !audioUrl) return;
     
     const audio = audioRef.current;
     
@@ -102,6 +108,8 @@ export default function CuePointEditor({
       console.log('[CuePointEditor] Duration loaded:', dur, 'cueOutWasZero:', cueOutWasZeroRef.current);
       
       setDuration(dur);
+      setIsLoadingDuration(false);
+      setDurationLoadFailed(false);
       
       // CRITICAL FIX: Always update cueOut if it was initially zero
       if (cueOutWasZeroRef.current) {
@@ -130,6 +138,13 @@ export default function CuePointEditor({
     const handleTimeUpdate = () => {
       const time = audio.currentTime;
       setCurrentTime(time);
+      
+      // If duration wasn't available on load but becomes available during playback
+      if (duration === 0 && audio.duration > 0 && !isNaN(audio.duration)) {
+        console.log('[CuePointEditor] Duration became available during playback:', audio.duration);
+        updateDurationDisplay(audio.duration);
+        generateWaveform(audio);
+      }
     };
     
     const handleEnded = () => {
@@ -142,14 +157,17 @@ export default function CuePointEditor({
     audio.addEventListener('timeupdate', handleTimeUpdate);
     audio.addEventListener('ended', handleEnded);
     
-    // CRITICAL FIX: Poll for duration availability
+    // CRITICAL FIX: Poll for duration availability with longer timeout
     let attempts = 0;
-    const maxAttempts = 50; // 50 attempts * 50ms = 2.5 seconds max
+    const maxAttempts = 200; // 200 attempts * 50ms = 10 seconds max (increased from 2.5s)
     let pollInterval: number | null = null;
     
     const checkDuration = () => {
       attempts++;
-      console.log(`[CuePointEditor] Poll attempt ${attempts}, readyState: ${audio.readyState}, duration: ${audio.duration}`);
+      
+      if (attempts % 20 === 0) { // Log every second
+        console.log(`[CuePointEditor] Poll attempt ${attempts}/200, readyState: ${audio.readyState}, duration: ${audio.duration}`);
+      }
       
       if (audio.readyState >= 1 && audio.duration > 0 && !isNaN(audio.duration)) {
         // Duration is available!
@@ -165,7 +183,7 @@ export default function CuePointEditor({
       
       if (attempts >= maxAttempts) {
         // Give up and use initialCuePoints.cueOut as fallback
-        console.log('[CuePointEditor] Polling timeout, using fallback:', initialCuePoints.cueOut);
+        console.log('[CuePointEditor] Polling timeout after 10 seconds, using fallback:', initialCuePoints.cueOut);
         if (pollInterval !== null) {
           clearInterval(pollInterval);
           pollInterval = null;
@@ -173,7 +191,9 @@ export default function CuePointEditor({
         if (initialCuePoints.cueOut > 0) {
           updateDurationDisplay(initialCuePoints.cueOut);
         } else {
-          console.error('[CuePointEditor] No duration available and no fallback - editor may not work properly');
+          console.error('[CuePointEditor] No duration available and no fallback');
+          setIsLoadingDuration(false);
+          setDurationLoadFailed(true);
         }
         return false;
       }
@@ -182,7 +202,8 @@ export default function CuePointEditor({
     };
     
     // Start polling immediately
-    console.log('[CuePointEditor] Starting audio load and polling');
+    console.log('[CuePointEditor] Starting audio load and polling, audioUrl:', audioUrl);
+    setIsLoadingDuration(duration === 0);
     audio.load();
     
     // Try immediately
@@ -226,6 +247,18 @@ export default function CuePointEditor({
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
       
+      // If we didn't have duration before, get it from the audio buffer
+      if (duration === 0 && audioBuffer.duration > 0) {
+        console.log('[CuePointEditor] Got duration from Web Audio API:', audioBuffer.duration);
+        setDuration(audioBuffer.duration);
+        if (cueOutWasZeroRef.current) {
+          setCueOut(audioBuffer.duration);
+          cueOutWasZeroRef.current = false;
+        }
+        setIsLoadingDuration(false);
+        setDurationLoadFailed(false);
+      }
+      
       const rawData = audioBuffer.getChannelData(0);
       const blockSize = Math.floor(rawData.length / samples);
       const filteredData: number[] = [];
@@ -243,7 +276,7 @@ export default function CuePointEditor({
       const normalized = filteredData.map(n => n / max);
       setWaveformData(normalized);
     } catch (error) {
-      console.log('Could not generate detailed waveform, using placeholder');
+      console.log('Could not generate detailed waveform, using placeholder:', error);
     }
   };
 
@@ -317,6 +350,47 @@ export default function CuePointEditor({
     audioRef.current.currentTime = 0;
     setIsPlaying(false);
     setCurrentTime(0);
+  };
+
+  const handleRetryLoadDuration = () => {
+    if (!audioRef.current) return;
+    console.log('[CuePointEditor] Manually retrying duration load');
+    setIsLoadingDuration(true);
+    setDurationLoadFailed(false);
+    audioRef.current.load();
+    
+    // Try to get duration from audio element
+    setTimeout(() => {
+      if (audioRef.current && audioRef.current.duration > 0) {
+        const dur = audioRef.current.duration;
+        console.log('[CuePointEditor] Duration loaded on retry:', dur);
+        setDuration(dur);
+        if (cueOutWasZeroRef.current) {
+          setCueOut(dur);
+          cueOutWasZeroRef.current = false;
+        }
+        setIsLoadingDuration(false);
+        setDurationLoadFailed(false);
+      } else {
+        setIsLoadingDuration(false);
+        setDurationLoadFailed(true);
+      }
+    }, 1000);
+  };
+
+  const handleManualDurationSubmit = () => {
+    const dur = parseFloat(manualDurationEntry);
+    if (!isNaN(dur) && dur > 0) {
+      console.log('[CuePointEditor] Manually set duration:', dur);
+      setDuration(dur);
+      if (cueOutWasZeroRef.current) {
+        setCueOut(dur);
+        cueOutWasZeroRef.current = false;
+      }
+      setIsLoadingDuration(false);
+      setDurationLoadFailed(false);
+      setManualDurationEntry("");
+    }
   };
 
   const handleSave = async () => {
@@ -520,12 +594,58 @@ export default function CuePointEditor({
           </DialogHeader>
 
           <div className="space-y-3 mt-2">
+            {/* Duration Loading/Error Status */}
+            {isLoadingDuration && (
+              <div className="bg-blue-900 border border-blue-500 p-3 rounded-lg flex items-center gap-3">
+                <RefreshCw className="h-5 w-5 animate-spin" />
+                <span>Loading audio duration... (this may take up to 10 seconds)</span>
+              </div>
+            )}
+            
+            {durationLoadFailed && (
+              <div className="bg-yellow-900 border border-yellow-500 p-3 rounded-lg">
+                <div className="flex items-center gap-3 mb-3">
+                  <AlertCircle className="h-5 w-5" />
+                  <span className="font-bold">Unable to detect audio duration automatically</span>
+                </div>
+                <div className="flex gap-3 items-center">
+                  <Button
+                    onClick={handleRetryLoadDuration}
+                    className="bg-blue-600 hover:bg-blue-700"
+                    size="sm"
+                  >
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    Retry
+                  </Button>
+                  <span className="text-sm">or enter duration manually:</span>
+                  <input
+                    type="number"
+                    value={manualDurationEntry}
+                    onChange={(e) => setManualDurationEntry(e.target.value)}
+                    placeholder="e.g., 180.5"
+                    className="bg-gray-800 border border-gray-600 rounded px-3 py-1 w-32 text-sm"
+                    step="0.1"
+                  />
+                  <span className="text-sm">seconds</span>
+                  <Button
+                    onClick={handleManualDurationSubmit}
+                    className="bg-green-600 hover:bg-green-700"
+                    size="sm"
+                    disabled={!manualDurationEntry}
+                  >
+                    Set
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {/* Playback Controls */}
             <div className="flex items-center gap-4 bg-gray-800 p-4 rounded-lg">
               <Button
                 onClick={handlePlayPause}
                 className="bg-blue-600 hover:bg-blue-700"
                 size="lg"
+                disabled={!audioUrl || duration === 0}
               >
                 {isPlaying ? <Pause className="h-6 w-6" /> : <Play className="h-6 w-6" />}
               </Button>
@@ -533,6 +653,7 @@ export default function CuePointEditor({
                 onClick={handleStop}
                 className="bg-gray-700 hover:bg-gray-600"
                 size="lg"
+                disabled={!audioUrl || duration === 0}
               >
                 <Square className="h-6 w-6" />
               </Button>
