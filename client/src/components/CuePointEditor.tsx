@@ -320,7 +320,7 @@ export default function CuePointEditor({
   const handleSave = async () => {
     console.log("Saving cue points:", { trackId, cueIn, cueOut, segueDuration });
     try {
-      const response = await fetch(`/api/tracks/${trackId}/cuepoints`, {
+      const response = await fetch(`${window.location.origin}/api/tracks/${trackId}/cuepoints`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
