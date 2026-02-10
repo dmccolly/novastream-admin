@@ -6,7 +6,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Play, Pause, Square, Check, X } from "lucide-react";
+import { Play, Pause, Square } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 interface CuePointEditorProps {
@@ -31,103 +31,166 @@ export default function CuePointEditor({
   trackTitle,
   audioUrl,
   initialCuePoints,
-  trackType = "other", // Default to "other" if not specified
+  trackType = "other",
   onSuccess,
 }: CuePointEditorProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
+
   const lastTapRef = useRef<number>(0);
   const TAP_MS = 350;
-  
-  const [duration, setDuration] = useState(initialCuePoints.cueOut || 0);
+
+  // IMPORTANT: duration should NOT be initialized from cueOut.
+  // It should come from the <audio> element only.
+  const [duration, setDuration] = useState<number>(0);
+  const durationRef = useRef<number>(0);
+
   const [cueIn, setCueIn] = useState(initialCuePoints.cueIn);
   const [cueOut, setCueOut] = useState(initialCuePoints.cueOut);
   const [segueDuration, setSegueDuration] = useState(initialCuePoints.segueDuration);
+
   const [dragging, setDragging] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+
   const [waveformData, setWaveformData] = useState<number[]>([]);
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [wasPlayingBeforeScrub, setWasPlayingBeforeScrub] = useState(false);
   const [isTimelineScrubbing, setIsTimelineScrubbing] = useState(false);
-  const [snapMode, setSnapMode] = useState<'off' | '0.10' | '0.01'>('off');
+
+  const [snapMode, setSnapMode] = useState<"off" | "0.10" | "0.01">("off");
   const animationFrameRef = useRef<number | null>(null);
 
-  // Helper: clamp value between min and max
+  // ---------- helpers ----------
   const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(v, max));
 
-  // Helper: sanitize numeric value
   const sanitize = (v: number) => {
     if (isNaN(v) || !isFinite(v)) return 0;
     return v;
   };
 
-  // Helper: apply snap if enabled
   const applySnap = (value: number): number => {
-    if (snapMode === 'off') return value;
-    const snapValue = snapMode === '0.10' ? 0.1 : 0.01;
+    if (snapMode === "off") return value;
+    const snapValue = snapMode === "0.10" ? 0.1 : 0.01;
     return Math.round(value / snapValue) * snapValue;
   };
 
-  // Canonical constraint function
-  const applyConstraints = (next: { cueIn?: number; cueOut?: number; segueDuration?: number }) => {
-    const dur = duration > 0 ? duration : Math.max(cueOut, 0);
-    
-    // Start with current values
+  /**
+   * Canonical constraint function BUT it can take an override duration to avoid stale closure issues.
+   */
+  const applyConstraints = (
+    next: { cueIn?: number; cueOut?: number; segueDuration?: number },
+    overrideDuration?: number
+  ) => {
+    const dur = overrideDuration && overrideDuration > 0
+      ? overrideDuration
+      : (durationRef.current > 0 ? durationRef.current : Math.max(cueOut, 0));
+
     let newCueIn = sanitize(next.cueIn !== undefined ? next.cueIn : cueIn);
     let newCueOut = sanitize(next.cueOut !== undefined ? next.cueOut : cueOut);
     let newSegue = sanitize(next.segueDuration !== undefined ? next.segueDuration : segueDuration);
-    
-    // Clamp to duration bounds
+
     newCueIn = clamp(newCueIn, 0, dur);
     newCueOut = clamp(newCueOut, 0, dur);
     newSegue = Math.max(0, newSegue);
-    
+
     // Enforce cueIn <= cueOut - segueDuration
     if (newCueIn > newCueOut - newSegue) {
       if (next.cueIn !== undefined) {
-        // User changed cueIn, adjust it
         newCueIn = Math.max(0, newCueOut - newSegue);
       } else if (next.cueOut !== undefined) {
-        // User changed cueOut, adjust it
         newCueOut = Math.min(dur, newCueIn + newSegue);
       } else if (next.segueDuration !== undefined) {
-        // User changed segue, adjust it
         newSegue = Math.max(0, newCueOut - newCueIn);
       }
     }
-    
+
     // Enforce segueDuration <= cueOut - cueIn
     if (newSegue > newCueOut - newCueIn) {
-      newSegue = newCueOut - newCueIn;
+      newSegue = Math.max(0, newCueOut - newCueIn);
     }
-    
-    // Apply all updates
+
     setCueIn(newCueIn);
     setCueOut(newCueOut);
     setSegueDuration(newSegue);
   };
 
-  // Reset values when modal opens and generate initial waveform
+  const formatTime = (seconds: number) => {
+    if (!seconds || seconds <= 0 || !isFinite(seconds)) return "--:--.--";
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    const ms = Math.floor((seconds % 1) * 100);
+    return `${mins}:${secs.toString().padStart(2, "0")}.${ms.toString().padStart(2, "0")}`;
+  };
+
+  // ---------- waveform ----------
+  const tryFetchAudioBuffer = async (url: string): Promise<ArrayBuffer | null> => {
+    try {
+      const response = await fetch(url, { mode: "cors" });
+      if (response.ok) return await response.arrayBuffer();
+    } catch {
+      // ignore
+    }
+    try {
+      const response = await fetch(url, {
+        headers: { Range: "bytes=0-2000000" },
+        mode: "cors",
+      });
+      if (response.ok) return await response.arrayBuffer();
+    } catch {
+      // ignore
+    }
+    return null;
+  };
+
+  const generateWaveform = async (audio: HTMLAudioElement) => {
+    // keep placeholder waveform, attempt real decode in background
+    try {
+      const arrayBuffer = await tryFetchAudioBuffer(audio.src);
+      if (!arrayBuffer) throw new Error("Could not fetch audio data");
+
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+      const samples = 500;
+      const rawData = audioBuffer.getChannelData(0);
+      const blockSize = Math.floor(rawData.length / samples);
+      const filteredData: number[] = [];
+
+      for (let i = 0; i < samples; i++) {
+        const blockStart = blockSize * i;
+        let sum = 0;
+        for (let j = 0; j < blockSize; j++) {
+          sum += Math.abs(rawData[blockStart + j]);
+        }
+        filteredData.push(sum / blockSize);
+      }
+
+      const max = Math.max(...filteredData);
+      const normalized = max > 0 ? filteredData.map((n) => n / max) : filteredData;
+      setWaveformData(normalized);
+    } catch {
+      // stream not decodable; keep placeholder waveform
+    }
+  };
+
+  // ---------- open/reset ----------
   useEffect(() => {
     if (!open) return;
-    
-    // Note: Do NOT set duration here - it will be set from the audio element
-    // The duration state should only come from audio.duration, not from cueOut
-    
-    // Apply constraints to initial values
+
+    // reset cues to initial (do NOT touch duration here)
     applyConstraints({
       cueIn: initialCuePoints.cueIn,
       cueOut: initialCuePoints.cueOut,
-      segueDuration: initialCuePoints.segueDuration
+      segueDuration: initialCuePoints.segueDuration,
     });
-    
+
     setCurrentTime(0);
     setIsPlaying(false);
-    
-    // Generate placeholder waveform immediately
+
+    // placeholder waveform immediately
     const samples = 500;
     const waveform: number[] = [];
     for (let i = 0; i < samples; i++) {
@@ -139,179 +202,99 @@ export default function CuePointEditor({
       waveform.push((base + variation) * fadeIn * fadeOut);
     }
     setWaveformData(waveform);
-  }, [initialCuePoints, open, trackType]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, trackId]);
 
-  // Helper: try to fetch audio buffer with fallback strategies
-  const tryFetchAudioBuffer = async (url: string): Promise<ArrayBuffer | null> => {
-    try {
-      // Try normal fetch first
-      const response = await fetch(url, { mode: "cors" });
-      if (response.ok) {
-        return await response.arrayBuffer();
-      }
-    } catch (error) {
-      console.log('Normal fetch failed, trying range fetch');
-    }
-    
-    try {
-      // Try range fetch as fallback
-      const response = await fetch(url, {
-        headers: { Range: "bytes=0-2000000" },
-        mode: "cors"
-      });
-      if (response.ok) {
-        return await response.arrayBuffer();
-      }
-    } catch (error) {
-      console.log('Range fetch failed');
-    }
-    
-    return null;
-  };
-
-  // Generate waveform visualization
-  const generateWaveform = async (audio: HTMLAudioElement) => {
-    // Keep placeholder waveform (already set)
-    
-    // Try to generate real waveform in background (non-blocking)
-    try {
-      const arrayBuffer = await tryFetchAudioBuffer(audio.src);
-      
-      if (!arrayBuffer) {
-        throw new Error('Could not fetch audio data');
-      }
-      
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-      
-      const samples = 500;
-      const rawData = audioBuffer.getChannelData(0);
-      const blockSize = Math.floor(rawData.length / samples);
-      const filteredData: number[] = [];
-      
-      for (let i = 0; i < samples; i++) {
-        let blockStart = blockSize * i;
-        let sum = 0;
-        for (let j = 0; j < blockSize; j++) {
-          sum += Math.abs(rawData[blockStart + j]);
-        }
-        filteredData.push(sum / blockSize);
-      }
-      
-      const max = Math.max(...filteredData);
-      const normalized = filteredData.map(n => n / max);
-      setWaveformData(normalized);
-    } catch (error) {
-      console.log('Using simplified waveform (stream is not decodable)');
-      // Keep placeholder waveform
-    }
-  };
-
-  // Load audio and generate waveform
+  // ---------- audio duration + events (CORE FIX) ----------
   useEffect(() => {
-    if (!audioRef.current || !open) return;
-    
+    if (!open) return;
     const audio = audioRef.current;
-    
-    // Immediately check if duration is already available
-    if (audio.readyState >= 1 && audio.duration > 0 && !isNaN(audio.duration)) {
-      console.log('Duration immediately available:', audio.duration);
-      setDuration(audio.duration);
-      if (initialCuePoints.cueOut === 0 || !initialCuePoints.cueOut) {
-        applyConstraints({ cueOut: audio.duration });
+    if (!audio) return;
+
+    let cancelled = false;
+
+    const setDurationSafe = (d: number) => {
+      if (cancelled) return;
+      if (!isFinite(d) || isNaN(d) || d <= 0) return;
+
+      durationRef.current = d;
+      setDuration(d);
+
+      // If cueOut wasn't set, set it to duration.
+      if (!initialCuePoints.cueOut || initialCuePoints.cueOut === 0) {
+        applyConstraints({ cueOut: d }, d);
       }
-      if (initialCuePoints.segueDuration === 0 || !initialCuePoints.segueDuration) {
+
+      // If segue wasn't set, default based on type.
+      if (!initialCuePoints.segueDuration || initialCuePoints.segueDuration === 0) {
         const defaultSegue = trackType === "song" ? 3.0 : 0.5;
-        applyConstraints({ segueDuration: defaultSegue });
-      }
-      generateWaveform(audio);
-    }
-    
-    const updateDurationDisplay = (dur: number) => {
-      setDuration(dur);
-      
-      // Set default cueOut if not already set
-      if (initialCuePoints.cueOut === 0 || !initialCuePoints.cueOut) {
-        applyConstraints({ cueOut: dur });
-      }
-      
-      // Set default segueDuration if not already set (or if it's 0)
-      if (initialCuePoints.segueDuration === 0 || !initialCuePoints.segueDuration) {
-        const defaultSegue = trackType === "song" ? 3.0 : 0.5;
-        applyConstraints({ segueDuration: defaultSegue });
+        applyConstraints({ segueDuration: defaultSegue }, d);
       }
     };
-    
-    const handleLoadedMetadata = () => {
-      const dur = audio.duration || 0;
-      if (dur > 0 && !isNaN(dur)) {
-        updateDurationDisplay(dur);
-        generateWaveform(audio);
-      }
+
+    const tryReadDuration = (source: string) => {
+      const d = audio.duration;
+      // Helpful debug if needed:
+      // console.log("[duration]", source, { readyState: audio.readyState, duration: d });
+      if (isFinite(d) && !isNaN(d) && d > 0) setDurationSafe(d);
     };
-    
-    const handleTimeUpdate = () => {
-      const time = audio.currentTime;
-      setCurrentTime(time);
-    };
-    
-    const handleEnded = () => {
+
+    const onLoadedMetadata = () => tryReadDuration("loadedmetadata");
+    const onCanPlayThrough = () => tryReadDuration("canplaythrough");
+    const onDurationChange = () => tryReadDuration("durationchange");
+    const onTimeUpdate = () => setCurrentTime(audio.currentTime || 0);
+    const onEnded = () => {
       setIsPlaying(false);
       setCurrentTime(0);
       audio.currentTime = 0;
     };
-    
-    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
-    audio.addEventListener('timeupdate', handleTimeUpdate);
-    audio.addEventListener('ended', handleEnded);
-    
-    // Poll for duration availability
-    let attempts = 0;
-    const maxAttempts = 50;
-    let pollInterval: number | null = null;
-    
-    const checkDuration = () => {
-      attempts++;
-      
-      if (audio.readyState >= 1 && audio.duration > 0 && !isNaN(audio.duration)) {
-        updateDurationDisplay(audio.duration);
-        generateWaveform(audio);
-        if (pollInterval !== null) {
-          clearInterval(pollInterval);
-          pollInterval = null;
-        }
-        return true;
-      }
-      
-      if (attempts >= maxAttempts) {
-        if (pollInterval !== null) {
-          clearInterval(pollInterval);
-          pollInterval = null;
-        }
-        if (initialCuePoints.cueOut > 0) {
-          updateDurationDisplay(initialCuePoints.cueOut);
-        }
-        return false;
-      }
-      
-      return false;
-    };
-    
+
+    audio.addEventListener("loadedmetadata", onLoadedMetadata);
+    audio.addEventListener("canplaythrough", onCanPlayThrough);
+    audio.addEventListener("durationchange", onDurationChange);
+    audio.addEventListener("timeupdate", onTimeUpdate);
+    audio.addEventListener("ended", onEnded);
+
+    // Make sure correct src is applied, then load.
+    audio.src = audioUrl;
+    audio.preload = "metadata";
     audio.load();
-    
-    if (!checkDuration()) {
-      pollInterval = window.setInterval(checkDuration, 50);
-    }
-    
-    return () => {
-      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
-      audio.removeEventListener('timeupdate', handleTimeUpdate);
-      audio.removeEventListener('ended', handleEnded);
-      if (pollInterval !== null) {
-        clearInterval(pollInterval);
+
+    // Immediate attempt
+    tryReadDuration("immediate");
+
+    // Short polling fallback (stops early)
+    let ticks = 0;
+    const poll = window.setInterval(() => {
+      ticks += 1;
+      if (cancelled) return;
+      if (durationRef.current > 0) {
+        window.clearInterval(poll);
+        return;
       }
+      tryReadDuration("poll");
+      if (ticks >= 60) window.clearInterval(poll); // ~3s at 50ms
+    }, 50);
+
+    // waveform generation can happen once we have *some* readiness
+    // (even if duration is late, it's fine)
+    const waveformKick = window.setTimeout(() => {
+      if (!cancelled) generateWaveform(audio);
+    }, 150);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(poll);
+      window.clearTimeout(waveformKick);
+
+      audio.removeEventListener("loadedmetadata", onLoadedMetadata);
+      audio.removeEventListener("canplaythrough", onCanPlayThrough);
+      audio.removeEventListener("durationchange", onDurationChange);
+      audio.removeEventListener("timeupdate", onTimeUpdate);
+      audio.removeEventListener("ended", onEnded);
     };
-  }, [audioUrl, open, initialCuePoints, trackType]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, trackId, audioUrl, trackType]);
 
   // Draw waveform
   useEffect(() => {
@@ -327,60 +310,68 @@ export default function CuePointEditor({
 
     ctx.clearRect(0, 0, width, height);
 
+    const dur = durationRef.current > 0 ? durationRef.current : duration;
+
     waveformData.forEach((value, i) => {
       const barHeight = value * height * 0.8;
       const x = i * barWidth;
       const y = (height - barHeight) / 2;
 
-      // Determine color based on position
-      const position = (i / waveformData.length) * duration;
       let color = "#3b82f6"; // blue
-      
-      if (position < cueIn) {
-        color = "#6b7280"; // gray
-      } else if (position >= cueIn && position < cueOut - segueDuration) {
-        color = "#3b82f6"; // blue
-      } else if (position >= cueOut - segueDuration && position < cueOut) {
-        color = "#eab308"; // yellow
-      } else {
-        color = "#6b7280"; // gray
+      if (dur > 0) {
+        const position = (i / waveformData.length) * dur;
+
+        if (position < cueIn) {
+          color = "#6b7280"; // gray
+        } else if (position >= cueIn && position < cueOut - segueDuration) {
+          color = "#3b82f6"; // blue
+        } else if (position >= cueOut - segueDuration && position < cueOut) {
+          color = "#eab308"; // yellow
+        } else {
+          color = "#6b7280"; // gray
+        }
       }
 
       ctx.fillStyle = color;
       ctx.fillRect(x, y, barWidth - 1, barHeight);
     });
 
-    // Draw borders around fade section for visibility
-    if (segueDuration > 0 && cueOut > 0) {
-      const fadeStartX = ((cueOut - segueDuration) / duration) * width;
-      const fadeEndX = (cueOut / duration) * width;
-      
+    // Fade borders
+    const dur2 = durationRef.current > 0 ? durationRef.current : duration;
+    if (dur2 > 0 && segueDuration > 0 && cueOut > 0) {
+      const fadeStartX = ((cueOut - segueDuration) / dur2) * width;
+      const fadeEndX = (cueOut / dur2) * width;
+
       ctx.strokeStyle = "#ffffff";
       ctx.lineWidth = 2;
       ctx.setLineDash([5, 3]);
+
       ctx.beginPath();
       ctx.moveTo(fadeStartX, 0);
       ctx.lineTo(fadeStartX, height);
       ctx.stroke();
-      
+
       ctx.beginPath();
       ctx.moveTo(fadeEndX, 0);
       ctx.lineTo(fadeEndX, height);
       ctx.stroke();
+
       ctx.setLineDash([]);
     }
 
-    // Draw playback cursor line
-    if (currentTime > 0 && duration > 0) {
-      const cursorX = (currentTime / duration) * width;
+    // Playback cursor
+    if (dur2 > 0 && currentTime > 0) {
+      const cursorX = (currentTime / dur2) * width;
       ctx.strokeStyle = "#ef4444";
       ctx.lineWidth = 3;
       ctx.shadowColor = "#ef4444";
       ctx.shadowBlur = 8;
+
       ctx.beginPath();
       ctx.moveTo(cursorX, 0);
       ctx.lineTo(cursorX, height);
       ctx.stroke();
+
       ctx.shadowBlur = 0;
     }
   }, [waveformData, cueIn, cueOut, segueDuration, currentTime, duration]);
@@ -397,80 +388,63 @@ export default function CuePointEditor({
 
     const animate = () => {
       if (audioRef.current && canvasRef.current) {
-        const time = audioRef.current.currentTime;
-        setCurrentTime(time);
+        setCurrentTime(audioRef.current.currentTime || 0);
       }
-      
-      if (isPlaying) {
-        animationFrameRef.current = requestAnimationFrame(animate);
-      }
+      if (isPlaying) animationFrameRef.current = requestAnimationFrame(animate);
     };
 
     animationFrameRef.current = requestAnimationFrame(animate);
 
     return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
+      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
     };
   }, [isPlaying]);
 
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    const ms = Math.floor((seconds % 1) * 100);
-    return `${mins}:${secs.toString().padStart(2, "0")}.${ms
-      .toString()
-      .padStart(2, "0")}`;
-  };
-
+  // ---------- playback ----------
   const handlePlayPause = () => {
-    if (!audioRef.current) return;
+    const audio = audioRef.current;
+    if (!audio) return;
 
     if (isPlaying) {
-      audioRef.current.pause();
+      audio.pause();
       setIsPlaying(false);
     } else {
-      audioRef.current.play();
-      setIsPlaying(true);
+      audio.play().then(() => setIsPlaying(true)).catch(() => {
+        toast({
+          title: "Error",
+          description: "Unable to play audio (autoplay policy or load issue).",
+          variant: "destructive",
+        });
+      });
     }
   };
 
   const handleStop = () => {
-    if (!audioRef.current) return;
-    audioRef.current.pause();
-    audioRef.current.currentTime = 0;
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.pause();
+    audio.currentTime = 0;
     setIsPlaying(false);
     setCurrentTime(0);
   };
 
+  // ---------- save ----------
   const handleSave = async () => {
-    console.log("Saving cue points:", { trackId, cueIn, cueOut, segueDuration });
     try {
-      const response = await fetch(`${window.location.origin}/api/tracks/${trackId}/cuepoints`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          cueIn,
-          cueOut,
-          segueDuration,
-        }),
-      });
-
-      console.log("Save response:", response.status, response.ok);
+      const response = await fetch(
+        `${window.location.origin}/api/tracks/${trackId}/cuepoints`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cueIn, cueOut, segueDuration }),
+        }
+      );
 
       if (response.ok) {
-        console.log("Showing success toast");
-        toast({
-          title: "Success",
-          description: "Cue points saved successfully",
-        });
-        if (onSuccess) {
-          onSuccess();
-        }
+        toast({ title: "Success", description: "Cue points saved successfully" });
+        onSuccess?.();
         setTimeout(() => onOpenChange(false), 500);
       } else {
-        console.log("Showing error toast - response not ok");
         toast({
           title: "Error",
           description: `Failed to save cue points (${response.status})`,
@@ -479,7 +453,6 @@ export default function CuePointEditor({
       }
     } catch (error) {
       console.error("Failed to save cue points:", error);
-      console.log("Showing error toast - exception");
       toast({
         title: "Error",
         description: "Failed to save cue points",
@@ -488,141 +461,151 @@ export default function CuePointEditor({
     }
   };
 
-  // Waveform pointer down handler (mobile-friendly)
+  // ---------- waveform scrubbing (pointer) ----------
   const handleWaveformPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!canvasRef.current || !audioRef.current || duration === 0) return;
-    
-    const rect = canvasRef.current.getBoundingClientRect();
+    const audio = audioRef.current;
+    const canvas = canvasRef.current;
+    const dur = durationRef.current > 0 ? durationRef.current : duration;
+
+    if (!canvas || !audio || dur <= 0) return;
+
+    const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const percent = clamp(x / rect.width, 0, 1);
-    const t0 = percent * duration;
-    
-    // Seek immediately
-    audioRef.current.currentTime = t0;
+    const t0 = percent * dur;
+
+    audio.currentTime = t0;
     setCurrentTime(t0);
-    
-    // Check for double tap
+
     const now = Date.now();
     if (now - lastTapRef.current < TAP_MS) {
-      // Double tap: toggle play/pause
       if (isPlaying) {
-        audioRef.current.pause();
+        audio.pause();
         setIsPlaying(false);
       } else {
-        audioRef.current.play();
-        setIsPlaying(true);
+        audio.play().then(() => setIsPlaying(true)).catch(() => {});
       }
       lastTapRef.current = 0;
       return;
     }
-    
-    // Single tap: set up for potential scrubbing
+
     lastTapRef.current = now;
     setIsScrubbing(true);
     setWasPlayingBeforeScrub(isPlaying);
-    
+
     if (isPlaying) {
-      audioRef.current.pause();
+      audio.pause();
       setIsPlaying(false);
     }
   };
 
   const handleWaveformPointerMove = (e: PointerEvent) => {
-    if (!isScrubbing || !canvasRef.current || !audioRef.current || duration === 0) return;
-    
-    const rect = canvasRef.current.getBoundingClientRect();
+    const audio = audioRef.current;
+    const canvas = canvasRef.current;
+    const dur = durationRef.current > 0 ? durationRef.current : duration;
+
+    if (!isScrubbing || !canvas || !audio || dur <= 0) return;
+
+    const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const percent = clamp(x / rect.width, 0, 1);
-    const time = percent * duration;
-    audioRef.current.currentTime = time;
+    const time = percent * dur;
+
+    audio.currentTime = time;
     setCurrentTime(time);
   };
 
   const handleWaveformPointerUp = () => {
     if (!isScrubbing) return;
-    
     setIsScrubbing(false);
-    
+
     if (wasPlayingBeforeScrub && audioRef.current) {
-      audioRef.current.play();
-      setIsPlaying(true);
+      audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
     }
-    
     setWasPlayingBeforeScrub(false);
   };
 
-  // Add global pointer listeners for scrubbing
   useEffect(() => {
-    if (isScrubbing) {
-      document.addEventListener('pointermove', handleWaveformPointerMove);
-      document.addEventListener('pointerup', handleWaveformPointerUp);
-      
-      return () => {
-        document.removeEventListener('pointermove', handleWaveformPointerMove);
-        document.removeEventListener('pointerup', handleWaveformPointerUp);
-      };
-    }
-  }, [isScrubbing, duration]);
+    if (!isScrubbing) return;
 
+    document.addEventListener("pointermove", handleWaveformPointerMove);
+    document.addEventListener("pointerup", handleWaveformPointerUp);
+
+    return () => {
+      document.removeEventListener("pointermove", handleWaveformPointerMove);
+      document.removeEventListener("pointerup", handleWaveformPointerUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isScrubbing]);
+
+  // ---------- timeline scrubbing (mouse) ----------
   const handleTimelineMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    // Don't interfere with marker dragging
-    if ((e.target as HTMLElement).closest('.cursor-ew-resize')) return;
-    
-    if (!timelineRef.current || !audioRef.current || duration === 0) return;
-    
+    if ((e.target as HTMLElement).closest(".cursor-ew-resize")) return;
+
+    const audio = audioRef.current;
+    const timeline = timelineRef.current;
+    const dur = durationRef.current > 0 ? durationRef.current : duration;
+
+    if (!timeline || !audio || dur <= 0) return;
+
     setIsTimelineScrubbing(true);
     setWasPlayingBeforeScrub(isPlaying);
-    
+
     if (isPlaying) {
-      audioRef.current.pause();
+      audio.pause();
       setIsPlaying(false);
     }
-    
-    const rect = timelineRef.current.getBoundingClientRect();
+
+    const rect = timeline.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const percent = Math.max(0, Math.min(x / rect.width, 1));
-    const time = percent * duration;
-    audioRef.current.currentTime = time;
+    const percent = clamp(x / rect.width, 0, 1);
+    const time = percent * dur;
+
+    audio.currentTime = time;
     setCurrentTime(time);
   };
 
   const handleTimelineMouseMove = (e: MouseEvent) => {
-    if (!isTimelineScrubbing || !timelineRef.current || !audioRef.current || duration === 0) return;
-    
-    const rect = timelineRef.current.getBoundingClientRect();
+    const audio = audioRef.current;
+    const timeline = timelineRef.current;
+    const dur = durationRef.current > 0 ? durationRef.current : duration;
+
+    if (!isTimelineScrubbing || !timeline || !audio || dur <= 0) return;
+
+    const rect = timeline.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const percent = Math.max(0, Math.min(x / rect.width, 1));
-    const time = percent * duration;
-    audioRef.current.currentTime = time;
+    const percent = clamp(x / rect.width, 0, 1);
+    const time = percent * dur;
+
+    audio.currentTime = time;
     setCurrentTime(time);
   };
 
   const handleTimelineMouseUp = () => {
     if (!isTimelineScrubbing) return;
-    
+
     setIsTimelineScrubbing(false);
-    
+
     if (wasPlayingBeforeScrub && audioRef.current) {
-      audioRef.current.play();
-      setIsPlaying(true);
+      audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
     }
-    
     setWasPlayingBeforeScrub(false);
   };
 
-  // Add global mouse listeners for timeline scrubbing
   useEffect(() => {
-    if (isTimelineScrubbing) {
-      document.addEventListener('mousemove', handleTimelineMouseMove);
-      document.addEventListener('mouseup', handleTimelineMouseUp);
-      
-      return () => {
-        document.removeEventListener('mousemove', handleTimelineMouseMove);
-        document.removeEventListener('mouseup', handleTimelineMouseUp);
-      };
-    }
-  }, [isTimelineScrubbing, duration]);
+    if (!isTimelineScrubbing) return;
 
+    document.addEventListener("mousemove", handleTimelineMouseMove);
+    document.addEventListener("mouseup", handleTimelineMouseUp);
+
+    return () => {
+      document.removeEventListener("mousemove", handleTimelineMouseMove);
+      document.removeEventListener("mouseup", handleTimelineMouseUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isTimelineScrubbing]);
+
+  // ---------- marker dragging ----------
   const handleMarkerDrag = (
     e: React.MouseEvent<HTMLDivElement>,
     marker: "cueIn" | "fadeStart" | "cueOut"
@@ -630,23 +613,25 @@ export default function CuePointEditor({
     e.preventDefault();
     setDragging(marker);
 
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!timelineRef.current || duration === 0) return;
-      const rect = timelineRef.current.getBoundingClientRect();
-      const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+    const handleMouseMove = (ev: MouseEvent) => {
+      const timeline = timelineRef.current;
+      const dur = durationRef.current > 0 ? durationRef.current : duration;
+      if (!timeline || dur <= 0) return;
+
+      const rect = timeline.getBoundingClientRect();
+      const x = clamp(ev.clientX - rect.left, 0, rect.width);
       const percent = x / rect.width;
-      let time = clamp(percent * duration, 0, duration);
-      
-      // Apply snap
+      let time = clamp(percent * dur, 0, dur);
+
       time = applySnap(time);
 
       if (marker === "cueIn") {
-        applyConstraints({ cueIn: time });
+        applyConstraints({ cueIn: time }, dur);
       } else if (marker === "fadeStart") {
         const newFadeStart = clamp(time, cueIn, cueOut);
-        applyConstraints({ segueDuration: cueOut - newFadeStart });
+        applyConstraints({ segueDuration: cueOut - newFadeStart }, dur);
       } else if (marker === "cueOut") {
-        applyConstraints({ cueOut: time });
+        applyConstraints({ cueOut: time }, dur);
       }
     };
 
@@ -660,15 +645,18 @@ export default function CuePointEditor({
     document.addEventListener("mouseup", handleMouseUp);
   };
 
-  const startPercent = duration > 0 ? (cueIn / duration) * 100 : 0;
-  const fadePercent = duration > 0 ? ((cueOut - segueDuration) / duration) * 100 : 0;
-  const endPercent = duration > 0 ? (cueOut / duration) * 100 : 0;
+  const durForUI = durationRef.current > 0 ? durationRef.current : duration;
+  const startPercent = durForUI > 0 ? (cueIn / durForUI) * 100 : 0;
+  const fadePercent = durForUI > 0 ? ((cueOut - segueDuration) / durForUI) * 100 : 0;
+  const endPercent = durForUI > 0 ? (cueOut / durForUI) * 100 : 0;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange} key={open ? trackId : 'closed'}>
+    // IMPORTANT: remove key-based remounting inside a portal
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-[95vw] w-[1400px]">
-        <audio ref={audioRef} src={audioUrl} />
-        
+        {/* Keep audio mounted; preload metadata */}
+        <audio ref={audioRef} src={audioUrl} preload="metadata" />
+
         <div className="bg-gray-900 text-white max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-2xl">{trackTitle}</DialogTitle>
@@ -692,15 +680,17 @@ export default function CuePointEditor({
                 <Square className="h-6 w-6" />
               </Button>
               <div className="flex-1 text-center">
-                <div className="text-2xl font-mono">{formatTime(currentTime)} / {formatTime(duration)}</div>
+                <div className="text-2xl font-mono">
+                  {formatTime(currentTime)} / {formatTime(durForUI)}
+                </div>
               </div>
-              
+
               {/* Snap Mode Selector */}
               <div className="flex items-center gap-2">
                 <span className="text-sm">Snap:</span>
                 <select
                   value={snapMode}
-                  onChange={(e) => setSnapMode(e.target.value as 'off' | '0.10' | '0.01')}
+                  onChange={(e) => setSnapMode(e.target.value as "off" | "0.10" | "0.01")}
                   className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm"
                 >
                   <option value="off">Off</option>
@@ -729,7 +719,7 @@ export default function CuePointEditor({
               <div className="bg-gray-800 p-2 rounded">
                 <div className="flex justify-between text-sm mb-2">
                   <span>0:00</span>
-                  <span>{formatTime(duration)}</span>
+                  <span>{formatTime(durForUI)}</span>
                 </div>
 
                 <div
