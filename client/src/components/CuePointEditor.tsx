@@ -37,15 +37,16 @@ export default function CuePointEditor({
   trackType = "other",
   onSuccess,
 }: CuePointEditorProps) {
-  const audioRef = useRef<HTMLAudioElement>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const { toast } = useToast();
 
-  const durationRef = useRef(0);
+  // Duration must survive dialog re-renders
+  const durationRef = useRef<number | null>(null);
 
-  const [duration, setDuration] = useState(0);
-  const [cueIn, setCueIn] = useState(initialCuePoints.cueIn || 0);
-  const [cueOut, setCueOut] = useState(initialCuePoints.cueOut || 0);
-  const [segueDuration, setSegueDuration] = useState(initialCuePoints.segueDuration || 0);
+  const [duration, setDuration] = useState<number>(0);
+  const [cueIn, setCueIn] = useState<number>(initialCuePoints.cueIn || 0);
+  const [cueOut, setCueOut] = useState<number>(initialCuePoints.cueOut || 0);
+  const [segueDuration, setSegueDuration] = useState<number>(initialCuePoints.segueDuration || 0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
 
@@ -70,7 +71,7 @@ export default function CuePointEditor({
     const dur =
       overrideDuration && overrideDuration > 0
         ? overrideDuration
-        : durationRef.current || 0;
+        : durationRef.current ?? 0;
 
     let newCueIn = num(next.cueIn ?? cueIn);
     let newCueOut = num(next.cueOut ?? cueOut);
@@ -88,6 +89,7 @@ export default function CuePointEditor({
     setSegueDuration(newSegue);
   };
 
+  // Reset cues when dialog opens (do NOT reset duration)
   useEffect(() => {
     if (!open) return;
     setCueIn(initialCuePoints.cueIn || 0);
@@ -97,47 +99,76 @@ export default function CuePointEditor({
     setIsPlaying(false);
   }, [open, trackId, initialCuePoints]);
 
+  // Core: robust duration binding for stream + Radix Dialog
   useEffect(() => {
-    if (!open || !audioRef.current) return;
+    if (!open) return;
     const audio = audioRef.current;
+    if (!audio) return;
 
-    const setDur = () => {
-      if (Number.isFinite(audio.duration) && audio.duration > 0) {
-        durationRef.current = audio.duration;
-        setDuration(audio.duration);
+    let cancelled = false;
 
-        if (!initialCuePoints.cueOut) applyConstraints({ cueOut: audio.duration }, audio.duration);
+    const setDurationSafe = (source: string) => {
+      if (cancelled) return;
+      const d = audio.duration;
+      if (Number.isFinite(d) && d > 0) {
+        durationRef.current = d;
+        setDuration(d);
+
+        // Defaults if DB values are empty
+        if (!initialCuePoints.cueOut) applyConstraints({ cueOut: d }, d);
         if (!initialCuePoints.segueDuration) {
           const def = trackType === "song" ? 3 : 0.5;
-          applyConstraints({ segueDuration: def }, audio.duration);
+          applyConstraints({ segueDuration: def }, d);
         }
       }
     };
 
-    audio.addEventListener("loadedmetadata", setDur);
-    audio.addEventListener("canplaythrough", setDur);
-    audio.addEventListener("durationchange", setDur);
-    audio.addEventListener("timeupdate", () => setCurrentTime(audio.currentTime || 0));
+    const onLoadedMetadata = () => setDurationSafe("loadedmetadata");
+    const onCanPlayThrough = () => setDurationSafe("canplaythrough");
+    const onDurationChange = () => setDurationSafe("durationchange");
+    const onTimeUpdate = () => setCurrentTime(audio.currentTime || 0);
+
+    audio.addEventListener("loadedmetadata", onLoadedMetadata);
+    audio.addEventListener("canplaythrough", onCanPlayThrough);
+    audio.addEventListener("durationchange", onDurationChange);
+    audio.addEventListener("timeupdate", onTimeUpdate);
 
     audio.src = audioUrl;
     audio.preload = "metadata";
     audio.load();
 
+    // Immediate attempt + short polling fallback
+    setDurationSafe("immediate");
+    let ticks = 0;
+    const poll = window.setInterval(() => {
+      ticks++;
+      if (durationRef.current && durationRef.current > 0) {
+        window.clearInterval(poll);
+        return;
+      }
+      setDurationSafe("poll");
+      if (ticks > 60) window.clearInterval(poll);
+    }, 50);
+
     return () => {
-      audio.removeEventListener("loadedmetadata", setDur);
-      audio.removeEventListener("canplaythrough", setDur);
-      audio.removeEventListener("durationchange", setDur);
+      cancelled = true;
+      window.clearInterval(poll);
+      audio.removeEventListener("loadedmetadata", onLoadedMetadata);
+      audio.removeEventListener("canplaythrough", onCanPlayThrough);
+      audio.removeEventListener("durationchange", onDurationChange);
+      audio.removeEventListener("timeupdate", onTimeUpdate);
     };
-  }, [open, audioUrl, trackId, trackType]);
+  }, [open, trackId, audioUrl, trackType, initialCuePoints]);
 
   const handlePlayPause = async () => {
-    if (!audioRef.current) return;
+    const audio = audioRef.current;
+    if (!audio) return;
     if (isPlaying) {
-      audioRef.current.pause();
+      audio.pause();
       setIsPlaying(false);
     } else {
       try {
-        await audioRef.current.play();
+        await audio.play();
         setIsPlaying(true);
       } catch {
         toast({
@@ -150,9 +181,10 @@ export default function CuePointEditor({
   };
 
   const handleStop = () => {
-    if (!audioRef.current) return;
-    audioRef.current.pause();
-    audioRef.current.currentTime = 0;
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.pause();
+    audio.currentTime = 0;
     setIsPlaying(false);
     setCurrentTime(0);
   };
@@ -182,10 +214,12 @@ export default function CuePointEditor({
     }
   };
 
+  const durForUI = durationRef.current ?? duration;
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-[95vw] w-[1400px]">
-        <audio ref={audioRef} src={audioUrl} preload="metadata" />
+        <audio ref={audioRef} preload="metadata" />
 
         <div className="bg-gray-900 text-white max-h-[85vh] overflow-y-auto">
           <DialogHeader>
@@ -203,7 +237,7 @@ export default function CuePointEditor({
               </Button>
 
               <div className="flex-1 text-center text-2xl font-mono">
-                {formatTime(currentTime)} / {formatTime(durationRef.current)}
+                {formatTime(currentTime)} / {formatTime(durForUI)}
               </div>
             </div>
 
