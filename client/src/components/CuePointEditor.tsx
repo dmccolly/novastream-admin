@@ -38,6 +38,8 @@ export default function CuePointEditor({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
+  const lastTapRef = useRef<number>(0);
+  const TAP_MS = 350;
   
   const [duration, setDuration] = useState(initialCuePoints.cueOut || 0);
   const [cueIn, setCueIn] = useState(initialCuePoints.cueIn);
@@ -50,33 +52,77 @@ export default function CuePointEditor({
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [wasPlayingBeforeScrub, setWasPlayingBeforeScrub] = useState(false);
   const [isTimelineScrubbing, setIsTimelineScrubbing] = useState(false);
+  const [snapMode, setSnapMode] = useState<'off' | '0.10' | '0.01'>('off');
   const animationFrameRef = useRef<number | null>(null);
+
+  // Helper: clamp value between min and max
+  const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(v, max));
+
+  // Helper: sanitize numeric value
+  const sanitize = (v: number) => {
+    if (isNaN(v) || !isFinite(v)) return 0;
+    return v;
+  };
+
+  // Helper: apply snap if enabled
+  const applySnap = (value: number): number => {
+    if (snapMode === 'off') return value;
+    const snapValue = snapMode === '0.10' ? 0.1 : 0.01;
+    return Math.round(value / snapValue) * snapValue;
+  };
+
+  // Canonical constraint function
+  const applyConstraints = (next: { cueIn?: number; cueOut?: number; segueDuration?: number }) => {
+    const dur = duration > 0 ? duration : Math.max(cueOut, 0);
+    
+    // Start with current values
+    let newCueIn = sanitize(next.cueIn !== undefined ? next.cueIn : cueIn);
+    let newCueOut = sanitize(next.cueOut !== undefined ? next.cueOut : cueOut);
+    let newSegue = sanitize(next.segueDuration !== undefined ? next.segueDuration : segueDuration);
+    
+    // Clamp to duration bounds
+    newCueIn = clamp(newCueIn, 0, dur);
+    newCueOut = clamp(newCueOut, 0, dur);
+    newSegue = Math.max(0, newSegue);
+    
+    // Enforce cueIn <= cueOut - segueDuration
+    if (newCueIn > newCueOut - newSegue) {
+      if (next.cueIn !== undefined) {
+        // User changed cueIn, adjust it
+        newCueIn = Math.max(0, newCueOut - newSegue);
+      } else if (next.cueOut !== undefined) {
+        // User changed cueOut, adjust it
+        newCueOut = Math.min(dur, newCueIn + newSegue);
+      } else if (next.segueDuration !== undefined) {
+        // User changed segue, adjust it
+        newSegue = Math.max(0, newCueOut - newCueIn);
+      }
+    }
+    
+    // Enforce segueDuration <= cueOut - cueIn
+    if (newSegue > newCueOut - newCueIn) {
+      newSegue = newCueOut - newCueIn;
+    }
+    
+    // Apply all updates
+    setCueIn(newCueIn);
+    setCueOut(newCueOut);
+    setSegueDuration(newSegue);
+  };
 
   // Reset values when modal opens and generate initial waveform
   useEffect(() => {
     if (!open) return;
     
-    setCueIn(initialCuePoints.cueIn);
-    setCueOut(initialCuePoints.cueOut);
-    setSegueDuration(initialCuePoints.segueDuration);
-    
-    // CRITICAL: Use initialCuePoints.cueOut as the initial duration
-    // This is the track's actual duration from the database
     const initialDuration = initialCuePoints.cueOut || 0;
     setDuration(initialDuration);
     
-    // Update display immediately with database duration
-    const formatTime = (seconds: number) => {
-      const mins = Math.floor(seconds / 60);
-      const secs = Math.floor(seconds % 60);
-      const ms = Math.floor((seconds % 1) * 100);
-      return `${mins}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
-    };
-    
-    if (initialDuration > 0) {
-      // Duration will be set by the polling mechanism
-      // No DOM manipulation needed
-    }
+    // Apply constraints to initial values
+    applyConstraints({
+      cueIn: initialCuePoints.cueIn,
+      cueOut: initialCuePoints.cueOut,
+      segueDuration: initialCuePoints.segueDuration
+    });
     
     setCurrentTime(0);
     setIsPlaying(false);
@@ -95,138 +141,50 @@ export default function CuePointEditor({
     setWaveformData(waveform);
   }, [initialCuePoints, open, trackType]);
 
-  // Load audio and generate waveform
-  useEffect(() => {
-    if (!audioRef.current || !open) return;
-    
-    const audio = audioRef.current;
-    
-    const formatTime = (seconds: number) => {
-      const mins = Math.floor(seconds / 60);
-      const secs = Math.floor(seconds % 60);
-      const ms = Math.floor((seconds % 1) * 100);
-      return `${mins}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
-    };
-    
-    const updateDurationDisplay = (dur: number) => {
-      setDuration(dur);
-      
-      // Set default cueOut if not already set
-      if (initialCuePoints.cueOut === 0 || !initialCuePoints.cueOut) {
-        setCueOut(dur);
+  // Helper: try to fetch audio buffer with fallback strategies
+  const tryFetchAudioBuffer = async (url: string): Promise<ArrayBuffer | null> => {
+    try {
+      // Try normal fetch first
+      const response = await fetch(url, { mode: "cors" });
+      if (response.ok) {
+        return await response.arrayBuffer();
       }
-      
-      // Set default segueDuration if not already set (or if it's 0)
-      if (initialCuePoints.segueDuration === 0 || !initialCuePoints.segueDuration) {
-        const defaultSegue = trackType === "song" ? 3.0 : 0.5;
-        setSegueDuration(defaultSegue);
-      }
-      
-      // NO DOM MANIPULATION - Let React handle the rendering
-    };
-    
-    const handleLoadedMetadata = () => {
-      const dur = audio.duration || 0;
-      if (dur > 0 && !isNaN(dur)) {
-        updateDurationDisplay(dur);
-        generateWaveform(audio);
-      }
-    };
-    
-    const handleTimeUpdate = () => {
-      const time = audio.currentTime;
-      setCurrentTime(time);
-      // React will handle rendering - no DOM manipulation needed
-    };
-    
-    const handleEnded = () => {
-      setIsPlaying(false);
-      setCurrentTime(0);
-      audio.currentTime = 0;
-    };
-    
-    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
-    audio.addEventListener('timeupdate', handleTimeUpdate);
-    audio.addEventListener('ended', handleEnded);
-    
-    // CRITICAL FIX: Poll for duration availability
-    let attempts = 0;
-    const maxAttempts = 50; // 50 attempts * 50ms = 2.5 seconds max
-    let pollInterval: number | null = null;
-    
-    const checkDuration = () => {
-      attempts++;
-      
-      if (audio.readyState >= 1 && audio.duration > 0 && !isNaN(audio.duration)) {
-        // Duration is available!
-        updateDurationDisplay(audio.duration);
-        generateWaveform(audio);
-        if (pollInterval !== null) {
-          clearInterval(pollInterval);
-          pollInterval = null;
-        }
-        return true;
-      }
-      
-      if (attempts >= maxAttempts) {
-        // Give up and use initialCuePoints.cueOut as fallback
-        if (pollInterval !== null) {
-          clearInterval(pollInterval);
-          pollInterval = null;
-        }
-        if (initialCuePoints.cueOut > 0) {
-          updateDurationDisplay(initialCuePoints.cueOut);
-        }
-        return false;
-      }
-      
-      return false;
-    };
-    
-    // Start polling immediately
-    audio.load();
-    
-    // Try immediately
-    if (!checkDuration()) {
-      // If not available, start polling every 50ms
-      pollInterval = window.setInterval(checkDuration, 50);
+    } catch (error) {
+      console.log('Normal fetch failed, trying range fetch');
     }
     
-    return () => {
-      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
-      audio.removeEventListener('timeupdate', handleTimeUpdate);
-      audio.removeEventListener('ended', handleEnded);
-      if (pollInterval !== null) {
-        clearInterval(pollInterval);
+    try {
+      // Try range fetch as fallback
+      const response = await fetch(url, {
+        headers: { Range: "bytes=0-2000000" },
+        mode: "cors"
+      });
+      if (response.ok) {
+        return await response.arrayBuffer();
       }
-    };
-  }, [audioUrl, open, initialCuePoints]);
+    } catch (error) {
+      console.log('Range fetch failed');
+    }
+    
+    return null;
+  };
 
   // Generate waveform visualization
   const generateWaveform = async (audio: HTMLAudioElement) => {
-    // Create a realistic-looking waveform pattern immediately
-    const samples = 500;
-    const waveform: number[] = [];
-    
-    for (let i = 0; i < samples; i++) {
-      // Create a natural-looking waveform with variation
-      const position = i / samples;
-      const base = 0.3 + Math.sin(position * Math.PI * 8) * 0.2;
-      const variation = Math.random() * 0.3;
-      const fadeIn = Math.min(position * 5, 1);
-      const fadeOut = Math.min((1 - position) * 5, 1);
-      waveform.push((base + variation) * fadeIn * fadeOut);
-    }
-    
-    setWaveformData(waveform);
+    // Keep placeholder waveform (already set)
     
     // Try to generate real waveform in background (non-blocking)
     try {
-      const response = await fetch(audio.src);
-      const arrayBuffer = await response.arrayBuffer();
+      const arrayBuffer = await tryFetchAudioBuffer(audio.src);
+      
+      if (!arrayBuffer) {
+        throw new Error('Could not fetch audio data');
+      }
+      
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
       
+      const samples = 500;
       const rawData = audioBuffer.getChannelData(0);
       const blockSize = Math.floor(rawData.length / samples);
       const filteredData: number[] = [];
@@ -244,9 +202,102 @@ export default function CuePointEditor({
       const normalized = filteredData.map(n => n / max);
       setWaveformData(normalized);
     } catch (error) {
-      console.log('Could not generate detailed waveform, using placeholder');
+      console.log('Using simplified waveform (stream is not decodable)');
+      // Keep placeholder waveform
     }
   };
+
+  // Load audio and generate waveform
+  useEffect(() => {
+    if (!audioRef.current || !open) return;
+    
+    const audio = audioRef.current;
+    
+    const updateDurationDisplay = (dur: number) => {
+      setDuration(dur);
+      
+      // Set default cueOut if not already set
+      if (initialCuePoints.cueOut === 0 || !initialCuePoints.cueOut) {
+        applyConstraints({ cueOut: dur });
+      }
+      
+      // Set default segueDuration if not already set (or if it's 0)
+      if (initialCuePoints.segueDuration === 0 || !initialCuePoints.segueDuration) {
+        const defaultSegue = trackType === "song" ? 3.0 : 0.5;
+        applyConstraints({ segueDuration: defaultSegue });
+      }
+    };
+    
+    const handleLoadedMetadata = () => {
+      const dur = audio.duration || 0;
+      if (dur > 0 && !isNaN(dur)) {
+        updateDurationDisplay(dur);
+        generateWaveform(audio);
+      }
+    };
+    
+    const handleTimeUpdate = () => {
+      const time = audio.currentTime;
+      setCurrentTime(time);
+    };
+    
+    const handleEnded = () => {
+      setIsPlaying(false);
+      setCurrentTime(0);
+      audio.currentTime = 0;
+    };
+    
+    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
+    audio.addEventListener('timeupdate', handleTimeUpdate);
+    audio.addEventListener('ended', handleEnded);
+    
+    // Poll for duration availability
+    let attempts = 0;
+    const maxAttempts = 50;
+    let pollInterval: number | null = null;
+    
+    const checkDuration = () => {
+      attempts++;
+      
+      if (audio.readyState >= 1 && audio.duration > 0 && !isNaN(audio.duration)) {
+        updateDurationDisplay(audio.duration);
+        generateWaveform(audio);
+        if (pollInterval !== null) {
+          clearInterval(pollInterval);
+          pollInterval = null;
+        }
+        return true;
+      }
+      
+      if (attempts >= maxAttempts) {
+        if (pollInterval !== null) {
+          clearInterval(pollInterval);
+          pollInterval = null;
+        }
+        if (initialCuePoints.cueOut > 0) {
+          updateDurationDisplay(initialCuePoints.cueOut);
+        }
+        return false;
+      }
+      
+      return false;
+    };
+    
+    audio.load();
+    
+    if (!checkDuration()) {
+      pollInterval = window.setInterval(checkDuration, 50);
+    }
+    
+    return () => {
+      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      audio.removeEventListener('timeupdate', handleTimeUpdate);
+      audio.removeEventListener('ended', handleEnded);
+      if (pollInterval !== null) {
+        clearInterval(pollInterval);
+      }
+    };
+  }, [audioUrl, open, initialCuePoints]);
 
   // Draw waveform
   useEffect(() => {
@@ -332,7 +383,6 @@ export default function CuePointEditor({
 
     const animate = () => {
       if (audioRef.current && canvasRef.current) {
-        // Update currentTime from audio element for smooth animation
         const time = audioRef.current.currentTime;
         setCurrentTime(time);
       }
@@ -402,7 +452,7 @@ export default function CuePointEditor({
           description: "Cue points saved successfully",
         });
         if (onSuccess) {
-          onSuccess(); // Trigger refetch of track data
+          onSuccess();
         }
         setTimeout(() => onOpenChange(false), 500);
       } else {
@@ -424,55 +474,61 @@ export default function CuePointEditor({
     }
   };
 
-  const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!timelineRef.current || !audioRef.current || duration === 0) return;
-
-    const rect = timelineRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const percent = x / rect.width;
-    const time = percent * duration;
-
-    audioRef.current.currentTime = time;
-  };
-
-  const handleWaveformMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  // Waveform pointer down handler (mobile-friendly)
+  const handleWaveformPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!canvasRef.current || !audioRef.current || duration === 0) return;
     
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const percent = clamp(x / rect.width, 0, 1);
+    const t0 = percent * duration;
+    
+    // Seek immediately
+    audioRef.current.currentTime = t0;
+    setCurrentTime(t0);
+    
+    // Check for double tap
+    const now = Date.now();
+    if (now - lastTapRef.current < TAP_MS) {
+      // Double tap: toggle play/pause
+      if (isPlaying) {
+        audioRef.current.pause();
+        setIsPlaying(false);
+      } else {
+        audioRef.current.play();
+        setIsPlaying(true);
+      }
+      lastTapRef.current = 0;
+      return;
+    }
+    
+    // Single tap: set up for potential scrubbing
+    lastTapRef.current = now;
     setIsScrubbing(true);
     setWasPlayingBeforeScrub(isPlaying);
     
-    // Pause audio while scrubbing
     if (isPlaying) {
       audioRef.current.pause();
       setIsPlaying(false);
     }
-    
-    // Set initial position
-    const rect = canvasRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const percent = Math.max(0, Math.min(x / rect.width, 1));
-    const time = percent * duration;
-    audioRef.current.currentTime = time;
-    setCurrentTime(time);
   };
 
-  const handleWaveformMouseMove = (e: MouseEvent) => {
+  const handleWaveformPointerMove = (e: PointerEvent) => {
     if (!isScrubbing || !canvasRef.current || !audioRef.current || duration === 0) return;
     
     const rect = canvasRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const percent = Math.max(0, Math.min(x / rect.width, 1));
+    const percent = clamp(x / rect.width, 0, 1);
     const time = percent * duration;
     audioRef.current.currentTime = time;
     setCurrentTime(time);
   };
 
-  const handleWaveformMouseUp = () => {
+  const handleWaveformPointerUp = () => {
     if (!isScrubbing) return;
     
     setIsScrubbing(false);
     
-    // Resume playback if it was playing before scrubbing
     if (wasPlayingBeforeScrub && audioRef.current) {
       audioRef.current.play();
       setIsPlaying(true);
@@ -481,15 +537,15 @@ export default function CuePointEditor({
     setWasPlayingBeforeScrub(false);
   };
 
-  // Add global mouse listeners for scrubbing
+  // Add global pointer listeners for scrubbing
   useEffect(() => {
     if (isScrubbing) {
-      document.addEventListener('mousemove', handleWaveformMouseMove);
-      document.addEventListener('mouseup', handleWaveformMouseUp);
+      document.addEventListener('pointermove', handleWaveformPointerMove);
+      document.addEventListener('pointerup', handleWaveformPointerUp);
       
       return () => {
-        document.removeEventListener('mousemove', handleWaveformMouseMove);
-        document.removeEventListener('mouseup', handleWaveformMouseUp);
+        document.removeEventListener('pointermove', handleWaveformPointerMove);
+        document.removeEventListener('pointerup', handleWaveformPointerUp);
       };
     }
   }, [isScrubbing, duration]);
@@ -503,13 +559,11 @@ export default function CuePointEditor({
     setIsTimelineScrubbing(true);
     setWasPlayingBeforeScrub(isPlaying);
     
-    // Pause audio while scrubbing
     if (isPlaying) {
       audioRef.current.pause();
       setIsPlaying(false);
     }
     
-    // Set initial position
     const rect = timelineRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const percent = Math.max(0, Math.min(x / rect.width, 1));
@@ -534,7 +588,6 @@ export default function CuePointEditor({
     
     setIsTimelineScrubbing(false);
     
-    // Resume playback if it was playing before scrubbing
     if (wasPlayingBeforeScrub && audioRef.current) {
       audioRef.current.play();
       setIsPlaying(true);
@@ -568,15 +621,18 @@ export default function CuePointEditor({
       const rect = timelineRef.current.getBoundingClientRect();
       const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
       const percent = x / rect.width;
-      const time = Math.max(0, Math.min(percent * duration, duration));
+      let time = clamp(percent * duration, 0, duration);
+      
+      // Apply snap
+      time = applySnap(time);
 
       if (marker === "cueIn") {
-        setCueIn(Math.min(time, cueOut - segueDuration));
+        applyConstraints({ cueIn: time });
       } else if (marker === "fadeStart") {
-        const newFadeStart = Math.max(cueIn, Math.min(time, cueOut));
-        setSegueDuration(cueOut - newFadeStart);
+        const newFadeStart = clamp(time, cueIn, cueOut);
+        applyConstraints({ segueDuration: cueOut - newFadeStart });
       } else if (marker === "cueOut") {
-        setCueOut(Math.max(time, cueIn + segueDuration));
+        applyConstraints({ cueOut: time });
       }
     };
 
@@ -622,7 +678,21 @@ export default function CuePointEditor({
                 <Square className="h-6 w-6" />
               </Button>
               <div className="flex-1 text-center">
-                <div className="text-2xl font-mono" data-time-display>{formatTime(currentTime)} / {formatTime(duration)}</div>
+                <div className="text-2xl font-mono">{formatTime(currentTime)} / {formatTime(duration)}</div>
+              </div>
+              
+              {/* Snap Mode Selector */}
+              <div className="flex items-center gap-2">
+                <span className="text-sm">Snap:</span>
+                <select
+                  value={snapMode}
+                  onChange={(e) => setSnapMode(e.target.value as 'off' | '0.10' | '0.01')}
+                  className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm"
+                >
+                  <option value="off">Off</option>
+                  <option value="0.10">0.10s</option>
+                  <option value="0.01">0.01s</option>
+                </select>
               </div>
             </div>
 
@@ -634,7 +704,8 @@ export default function CuePointEditor({
                 width={1300}
                 height={120}
                 className="w-full h-[120px] bg-gray-900 rounded cursor-crosshair"
-                onMouseDown={handleWaveformMouseDown}
+                style={{ touchAction: "none" }}
+                onPointerDown={handleWaveformPointerDown}
               />
             </div>
 
@@ -706,7 +777,7 @@ export default function CuePointEditor({
                 <input
                   type="number"
                   value={cueIn.toFixed(2)}
-                  onChange={(e) => setCueIn(parseFloat(e.target.value) || 0)}
+                  onChange={(e) => applyConstraints({ cueIn: parseFloat(e.target.value) || 0 })}
                   className="w-full bg-gray-900 border-2 border-green-500 rounded px-3 py-2 text-base font-mono"
                   step="0.1"
                 />
@@ -719,9 +790,7 @@ export default function CuePointEditor({
                 <input
                   type="number"
                   value={segueDuration.toFixed(2)}
-                  onChange={(e) =>
-                    setSegueDuration(parseFloat(e.target.value) || 0)
-                  }
+                  onChange={(e) => applyConstraints({ segueDuration: parseFloat(e.target.value) || 0 })}
                   className="w-full bg-gray-900 border-2 border-yellow-500 rounded px-3 py-2 text-base font-mono"
                   step="0.1"
                 />
@@ -734,7 +803,7 @@ export default function CuePointEditor({
                 <input
                   type="number"
                   value={cueOut.toFixed(2)}
-                  onChange={(e) => setCueOut(parseFloat(e.target.value) || 0)}
+                  onChange={(e) => applyConstraints({ cueOut: parseFloat(e.target.value) || 0 })}
                   className="w-full bg-gray-900 border-2 border-red-500 rounded px-3 py-2 text-base font-mono"
                   step="0.1"
                 />
