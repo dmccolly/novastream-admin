@@ -3,35 +3,37 @@ import { X, Play, Pause, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
 
 interface CuePointEditorProps {
   open: boolean;
-  onClose: () => void;
-  trackId: number;
-  trackName: string;
+  onOpenChange: (open: boolean) => void;
+  trackId: string;
+  trackTitle: string;
   audioUrl: string;
-  initialCueIn?: number;
-  initialCueOut?: number;
-  initialSegueDuration?: number;
+  initialCuePoints: {
+    cueIn: number;
+    cueOut: number;
+    segueDuration: number;
+  };
   trackType?: string;
+  onSuccess?: () => void;
 }
 
 export default function CuePointEditor({
   open,
-  onClose,
+  onOpenChange,
   trackId,
-  trackName,
+  trackTitle,
   audioUrl,
-  initialCueIn = 0,
-  initialCueOut = 0,
-  initialSegueDuration = 0,
+  initialCuePoints,
   trackType = "music",
+  onSuccess,
 }: CuePointEditorProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   
   const [duration, setDuration] = useState(0);
-  const [cueIn, setCueIn] = useState(initialCueIn);
-  const [cueOut, setCueOut] = useState(initialCueOut);
-  const [segueDuration, setSegueDuration] = useState(initialSegueDuration);
+  const [cueIn, setCueIn] = useState(initialCuePoints.cueIn);
+  const [cueOut, setCueOut] = useState(initialCuePoints.cueOut);
+  const [segueDuration, setSegueDuration] = useState(initialCuePoints.segueDuration);
   const [dragging, setDragging] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -52,17 +54,8 @@ export default function CuePointEditor({
       setDuration(dur);
 
       // Set default cue points if not already set
-      if (initialCueOut === 0) {
+      if (initialCuePoints.cueOut === 0) {
         setCueOut(dur);
-      }
-
-      // Set default fade based on track type
-      if (initialSegueDuration === 0) {
-        if (trackType.toLowerCase() === "music") {
-          setSegueDuration(3.0); // 3 seconds for music
-        } else {
-          setSegueDuration(0.5); // 0.5 seconds for commercials/jingles
-        }
       }
 
       // Generate waveform data
@@ -88,7 +81,7 @@ export default function CuePointEditor({
       audio.pause();
       audio.src = "";
     };
-  }, [open, audioUrl, initialCueOut, initialSegueDuration, trackType]);
+  }, [open, audioUrl, initialCuePoints]);
 
   const generateWaveformData = async (audio: HTMLAudioElement) => {
     try {
@@ -192,23 +185,11 @@ export default function CuePointEditor({
     }
   };
 
-  const handleStop = () => {
-    if (!audioRef.current) return;
-    audioRef.current.pause();
-    audioRef.current.currentTime = 0;
-    setIsPlaying(false);
-    setCurrentTime(0);
-  };
-
   const handleReset = () => {
     if (!audioRef.current) return;
-    setCueIn(0);
-    setCueOut(duration);
-    if (trackType.toLowerCase() === "music") {
-      setSegueDuration(3.0);
-    } else {
-      setSegueDuration(0.5);
-    }
+    setCueIn(initialCuePoints.cueIn);
+    setCueOut(initialCuePoints.cueOut || duration);
+    setSegueDuration(initialCuePoints.segueDuration);
     audioRef.current.currentTime = 0;
     setCurrentTime(0);
   };
@@ -226,7 +207,8 @@ export default function CuePointEditor({
       });
 
       if (response.ok) {
-        onClose();
+        if (onSuccess) onSuccess();
+        onOpenChange(false);
       }
     } catch (error) {
       console.error("Error saving cue points:", error);
@@ -362,9 +344,9 @@ export default function CuePointEditor({
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
       <div className="bg-gray-800 rounded-lg w-full max-w-6xl max-h-[90vh] overflow-auto">
         <div className="sticky top-0 bg-gray-800 border-b border-gray-700 p-4 flex justify-between items-center z-10">
-          <h2 className="text-xl font-bold text-white">{trackName}</h2>
+          <h2 className="text-xl font-bold text-white">{trackTitle}</h2>
           <button
-            onClick={onClose}
+            onClick={() => onOpenChange(false)}
             className="p-2 hover:bg-gray-700 rounded transition-colors"
           >
             <X className="text-white" size={24} />
@@ -422,19 +404,8 @@ export default function CuePointEditor({
           {/* Instructions */}
           <div className="bg-gray-900 p-4 rounded-lg">
             <p className="text-gray-300 text-sm text-center">
-              SELECT A MARKER TO PLACE, THEN CLICK ON WAVEFORM
+              DRAG MARKERS ON WAVEFORM TO ADJUST CUE POINTS
             </p>
-            <div className="flex justify-center gap-6 mt-2">
-              <button className="px-4 py-2 bg-green-600 text-white rounded">
-                CUE IN (Start)
-              </button>
-              <button className="px-4 py-2 bg-yellow-600 text-white rounded">
-                FADE START
-              </button>
-              <button className="px-4 py-2 bg-red-600 text-white rounded">
-                CUE OUT (End)
-              </button>
-            </div>
           </div>
 
           {/* Waveform */}
@@ -488,7 +459,7 @@ export default function CuePointEditor({
           {/* Timeline */}
           <div className="bg-gray-900 p-4 rounded-lg">
             <div className="space-y-2">
-              <div className="text-gray-400 text-sm">WAVEFORM (DRAG MARKERS TO ADJUST)</div>
+              <div className="text-gray-400 text-sm">TIMELINE</div>
               <div className="relative">
                 <div
                   ref={timelineRef}
@@ -564,7 +535,7 @@ export default function CuePointEditor({
           {/* Save/Cancel Buttons */}
           <div className="flex justify-end gap-4">
             <button
-              onClick={onClose}
+              onClick={() => onOpenChange(false)}
               className="px-6 py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors"
             >
               Cancel
