@@ -13,7 +13,7 @@ interface CuePointEditorProps {
   trackType?: string;
 }
 
-export function CuePointEditor({
+export default function CuePointEditor({
   open,
   onClose,
   trackId,
