@@ -213,6 +213,20 @@ export default function CuePointEditor({
     
     const audio = audioRef.current;
     
+    // Immediately check if duration is already available
+    if (audio.readyState >= 1 && audio.duration > 0 && !isNaN(audio.duration)) {
+      console.log('Duration immediately available:', audio.duration);
+      setDuration(audio.duration);
+      if (initialCuePoints.cueOut === 0 || !initialCuePoints.cueOut) {
+        applyConstraints({ cueOut: audio.duration });
+      }
+      if (initialCuePoints.segueDuration === 0 || !initialCuePoints.segueDuration) {
+        const defaultSegue = trackType === "song" ? 3.0 : 0.5;
+        applyConstraints({ segueDuration: defaultSegue });
+      }
+      generateWaveform(audio);
+    }
+    
     const updateDurationDisplay = (dur: number) => {
       setDuration(dur);
       
@@ -297,7 +311,7 @@ export default function CuePointEditor({
         clearInterval(pollInterval);
       }
     };
-  }, [audioUrl, open, initialCuePoints]);
+  }, [audioUrl, open, initialCuePoints, trackType]);
 
   // Draw waveform
   useEffect(() => {
