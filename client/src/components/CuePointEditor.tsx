@@ -38,13 +38,11 @@ export default function CuePointEditor({
   onSuccess,
 }: CuePointEditorProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const timelineRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
 
-  const durationRef = useRef<number>(0);
+  const durationRef = useRef(0);
 
-  const [duration, setDuration] = useState<number>(0);
+  const [duration, setDuration] = useState(0);
   const [cueIn, setCueIn] = useState(initialCuePoints.cueIn || 0);
   const [cueOut, setCueOut] = useState(initialCuePoints.cueOut || 0);
   const [segueDuration, setSegueDuration] = useState(initialCuePoints.segueDuration || 0);
@@ -59,9 +57,7 @@ export default function CuePointEditor({
     const mins = Math.floor(s / 60);
     const secs = Math.floor(s % 60);
     const ms = Math.floor((s % 1) * 100);
-    return `${mins}:${secs.toString().padStart(2, "0")}.${ms
-      .toString()
-      .padStart(2, "0")}`;
+    return `${mins}:${secs.toString().padStart(2, "0")}.${ms.toString().padStart(2, "0")}`;
   };
 
   const clamp = (v: number, min: number, max: number) =>
@@ -121,6 +117,10 @@ export default function CuePointEditor({
     audio.addEventListener("loadedmetadata", setDur);
     audio.addEventListener("canplaythrough", setDur);
     audio.addEventListener("durationchange", setDur);
+    audio.addEventListener("timeupdate", () => setCurrentTime(audio.currentTime || 0));
+
+    audio.src = audioUrl;
+    audio.preload = "metadata";
     audio.load();
 
     return () => {
@@ -159,11 +159,14 @@ export default function CuePointEditor({
 
   const handleSave = async () => {
     try {
-      const res = await fetch(`/api/tracks/${trackId}/cuepoints`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cueIn, cueOut, segueDuration }),
-      });
+      const res = await fetch(
+        `http://137.184.12.217:3006/api/tracks/${trackId}/cuepoints`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cueIn, cueOut, segueDuration }),
+        }
+      );
 
       if (!res.ok) throw new Error();
 
@@ -204,7 +207,6 @@ export default function CuePointEditor({
               </div>
             </div>
 
-            {/* Numeric inputs */}
             <div className="grid grid-cols-3 gap-6 bg-gray-800 p-6 rounded-lg">
               <input
                 type="number"
