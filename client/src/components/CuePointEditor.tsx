@@ -114,8 +114,8 @@ export default function CuePointEditor({
   useEffect(() => {
     if (!open) return;
     
-    const initialDuration = initialCuePoints.cueOut || 0;
-    setDuration(initialDuration);
+    // Note: Do NOT set duration here - it will be set from the audio element
+    // The duration state should only come from audio.duration, not from cueOut
     
     // Apply constraints to initial values
     applyConstraints({
