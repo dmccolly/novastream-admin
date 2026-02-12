@@ -347,16 +347,24 @@ export default function CuePointEditor({
   }, [open, waveformData, cueIn, cueOut, segueDuration, currentTime, getEffectiveDuration]);
 
   /**
-   * When the dialog is opened, initialize cue points and generate the
-   * placeholder waveform.  This runs only on open change.
+   * When the dialog is opened, initialize cue points and always generate a
+   * placeholder waveform.  This effect runs on every open change.  We
+   * intentionally generate the placeholder synchronously here rather than
+   * waiting for audio metadata.  Without this fallback the waveform and
+   * markers could remain blank when the audio cannot be decoded or the
+   * duration is unknown.  The cue points are reset to their initial
+   * values on each open and playback state is cleared.
    */
   useEffect(() => {
     if (!open) return;
+    // Reset cue points to initial values
     setCueIn(initialCuePoints.cueIn || 0);
     setCueOut(initialCuePoints.cueOut || 0);
     setSegueDuration(initialCuePoints.segueDuration || 0);
+    // Reset playback state
     setCurrentTime(0);
     setIsPlaying(false);
+    // Always draw a placeholder waveform so the UI has something to render.
     generatePlaceholderWaveform();
   }, [open, initialCuePoints, generatePlaceholderWaveform]);
 
@@ -386,8 +394,10 @@ export default function CuePointEditor({
           const defaultSegue = trackType === "song" ? 3.0 : 0.5;
           applyConstraints({ segueDuration: defaultSegue }, d);
         }
-        // Kick off waveform generation
-        generateWaveform(audio);
+        // Kick off real waveform generation only if we have a source URL
+        if (audioUrl) {
+          generateWaveform(audio);
+        }
       }
     };
 
@@ -404,9 +414,20 @@ export default function CuePointEditor({
     audio.addEventListener("durationchange", () => updateDurationFromAudio("durationchange"));
     audio.addEventListener("timeupdate", handleTimeUpdate);
     audio.addEventListener("ended", handleEnded);
-    audio.src = audioUrl;
-    audio.preload = "metadata";
-    audio.load();
+    // Set the audio source; only assign if audioUrl is provided to avoid fetch of "" (empty string)
+    if (audioUrl) {
+      audio.src = audioUrl;
+      audio.preload = "metadata";
+      audio.load();
+    } else {
+      // When no audio URL, treat the duration as cueOut (if provided) to ensure timeline has length
+      const fallbackDuration = initialCuePoints.cueOut || 0;
+      if (fallbackDuration > 0) {
+        durationRef.current = fallbackDuration;
+        setDuration(fallbackDuration);
+        applyConstraints({ cueOut: fallbackDuration }, fallbackDuration);
+      }
+    }
     // Immediate check
     updateDurationFromAudio("initial");
     // Poll for duration availability
