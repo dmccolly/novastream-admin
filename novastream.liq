@@ -10,7 +10,7 @@ settings.log.level := 3
 # Function to get next track from API
 def get_next_track() =
   # Write JSON to temp file, then parse it
-  ignore(process.run("curl -s http://localhost:3006/api/stream/next-track > /tmp/next_track.json"))
+  ignore(process.run("curl -s http://localhost:3001/api/stream/next-track > /tmp/next_track.json"))
   
   # Extract filepath using jq from file
   filepath = string.trim(process.read("jq -r '.track.filepath // empty' /tmp/next_track.json"))
@@ -22,7 +22,7 @@ def get_next_track() =
     segue_str = string.trim(process.read("jq -r '.track.segue_duration // \"3\"' /tmp/next_track.json"))
     
     # Log to play history
-    ignore(process.run("curl -s -X POST -H 'Content-Type: application/json' -d '{\"filepath\":\"" ^ filepath ^ "\"}' http://localhost:3006/api/stream/now-playing"))
+    ignore(process.run("curl -s -X POST -H 'Content-Type: application/json' -d '{\"filepath\":\"" ^ filepath ^ "\"}' http://localhost:3001/api/stream/now-playing"))
     
     # Build annotations list
     ann_parts = ref([])

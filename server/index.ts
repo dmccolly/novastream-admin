@@ -106,7 +106,8 @@ app.use((req, res, next) => {
     throw err;
   });
 
-  const PORT = 3006;
+  // Allow port configuration via environment variable and fall back to 3001.
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on port ${PORT}`);
   });
