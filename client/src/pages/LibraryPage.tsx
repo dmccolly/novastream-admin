@@ -27,6 +27,7 @@ import { Virtuoso } from "react-virtuoso";
 import { Badge } from "@/components/ui/badge";
 import { EditTrackDialog } from "@/components/EditTrackDialog";
 import CuePointEditor from "@/components/CuePointEditor";
+import BatchCueEditor from "@/components/BatchCueEditor";
 
 export default function Library() {
   const [tracks, setTracks] = useState<Track[]>([]);
@@ -43,6 +44,7 @@ export default function Library() {
     const [editingTrack, setEditingTrack] = useState<Track | null>(null);
     const [cueEditingTrack, setCueEditingTrack] = useState<Track | null>(null);
     const [showCueEditor, setShowCueEditor] = useState(false);
+    const [showBatchEditor, setShowBatchEditor] = useState(false);
     const [playingTrackId, setPlayingTrackId] = useState<string | null>(null);
   const [playingTrack, setPlayingTrack] = useState<Track | null>(null);
   const [loadingPreviewId, setLoadingPreviewId] = useState<string | null>(null);
@@ -460,8 +462,20 @@ export default function Library() {
           <CardHeader className="pb-2 flex-shrink-0">
             <div className="flex items-center justify-between">
               <CardTitle className="text-lg font-medium">Tracks</CardTitle>
-              <div className="text-xs text-muted-foreground font-mono">
-                {selectedTracks.size} selected
+              <div className="flex items-center gap-3">
+                <div className="text-xs text-muted-foreground font-mono">
+                  {selectedTracks.size} selected
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setShowBatchEditor(true)}
+                  className="flex items-center gap-1.5 text-xs border-amber-500/50 text-amber-400 hover:bg-amber-500/10"
+                  title="Batch edit cue points for all or selected tracks"
+                >
+                  <Sliders className="h-3.5 w-3.5" />
+                  Batch Cue Edit
+                </Button>
               </div>
             </div>
           </CardHeader>
@@ -583,6 +597,13 @@ export default function Library() {
               }}
             />
           )}
+
+          <BatchCueEditor
+            open={showBatchEditor}
+            onOpenChange={setShowBatchEditor}
+            selectedIds={selectedTracks}
+            onComplete={() => loadTracks(page, false)}
+          />
         </DashboardLayout>
   );
 }
