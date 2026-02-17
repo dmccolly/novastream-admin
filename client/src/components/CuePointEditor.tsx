@@ -436,8 +436,23 @@ export default function CuePointEditor({
     if (isPlaying) {
       audio.pause(); setIsPlaying(false);
     } else {
-      try { await audio.play(); setIsPlaying(true); }
-      catch { toast({ title: "Playback blocked", description: "Browser prevented autoplay.", variant: "destructive" }); }
+      // Ensure audio src is set
+      if (!audio.src && audioUrl) {
+        audio.src = audioUrl;
+        audio.load();
+      }
+      try { 
+        await audio.play(); 
+        setIsPlaying(true); 
+      }
+      catch (err: any) { 
+        console.error("Play error:", err);
+        toast({ 
+          title: "Playback failed", 
+          description: err.message || "Could not play audio. Check that the file exists on the server.", 
+          variant: "destructive" 
+        }); 
+      }
     }
   };
 
