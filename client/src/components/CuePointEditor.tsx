@@ -1,5 +1,22 @@
 "use client";
 
+/**
+ * CuePointEditor — fully rewritten waveform / cue-point editor.
+ *
+ * Key UX improvements:
+ *   1.  Click-and-drag directly on the waveform to SET the fade region.
+ *       • Click sets the FADE-START at the cursor; drag right to widen to CUE-OUT.
+ *       • Dragging left from the anchor adjusts fadeStart instead.
+ *       • Region is painted in amber in real-time as you drag.
+ *   2.  Three coloured handle triangles rendered on the waveform canvas itself
+ *       (START ▲ green, FADE ▲ amber, END ▲ red) can be grabbed and dragged.
+ *   3.  Pointer capture on the canvas so handles never drop on fast moves.
+ *   4.  A compact timeline row below mirrors the same three handles for
+ *       fine-positioning via mouse drag.
+ *   5.  Numeric inputs for direct entry of all three values.
+ *   6.  Duration detection: loadedmetadata + canplaythrough + poll fallback.
+ */
+
 import React, {
   useCallback,
   useEffect,
@@ -18,37 +35,42 @@ import { Button } from "@/components/ui/button";
 import { Play, Pause, Square } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
-/**
- * CuePointEditor is a fully interactive audio cue point editor.  It renders a
- * waveform preview of the track, provides a timeline with draggable markers
- * for cue in, cue out and segue duration, and persists changes back to the
- * server.  This component uses a resilient duration strategy: it reads
- * `audio.duration` when available but falls back to the provided cueOut
- * value if metadata is unavailable (common with streaming sources).  The
- * timeline and waveform always reference the most accurate duration known.
- */
-interface CuePointEditorProps {
-  /** Whether the editor dialog is open */
+// ─── types ───────────────────────────────────────────────────────────────────
+
+interface CuePoints {
+  cueIn: number;
+  cueOut: number;
+  segueDuration: number;
+}
+
+export interface CuePointEditorProps {
   open: boolean;
-  /** Callback for when the dialog open state changes */
   onOpenChange: (open: boolean) => void;
-  /** Identifier of the track being edited */
   trackId: string;
-  /** Human‑readable title of the track */
   trackTitle: string;
-  /** URL to the audio source; must be reachable by the browser */
   audioUrl: string;
-  /** Initial cue points loaded from the backend */
-  initialCuePoints: {
-    cueIn: number;
-    cueOut: number;
-    segueDuration: number;
-  };
-  /** Optional track type – "song" gives longer default segue durations */
+  initialCuePoints: CuePoints;
   trackType?: string;
-  /** Called after a successful save */
   onSuccess?: () => void;
 }
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+const clamp = (v: number, lo: number, hi: number) =>
+  Math.max(lo, Math.min(hi, v));
+
+const finite = (v: number, fallback = 0) =>
+  Number.isFinite(v) && !Number.isNaN(v) ? v : fallback;
+
+const fmt = (s: number): string => {
+  const n = finite(s);
+  const mm = Math.floor(n / 60);
+  const ss = Math.floor(n % 60);
+  const hh = Math.floor((n - mm * 60 - ss) * 100);
+  return `${mm}:${ss.toString().padStart(2, "0")}.${hh.toString().padStart(2, "0")}`;
+};
+
+// ─── component ───────────────────────────────────────────────────────────────
 
 export default function CuePointEditor({
   open,
@@ -61,809 +83,699 @@ export default function CuePointEditor({
   onSuccess,
 }: CuePointEditorProps) {
   const { toast } = useToast();
-  // Refs for DOM elements
+
+  // ── refs ──────────────────────────────────────────────────────────────────
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const durationRef = useRef<number>(0);
 
-  // A ref storing the last known audio duration.  This persists across
-  // component re-renders and remounts (for example through portals) and is
-  // updated whenever the browser exposes a finite duration.  Without this
-  // fallback, streaming sources often report `Infinity` or `NaN` and the UI
-  // never updates.
-  const durationRef = useRef<number | null>(null);
-
-  // State for the displayed duration.  We keep this separate from the ref
-  // because React state drives re-renders for the UI.  The ref is the true
-  // source of truth; state mirrors it when updated.
-  const [duration, setDuration] = useState<number>(0);
-
-  // Cue point states.  These are controlled numbers that will always be
-  // clamped and snapped according to the current duration.  They start at
-  // initial values from props and may be adjusted by the user.
-  const [cueIn, setCueIn] = useState<number>(initialCuePoints.cueIn || 0);
-  const [cueOut, setCueOut] = useState<number>(initialCuePoints.cueOut || 0);
-  const [segueDuration, setSegueDuration] = useState<number>(initialCuePoints.segueDuration || 0);
-
-  // Playback state
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const [currentTime, setCurrentTime] = useState<number>(0);
-
-  // Waveform data; either a placeholder sine wave or real decoded data
-  const [waveformData, setWaveformData] = useState<number[]>([]);
-  // Scrubbing state for pointer events on the waveform
-  const [isScrubbing, setIsScrubbing] = useState<boolean>(false);
-  const [wasPlayingBeforeScrub, setWasPlayingBeforeScrub] = useState<boolean>(false);
-  // Timeline scrubbing state for mouse events
-  const [isTimelineScrubbing, setIsTimelineScrubbing] = useState<boolean>(false);
-  const [wasPlayingBeforeTimelineScrub, setWasPlayingBeforeTimelineScrub] = useState<boolean>(false);
-  // Marker dragging state; identifies which marker is being dragged
-  const [dragging, setDragging] = useState<"cueIn" | "fadeStart" | "cueOut" | null>(null);
-
-  // Snap mode for constraints
+  // ── core state ────────────────────────────────────────────────────────────
+  const [duration, setDuration] = useState(0);
+  const [cueIn, setCueIn] = useState(initialCuePoints.cueIn || 0);
+  const [cueOut, setCueOut] = useState(initialCuePoints.cueOut || 0);
+  const [segueDuration, setSegueDuration] = useState(initialCuePoints.segueDuration || 0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [waveformData, setWaveformData] = useState<Float32Array | null>(null);
   const [snapMode, setSnapMode] = useState<"off" | "0.10" | "0.01">("off");
 
-  // Reference for requestAnimationFrame when playing; used to cancel the loop
-  const animationFrameRef = useRef<number | null>(null);
+  // ── interaction refs (avoid stale closures in event handlers) ─────────────
+  // These mirror state so canvas pointer handlers can read current values.
+  const cueInRef = useRef(cueIn);
+  const cueOutRef = useRef(cueOut);
+  const segueDurationRef = useRef(segueDuration);
+  const snapModeRef = useRef(snapMode);
+  useEffect(() => { cueInRef.current = cueIn; }, [cueIn]);
+  useEffect(() => { cueOutRef.current = cueOut; }, [cueOut]);
+  useEffect(() => { segueDurationRef.current = segueDuration; }, [segueDuration]);
+  useEffect(() => { snapModeRef.current = snapMode; }, [snapMode]);
 
-  /**
-   * Utility: clamp a number between min and max.
-   */
-  const clamp = (value: number, min: number, max: number): number => {
-    return Math.max(min, Math.min(value, max));
-  };
+  // ── pointer interaction state stored in a ref (not state, to avoid lag) ──
+  type DragMode =
+    | { kind: "none" }
+    | { kind: "paint"; anchor: number }
+    | { kind: "handle"; which: "start" | "fade" | "end" };
+  const interactionRef = useRef<DragMode>({ kind: "none" });
 
-  /**
-   * Utility: ensure a value is a finite number; if not, return 0.  This
-   * prevents NaN and Infinity from propagating through the UI.
-   */
-  const sanitize = (value: number): number => {
-    return !Number.isFinite(value) || Number.isNaN(value) ? 0 : value;
-  };
+  // ── RAF ───────────────────────────────────────────────────────────────────
+  const rafRef = useRef<number | null>(null);
 
-  /**
-   * Apply snap to a value based on the current snapMode.  When snapMode is
-   * "off" the value is returned unchanged.  Otherwise it is rounded to
-   * increments of 0.10 or 0.01 seconds.
-   */
-  const applySnap = (value: number): number => {
-    if (snapMode === "off") return value;
-    const step = snapMode === "0.10" ? 0.1 : 0.01;
-    return Math.round(value / step) * step;
-  };
+  // ── derived ───────────────────────────────────────────────────────────────
+  const dur = durationRef.current > 0 ? durationRef.current : (duration || cueOut || 1);
+  const fadeStart = Math.max(cueIn, cueOut - segueDuration);
 
-  /**
-   * Compute the effective duration used for UI and constraints.  Use
-   * audio.duration if it is finite; otherwise fall back to the last known
-   * durationRef or cueOut.  This ensures the UI has a meaningful length
-   * even for streaming audio where the duration is unknown.
-   */
-  const getEffectiveDuration = useCallback((): number => {
-    const d = durationRef.current ?? 0;
-    if (Number.isFinite(d) && d > 0) return d;
-    if (duration > 0) return duration;
-    if (cueOut > 0) return cueOut;
-    return 0;
-  }, [duration, cueOut]);
-
-  /**
-   * Format a number of seconds into mm:ss.hh format.  Handles invalid numbers
-   * gracefully by returning 0:00.00.
-   */
-  const formatTime = (seconds: number): string => {
-    const s = sanitize(seconds);
-    const mm = Math.floor(s / 60);
-    const ss = Math.floor(s % 60);
-    const hh = Math.floor((s - mm * 60 - ss) * 100);
-    return `${mm}:${ss.toString().padStart(2, "0")}.${hh.toString().padStart(2, "0")}`;
-  };
-
-  /**
-   * Enforce cue point ordering and duration bounds.  This function will
-   * internally clamp and snap cueIn, cueOut and segueDuration to produce
-   * sensible values where cueIn <= fadeStart <= cueOut and fadeStart +
-   * segueDuration <= cueOut.  Optionally accepts an override duration to
-   * account for newly computed durations outside React state.
-   */
-  const applyConstraints = useCallback(
-    (
-      next: { cueIn?: number; cueOut?: number; segueDuration?: number },
-      overrideDuration?: number
-    ) => {
-      const d = overrideDuration ?? getEffectiveDuration();
-      let newCueIn = sanitize(next.cueIn !== undefined ? next.cueIn : cueIn);
-      let newCueOut = sanitize(next.cueOut !== undefined ? next.cueOut : cueOut);
-      let newSegue = sanitize(next.segueDuration !== undefined ? next.segueDuration : segueDuration);
-
-      // Snap values if needed
-      newCueIn = applySnap(newCueIn);
-      newCueOut = applySnap(newCueOut);
-      newSegue = applySnap(newSegue);
-
-      // Clamp to [0, d]
-      newCueIn = clamp(newCueIn, 0, d);
-      newCueOut = clamp(newCueOut, 0, d);
-      newSegue = clamp(newSegue, 0, d);
-
-      // If cueIn is beyond cueOut - segue, adjust appropriately
-      if (newCueIn > newCueOut - newSegue) {
-        if (next.cueIn !== undefined) {
-          newCueIn = clamp(newCueOut - newSegue, 0, d);
-        } else if (next.cueOut !== undefined) {
-          newCueOut = clamp(newCueIn + newSegue, 0, d);
-        } else if (next.segueDuration !== undefined) {
-          newSegue = clamp(newCueOut - newCueIn, 0, d);
-        }
-      }
-
-      // Ensure segueDuration <= cueOut - cueIn
-      if (newSegue > newCueOut - newCueIn) {
-        newSegue = Math.max(0, newCueOut - newCueIn);
-      }
-
-      setCueIn(newCueIn);
-      setCueOut(newCueOut);
-      setSegueDuration(newSegue);
-    },
-    [applySnap, cueIn, cueOut, segueDuration, getEffectiveDuration]
-  );
-
-  /**
-   * Generate a placeholder waveform.  This is a simple dampened sine wave with
-   * random variations used until a real waveform can be decoded.  It runs
-   * synchronously.
-   */
-  const generatePlaceholderWaveform = useCallback(() => {
-    const samples = 500;
-    const data: number[] = [];
-    for (let i = 0; i < samples; i++) {
-      const position = i / samples;
-      const base = 0.3 + Math.sin(position * Math.PI * 8) * 0.2;
-      const variation = Math.random() * 0.3;
-      const fadeIn = Math.min(position * 5, 1);
-      const fadeOut = Math.min((1 - position) * 5, 1);
-      data.push((base + variation) * fadeIn * fadeOut);
-    }
-    setWaveformData(data);
+  // ── snap helper ───────────────────────────────────────────────────────────
+  const snap = useCallback((v: number) => {
+    const mode = snapModeRef.current;
+    if (mode === "off") return v;
+    const step = mode === "0.10" ? 0.1 : 0.01;
+    return Math.round(v / step) * step;
   }, []);
 
-  /**
-   * Attempt to fetch and decode the audio buffer for generating a real
-   * waveform.  Some streaming sources cannot be decoded due to CORS or
-   * incomplete data.  When decoding fails, the placeholder waveform is
-   * retained.
-   */
-  const generateWaveform = useCallback(
-    async (audio: HTMLAudioElement) => {
-      // Use the existing placeholder until we decode
-      try {
-        const controller = new AbortController();
-        const signal = controller.signal;
-        // Cancel fetch if it takes too long
-        const timeout = setTimeout(() => controller.abort(), 5000);
-        const response = await fetch(audio.src, { signal });
-        clearTimeout(timeout);
-        if (!response.ok) throw new Error("Failed to fetch audio");
-        const arrayBuffer = await response.arrayBuffer();
-        const AudioCtx = (window.AudioContext || (window as any).webkitAudioContext);
-        const audioContext = new AudioCtx();
-        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-        const samples = 500;
-        const rawData = audioBuffer.getChannelData(0);
-        const blockSize = Math.floor(rawData.length / samples);
-        const filtered: number[] = [];
-        for (let i = 0; i < samples; i++) {
-          let sum = 0;
-          const start = i * blockSize;
-          for (let j = 0; j < blockSize; j++) {
-            sum += Math.abs(rawData[start + j]);
-          }
-          filtered.push(sum / blockSize);
-        }
-        const max = Math.max(...filtered);
-        const normalized = max > 0 ? filtered.map((n) => n / max) : filtered;
-        setWaveformData(normalized);
-      } catch (err) {
-        // If decoding fails, keep the placeholder
-      }
-    },
-    []
-  );
+  // ── constrained setters ───────────────────────────────────────────────────
 
-  /**
-   * Draw the waveform onto the canvas.  This effect runs whenever the
-   * waveform data, cue points, or dialog open state change.  It shades
-   * different sections of the waveform to indicate cue regions and draws
-   * the playhead.  Using `useLayoutEffect` ensures the canvas exists in
-   * the DOM before drawing.  Including `open` in the dependency array
-   * re-runs the effect when the dialog becomes visible so we can
-   * initialize drawing after mount.
-   */
-  useLayoutEffect(() => {
-    // Only draw when the editor is open and we have waveform data
-    if (!open) return;
+  const setStart = useCallback((v: number) => {
+    const d = durationRef.current || dur;
+    const n = clamp(snap(finite(v)), 0, d);
+    setCueIn(n);
+    setCueOut(prev => Math.max(prev, n + segueDurationRef.current));
+  }, [dur, snap]);
+
+  const setFadeStartSec = useCallback((fs: number) => {
+    const d = durationRef.current || dur;
+    const co = cueOutRef.current;
+    const ci = cueInRef.current;
+    const n = clamp(snap(finite(fs)), ci, co);
+    setSegueDuration(clamp(co - n, 0, d));
+  }, [dur, snap]);
+
+  const setEnd = useCallback((v: number) => {
+    const d = durationRef.current || dur;
+    const ci = cueInRef.current;
+    const n = clamp(snap(finite(v)), ci, d);
+    setCueOut(n);
+    setSegueDuration(prev => clamp(prev, 0, n - ci));
+  }, [dur, snap]);
+
+  // Bulk constrained apply (used by numeric inputs)
+  const applyAll = useCallback((next: Partial<CuePoints>) => {
+    const d = durationRef.current || dur;
+    let ni = finite(next.cueIn !== undefined ? next.cueIn : cueInRef.current);
+    let no = finite(next.cueOut !== undefined ? next.cueOut : cueOutRef.current);
+    let ns = finite(next.segueDuration !== undefined ? next.segueDuration : segueDurationRef.current);
+    ni = clamp(snap(ni), 0, d);
+    no = clamp(snap(no), 0, d);
+    ns = clamp(snap(ns), 0, d);
+    if (ni > no) [ni, no] = [no, ni];
+    ns = clamp(ns, 0, no - ni);
+    setCueIn(ni);
+    setCueOut(no);
+    setSegueDuration(ns);
+  }, [dur, snap]);
+
+  // ── waveform generation ───────────────────────────────────────────────────
+
+  const generatePlaceholder = useCallback(() => {
+    const N = 600;
+    const d = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const p = i / N;
+      const base = 0.25 + Math.sin(p * Math.PI * 10) * 0.18;
+      const noise = Math.random() * 0.25;
+      const env = Math.min(p * 8, 1) * Math.min((1 - p) * 8, 1);
+      d[i] = (base + noise) * env;
+    }
+    setWaveformData(d);
+  }, []);
+
+  const generateReal = useCallback(async (src: string) => {
+    try {
+      const ctrl = new AbortController();
+      const tid = setTimeout(() => ctrl.abort(), 8000);
+      const resp = await fetch(src, { signal: ctrl.signal });
+      clearTimeout(tid);
+      if (!resp.ok) throw new Error("fetch failed");
+      const buf = await resp.arrayBuffer();
+      const Ctx = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext;
+      const ctx = new Ctx();
+      const ab = await ctx.decodeAudioData(buf);
+      const raw = ab.getChannelData(0);
+      const N = 600;
+      const block = Math.floor(raw.length / N);
+      const out = new Float32Array(N);
+      let mx = 0;
+      for (let i = 0; i < N; i++) {
+        let s = 0;
+        for (let j = 0; j < block; j++) s += Math.abs(raw[i * block + j]);
+        out[i] = s / block;
+        if (out[i] > mx) mx = out[i];
+      }
+      if (mx > 0) for (let i = 0; i < N; i++) out[i] /= mx;
+      setWaveformData(out);
+    } catch {
+      // keep placeholder
+    }
+  }, []);
+
+  // ── canvas draw ───────────────────────────────────────────────────────────
+
+  const draw = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas || waveformData.length === 0) return;
+    if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const width = canvas.width;
-    const height = canvas.height;
-    ctx.clearRect(0, 0, width, height);
+    const W = canvas.width;
+    const H = canvas.height;
 
-    const barWidth = width / waveformData.length;
-    const d = getEffectiveDuration();
-    for (let i = 0; i < waveformData.length; i++) {
-      const value = waveformData[i];
-      const barHeight = value * height * 0.8;
-      const x = i * barWidth;
-      const y = (height - barHeight) / 2;
-      // Determine color based on cue regions
-      let color = "#3b82f6"; // blue default
-      if (d > 0) {
-        const position = (i / waveformData.length) * d;
-        if (position < cueIn) {
-          color = "#6b7280"; // gray before start
-        } else if (position >= cueIn && position < cueOut - segueDuration) {
-          color = "#3b82f6"; // blue active region
-        } else if (position >= cueOut - segueDuration && position < cueOut) {
-          color = "#eab308"; // yellow fade region
-        } else {
-          color = "#6b7280"; // gray after end
-        }
+    const d = durationRef.current || dur;
+    const ci = cueInRef.current;
+    const co = cueOutRef.current;
+    const sg = segueDurationRef.current;
+    const fs = Math.max(ci, co - sg);
+    const ct = currentTime;
+    const data = waveformData;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // Background
+    ctx.fillStyle = "#0d1117";
+    ctx.fillRect(0, 0, W, H);
+
+    const toX = (sec: number) => (d > 0 ? clamp((sec / d) * W, 0, W) : 0);
+    const ciX = toX(ci);
+    const fsX = toX(fs);
+    const coX = toX(co);
+    const ctX = toX(ct);
+
+    // Region tints behind bars
+    if (ciX > 0) { ctx.fillStyle = "rgba(15,23,42,0.7)"; ctx.fillRect(0, 0, ciX, H); }
+    if (coX > ciX) { ctx.fillStyle = "rgba(6,182,212,0.07)"; ctx.fillRect(ciX, 0, coX - ciX, H); }
+    if (coX > fsX) { ctx.fillStyle = "rgba(251,191,36,0.13)"; ctx.fillRect(fsX, 0, coX - fsX, H); }
+    if (coX < W) { ctx.fillStyle = "rgba(15,23,42,0.7)"; ctx.fillRect(coX, 0, W - coX, H); }
+
+    // Bars
+    if (data) {
+      const bw = W / data.length;
+      for (let i = 0; i < data.length; i++) {
+        const x = i * bw;
+        const bh = Math.max(2, data[i] * (H - 40) * 0.88);
+        const y = (H - bh) / 2;
+        const pos = (i / data.length) * d;
+        let color: string;
+        if (pos < ci) color = "#1e293b";
+        else if (pos < fs) color = "#22d3ee";
+        else if (pos < co) color = "#fbbf24";
+        else color = "#1e293b";
+        ctx.fillStyle = color;
+        ctx.fillRect(x, y, Math.max(bw - 1, 1), bh);
       }
-      ctx.fillStyle = color;
-      ctx.fillRect(x, y, barWidth - 1, barHeight);
     }
-    // Draw fade start and end markers on waveform
-    if (d > 0 && segueDuration > 0 && cueOut > 0) {
-      const fadeStartX = ((cueOut - segueDuration) / d) * width;
-      const fadeEndX = (cueOut / d) * width;
-      ctx.strokeStyle = "#ffffff";
+
+    // Marker lines
+    const line = (x: number, color: string, dash: number[] = []) => {
+      ctx.save();
+      ctx.strokeStyle = color;
       ctx.lineWidth = 2;
-      ctx.setLineDash([5, 3]);
-      ctx.beginPath();
-      ctx.moveTo(fadeStartX, 0);
-      ctx.lineTo(fadeStartX, height);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(fadeEndX, 0);
-      ctx.lineTo(fadeEndX, height);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-    // Draw playhead
-    if (d > 0 && currentTime >= 0) {
-      const x = (currentTime / d) * width;
-      ctx.strokeStyle = "#ef4444";
-      ctx.lineWidth = 3;
-      ctx.shadowColor = "#ef4444";
+      ctx.shadowColor = color;
       ctx.shadowBlur = 8;
+      ctx.setLineDash(dash);
       ctx.beginPath();
       ctx.moveTo(x, 0);
-      ctx.lineTo(x, height);
+      ctx.lineTo(x, H);
       ctx.stroke();
-      ctx.shadowBlur = 0;
+      ctx.restore();
+    };
+
+    if (d > 0) {
+      if (ci > 0) line(ciX, "#22c55e");
+      line(fsX, "#fbbf24", [6, 4]);
+      line(coX, "#ef4444");
     }
-  }, [open, waveformData, cueIn, cueOut, segueDuration, currentTime, getEffectiveDuration]);
 
-  /**
-   * When the dialog is opened, initialize cue points and always generate a
-   * placeholder waveform.  This effect runs on every open change.  We
-   * intentionally generate the placeholder synchronously here rather than
-   * waiting for audio metadata.  Without this fallback the waveform and
-   * markers could remain blank when the audio cannot be decoded or the
-   * duration is unknown.  The cue points are reset to their initial
-   * values on each open and playback state is cleared.
-   */
-  useEffect(() => {
+    // Handle triangles
+    const handle = (x: number, color: string, labelTop: string, labelBot: string, atTop: boolean) => {
+      const hy = atTop ? 12 : H - 12;
+      const dir = atTop ? 1 : -1;
+      ctx.save();
+      ctx.fillStyle = color;
+      ctx.strokeStyle = "rgba(255,255,255,0.6)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, hy - dir * 10);
+      ctx.lineTo(x - 8, hy + dir * 8);
+      ctx.lineTo(x + 8, hy + dir * 8);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.font = "bold 10px 'JetBrains Mono', monospace";
+      ctx.textAlign = "center";
+      if (atTop) {
+        ctx.fillText(labelTop, x, 10);
+      } else {
+        ctx.fillText(labelTop, x, H - 4);
+      }
+      ctx.restore();
+    };
+
+    if (d > 0) {
+      handle(ciX, "#22c55e", `▶ ${fmt(ci)}`, "", false);
+      handle(fsX, "#fbbf24", `↘ ${fmt(fs)}`, "", true);
+      handle(coX, "#ef4444", `■ ${fmt(co)}`, "", false);
+    }
+
+    // Playhead
+    ctx.save();
+    ctx.strokeStyle = "#f43f5e";
+    ctx.lineWidth = 2;
+    ctx.shadowColor = "#f43f5e";
+    ctx.shadowBlur = 14;
+    ctx.beginPath();
+    ctx.moveTo(ctX, 0);
+    ctx.lineTo(ctX, H);
+    ctx.stroke();
+    ctx.restore();
+  }, [waveformData, cueIn, cueOut, segueDuration, currentTime, dur]);
+
+  useLayoutEffect(() => {
     if (!open) return;
-    // Reset cue points to initial values
-    setCueIn(initialCuePoints.cueIn || 0);
-    setCueOut(initialCuePoints.cueOut || 0);
-    setSegueDuration(initialCuePoints.segueDuration || 0);
-    // Reset playback state
-    setCurrentTime(0);
-    setIsPlaying(false);
-    // Always draw a placeholder waveform so the UI has something to render.
-    generatePlaceholderWaveform();
-  }, [open, initialCuePoints, generatePlaceholderWaveform]);
+    draw();
+  }, [open, draw]);
 
-  /**
-   * Load audio metadata and establish event listeners.  This effect listens
-   * for multiple events to detect when a finite duration becomes available.
-   * It also sets up timeupdate to track the playhead.
-   */
+  // ── duration detection ────────────────────────────────────────────────────
+
   useEffect(() => {
     if (!open) return;
     const audio = audioRef.current;
     if (!audio) return;
-
     let cancelled = false;
-    const updateDurationFromAudio = (reason: string) => {
+
+    const tryUpdate = () => {
       if (cancelled) return;
       const d = audio.duration;
       if (Number.isFinite(d) && d > 0) {
         durationRef.current = d;
         setDuration(d);
-        // If cueOut was not provided or zero, default to full length
-        if (!initialCuePoints.cueOut) {
-          applyConstraints({ cueOut: d }, d);
-        }
-        // If segueDuration not provided, use type default
-        if (!initialCuePoints.segueDuration) {
-          const defaultSegue = trackType === "song" ? 3.0 : 0.5;
-          applyConstraints({ segueDuration: defaultSegue }, d);
-        }
-        // Kick off real waveform generation only if we have a source URL
-        if (audioUrl) {
-          generateWaveform(audio);
-        }
       }
     };
 
-    const handleTimeUpdate = () => {
-      setCurrentTime(audio.currentTime || 0);
-    };
-    const handleEnded = () => {
+    audio.addEventListener("loadedmetadata", tryUpdate);
+    audio.addEventListener("canplaythrough", tryUpdate);
+    audio.addEventListener("durationchange", tryUpdate);
+
+    const onTimeUpdate = () => setCurrentTime(audio.currentTime);
+    const onEnded = () => {
       setIsPlaying(false);
-      setCurrentTime(0);
       audio.currentTime = 0;
+      setCurrentTime(0);
     };
-    audio.addEventListener("loadedmetadata", () => updateDurationFromAudio("loadedmetadata"));
-    audio.addEventListener("canplaythrough", () => updateDurationFromAudio("canplaythrough"));
-    audio.addEventListener("durationchange", () => updateDurationFromAudio("durationchange"));
-    audio.addEventListener("timeupdate", handleTimeUpdate);
-    audio.addEventListener("ended", handleEnded);
-    // Set the audio source; only assign if audioUrl is provided to avoid fetch of "" (empty string)
+    audio.addEventListener("timeupdate", onTimeUpdate);
+    audio.addEventListener("ended", onEnded);
+
     if (audioUrl) {
       audio.src = audioUrl;
       audio.preload = "metadata";
       audio.load();
     } else {
-      // When no audio URL, treat the duration as cueOut (if provided) to ensure timeline has length
-      const fallbackDuration = initialCuePoints.cueOut || 0;
-      if (fallbackDuration > 0) {
-        durationRef.current = fallbackDuration;
-        setDuration(fallbackDuration);
-        applyConstraints({ cueOut: fallbackDuration }, fallbackDuration);
-      }
+      const fb = initialCuePoints.cueOut || 0;
+      if (fb > 0) { durationRef.current = fb; setDuration(fb); }
     }
-    // Immediate check
-    updateDurationFromAudio("initial");
-    // Poll for duration availability
+
+    tryUpdate();
     let attempts = 0;
     const poll = setInterval(() => {
-      attempts++;
-      if (durationRef.current && durationRef.current > 0) {
-        clearInterval(poll);
-      } else {
-        updateDurationFromAudio("poll");
-        if (attempts > 60) clearInterval(poll);
-      }
+      tryUpdate();
+      if (durationRef.current > 0 || ++attempts > 80) clearInterval(poll);
     }, 50);
+
     return () => {
       cancelled = true;
       clearInterval(poll);
-      audio.removeEventListener("timeupdate", handleTimeUpdate);
-      audio.removeEventListener("ended", handleEnded);
+      audio.removeEventListener("loadedmetadata", tryUpdate);
+      audio.removeEventListener("canplaythrough", tryUpdate);
+      audio.removeEventListener("durationchange", tryUpdate);
+      audio.removeEventListener("timeupdate", onTimeUpdate);
+      audio.removeEventListener("ended", onEnded);
     };
-  }, [open, audioUrl, trackId, initialCuePoints, trackType, applyConstraints, generateWaveform]);
+  }, [open, audioUrl]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /**
-   * Manage the play/pause toggle.  Attempts to play the audio and updates
-   * state accordingly.  Browser autoplay policies can block playback; if so
-   * a toast is shown.
-   */
-  const togglePlayPause = async () => {
+  // ── reset on open ─────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!open) return;
+    setCueIn(initialCuePoints.cueIn || 0);
+    setCueOut(initialCuePoints.cueOut || 0);
+    setSegueDuration(initialCuePoints.segueDuration || 0);
+    setCurrentTime(0);
+    setIsPlaying(false);
+    durationRef.current = 0;
+    setDuration(0);
+    generatePlaceholder();
+    if (audioUrl) setTimeout(() => generateReal(audioUrl), 150);
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── RAF playhead ──────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!isPlaying) { if (rafRef.current) cancelAnimationFrame(rafRef.current); return; }
+    const tick = () => {
+      const audio = audioRef.current;
+      if (audio) setCurrentTime(audio.currentTime);
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+  }, [isPlaying]);
+
+  // ── playback ──────────────────────────────────────────────────────────────
+
+  const togglePlay = async () => {
     const audio = audioRef.current;
     if (!audio) return;
     if (isPlaying) {
-      audio.pause();
-      setIsPlaying(false);
+      audio.pause(); setIsPlaying(false);
     } else {
-      try {
-        await audio.play();
-        setIsPlaying(true);
-      } catch {
-        toast({
-          title: "Playback blocked",
-          description: "The browser prevented autoplay.",
-          variant: "destructive",
-        });
-      }
+      try { await audio.play(); setIsPlaying(true); }
+      catch { toast({ title: "Playback blocked", description: "Browser prevented autoplay.", variant: "destructive" }); }
     }
   };
 
-  /**
-   * Stop playback and reset current time.  Used by the stop button.
-   */
   const handleStop = () => {
     const audio = audioRef.current;
     if (!audio) return;
-    audio.pause();
-    audio.currentTime = 0;
-    setIsPlaying(false);
-    setCurrentTime(0);
+    audio.pause(); audio.currentTime = 0;
+    setIsPlaying(false); setCurrentTime(0);
   };
 
-  /**
-   * Save the current cue points to the server.  Sends a PATCH request to
-   * `/api/tracks/:id/cuepoints`.  On success shows a toast and calls
-   * onSuccess; on failure shows a destructive toast.
-   */
+  // ── canvas pointer handling ───────────────────────────────────────────────
+
+  const HANDLE_THRESH = 14; // px hit radius for grabbing a handle
+
+  const secAtClientX = (clientX: number, rect: DOMRect): number => {
+    const d = durationRef.current || dur;
+    return clamp(((clientX - rect.left) / rect.width) * d, 0, d);
+  };
+
+  const hitHandle = (
+    clientX: number,
+    rect: DOMRect
+  ): "start" | "fade" | "end" | null => {
+    const d = durationRef.current || dur;
+    if (d <= 0) return null;
+    const W = rect.width;
+    const x = clientX - rect.left;
+    const toX = (s: number) => (s / d) * W;
+    const ci = cueInRef.current;
+    const co = cueOutRef.current;
+    const fs = Math.max(ci, co - segueDurationRef.current);
+    const hits: [number, "start" | "fade" | "end"][] = [
+      [Math.abs(x - toX(ci)), "start"],
+      [Math.abs(x - toX(fs)), "fade"],
+      [Math.abs(x - toX(co)), "end"],
+    ];
+    hits.sort((a, b) => a[0] - b[0]);
+    return hits[0][0] <= HANDLE_THRESH ? hits[0][1] : null;
+  };
+
+  const handleCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.setPointerCapture(e.pointerId);
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const h = hitHandle(e.clientX, rect);
+    if (h) {
+      interactionRef.current = { kind: "handle", which: h };
+    } else {
+      const t = secAtClientX(e.clientX, rect);
+      interactionRef.current = { kind: "paint", anchor: t };
+      // Initialise: anchor becomes fadeStart, cueOut = anchor, segue = 0
+      const ci = cueInRef.current;
+      const anchorClamped = clamp(t, ci, durationRef.current || dur);
+      setCueOut(anchorClamped);
+      setSegueDuration(0);
+    }
+  };
+
+  const handleCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const mode = interactionRef.current;
+    if (mode.kind === "none") return;
+    const rect = canvas.getBoundingClientRect();
+    const t = secAtClientX(e.clientX, rect);
+
+    if (mode.kind === "handle") {
+      switch (mode.which) {
+        case "start": setStart(t); break;
+        case "fade": setFadeStartSec(t); break;
+        case "end": setEnd(t); break;
+      }
+    } else if (mode.kind === "paint") {
+      const anchor = mode.anchor;
+      const d = durationRef.current || dur;
+      const ci = cueInRef.current;
+      if (t >= anchor) {
+        // Drag right: anchor = fadeStart, t = cueOut
+        const co = clamp(t, anchor, d);
+        setCueOut(co);
+        setSegueDuration(clamp(co - anchor, 0, co - ci));
+      } else {
+        // Drag left: anchor = cueOut, t = fadeStart
+        setCueOut(clamp(anchor, ci, d));
+        setFadeStartSec(t);
+      }
+    }
+  };
+
+  const handleCanvasPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    interactionRef.current = { kind: "none" };
+    const canvas = canvasRef.current;
+    if (canvas) canvas.releasePointerCapture(e.pointerId);
+  };
+
+  // ── timeline mouse drag ───────────────────────────────────────────────────
+
+  const tlDragRef = useRef<"start" | "fade" | "end" | null>(null);
+
+  const tlHit = (clientX: number, rect: DOMRect): "start" | "fade" | "end" | null => {
+    const d = durationRef.current || dur;
+    if (d <= 0) return null;
+    const W = rect.width;
+    const x = clientX - rect.left;
+    const ci = cueInRef.current;
+    const co = cueOutRef.current;
+    const fs = Math.max(ci, co - segueDurationRef.current);
+    const toX = (s: number) => (s / d) * W;
+    const hits: [number, "start" | "fade" | "end"][] = [
+      [Math.abs(x - toX(ci)), "start"],
+      [Math.abs(x - toX(fs)), "fade"],
+      [Math.abs(x - toX(co)), "end"],
+    ];
+    hits.sort((a, b) => a[0] - b[0]);
+    return hits[0][0] <= HANDLE_THRESH ? hits[0][1] : null;
+  };
+
+  const handleTlMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    const tl = timelineRef.current;
+    if (!tl) return;
+    const rect = tl.getBoundingClientRect();
+    const h = tlHit(e.clientX, rect);
+    if (h) {
+      tlDragRef.current = h;
+      e.preventDefault();
+    } else {
+      // Scrub playhead
+      const audio = audioRef.current;
+      const t = secAtClientX(e.clientX, rect);
+      if (audio) audio.currentTime = t;
+      setCurrentTime(t);
+    }
+  };
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const tl = timelineRef.current;
+      if (!tl || !tlDragRef.current) return;
+      const rect = tl.getBoundingClientRect();
+      const t = secAtClientX(e.clientX, rect);
+      switch (tlDragRef.current) {
+        case "start": setStart(t); break;
+        case "fade": setFadeStartSec(t); break;
+        case "end": setEnd(t); break;
+      }
+    };
+    const onUp = () => { tlDragRef.current = null; };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    return () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+  }, [setStart, setFadeStartSec, setEnd]);
+
+  // ── save ──────────────────────────────────────────────────────────────────
+
   const handleSave = async () => {
     try {
-      const res = await fetch(
-        `/api/tracks/${trackId}/cuepoints`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ cueIn, cueOut, segueDuration }),
-        }
-      );
-      if (!res.ok) throw new Error();
-      toast({ title: "Saved", description: "Cue points saved successfully." });
-      onSuccess?.();
-      // Close dialog after a short delay
-      setTimeout(() => onOpenChange(false), 400);
-    } catch {
-      toast({
-        title: "Save failed",
-        description: "Unable to save cue points.",
-        variant: "destructive",
+      const res = await fetch(`/api/tracks/${trackId}/cuepoints`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cueIn, cueOut, segueDuration }),
       });
+      if (!res.ok) throw new Error();
+      toast({ title: "Saved", description: "Cue points saved." });
+      onSuccess?.();
+      setTimeout(() => onOpenChange(false), 300);
+    } catch {
+      toast({ title: "Save failed", description: "Could not save cue points.", variant: "destructive" });
     }
   };
 
-  /**
-   * Waveform pointer handlers for touch and mouse.  Supports scrubbing and
-   * double-tap to toggle play/pause.  During scrubbing, playback is paused
-   * and resumed based on prior state.
-   */
-  const handleWaveformPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    const audio = audioRef.current;
-    if (!canvas || !audio) return;
-    const d = getEffectiveDuration();
-    if (d <= 0) return;
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const percent = clamp(x / rect.width, 0, 1);
-    const time = percent * d;
-    audio.currentTime = time;
-    setCurrentTime(time);
-    // Double tap detection
-    const now = Date.now();
-    if (now - (handleWaveformPointerDown as any).lastTap < TAP_MS) {
-      togglePlayPause();
-      (handleWaveformPointerDown as any).lastTap = 0;
-      return;
-    }
-    (handleWaveformPointerDown as any).lastTap = now;
-    // Begin scrubbing
-    setIsScrubbing(true);
-    setWasPlayingBeforeScrub(isPlaying);
-    if (isPlaying) {
-      audio.pause();
-      setIsPlaying(false);
-    }
-  };
-  // Initialize lastTap property
-  (handleWaveformPointerDown as any).lastTap = 0;
-  const handleWaveformPointerMove = useCallback(
-    (e: PointerEvent) => {
-      const canvas = canvasRef.current;
-      const audio = audioRef.current;
-      const d = getEffectiveDuration();
-      if (!isScrubbing || !canvas || !audio || d <= 0) return;
-      const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const percent = clamp(x / rect.width, 0, 1);
-      const time = percent * d;
-      audio.currentTime = time;
-      setCurrentTime(time);
-    },
-    [isScrubbing, getEffectiveDuration]
-  );
-  const handleWaveformPointerUp = useCallback(() => {
-    if (!isScrubbing) return;
-    setIsScrubbing(false);
-    if (wasPlayingBeforeScrub && audioRef.current) {
-      audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
-    }
-    setWasPlayingBeforeScrub(false);
-  }, [isScrubbing, wasPlayingBeforeScrub]);
-  // Effect to attach pointermove/up during scrubbing
-  useEffect(() => {
-    if (!isScrubbing) return;
-    document.addEventListener("pointermove", handleWaveformPointerMove);
-    document.addEventListener("pointerup", handleWaveformPointerUp);
-    return () => {
-      document.removeEventListener("pointermove", handleWaveformPointerMove);
-      document.removeEventListener("pointerup", handleWaveformPointerUp);
-    };
-  }, [isScrubbing, handleWaveformPointerMove, handleWaveformPointerUp]);
+  // ── derived percentages for timeline ─────────────────────────────────────
 
-  /**
-   * Timeline scrubbing with mouse.  When the user clicks the timeline (not
-   * dragging markers), they can scrub the playhead.
-   */
-  const handleTimelineMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    if ((e.target as HTMLElement).closest(".cursor-ew-resize")) return;
-    const timeline = timelineRef.current;
-    const audio = audioRef.current;
-    const d = getEffectiveDuration();
-    if (!timeline || !audio || d <= 0) return;
-    setIsTimelineScrubbing(true);
-    setWasPlayingBeforeTimelineScrub(isPlaying);
-    if (isPlaying) {
-      audio.pause();
-      setIsPlaying(false);
-    }
-    const rect = timeline.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const percent = clamp(x / rect.width, 0, 1);
-    const time = percent * d;
-    audio.currentTime = time;
-    setCurrentTime(time);
-  };
-  const handleTimelineMouseMove = useCallback(
-    (e: MouseEvent) => {
-      const timeline = timelineRef.current;
-      const audio = audioRef.current;
-      const d = getEffectiveDuration();
-      if (!isTimelineScrubbing || !timeline || !audio || d <= 0) return;
-      const rect = timeline.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const percent = clamp(x / rect.width, 0, 1);
-      const time = percent * d;
-      audio.currentTime = time;
-      setCurrentTime(time);
-    },
-    [isTimelineScrubbing, getEffectiveDuration]
-  );
-  const handleTimelineMouseUp = useCallback(() => {
-    if (!isTimelineScrubbing) return;
-    setIsTimelineScrubbing(false);
-    if (wasPlayingBeforeTimelineScrub && audioRef.current) {
-      audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
-    }
-    setWasPlayingBeforeTimelineScrub(false);
-  }, [isTimelineScrubbing, wasPlayingBeforeTimelineScrub]);
-  useEffect(() => {
-    if (!isTimelineScrubbing) return;
-    document.addEventListener("mousemove", handleTimelineMouseMove);
-    document.addEventListener("mouseup", handleTimelineMouseUp);
-    return () => {
-      document.removeEventListener("mousemove", handleTimelineMouseMove);
-      document.removeEventListener("mouseup", handleTimelineMouseUp);
-    };
-  }, [isTimelineScrubbing, handleTimelineMouseMove, handleTimelineMouseUp]);
+  const d = durationRef.current || dur;
+  const pct = (s: number) => (d > 0 ? `${clamp((s / d) * 100, 0, 100).toFixed(4)}%` : "0%");
 
-  /**
-   * Drag handlers for markers.  These modify cueIn, fadeStart (implicitly
-   * adjusting segueDuration), and cueOut.  They use mouse events because
-   * pointer events interfere with marker selection in some browsers.
-   */
-  const handleMarkerDrag = (
-    e: React.MouseEvent<HTMLDivElement>,
-    marker: "cueIn" | "fadeStart" | "cueOut"
-  ) => {
-    e.preventDefault();
-    setDragging(marker);
-    const handleMove = (ev: MouseEvent) => {
-      const timeline = timelineRef.current;
-      const d = getEffectiveDuration();
-      if (!timeline || d <= 0) return;
-      const rect = timeline.getBoundingClientRect();
-      const x = clamp(ev.clientX - rect.left, 0, rect.width);
-      const percent = x / rect.width;
-      let time = applySnap(percent * d);
-      // Modify the appropriate value
-      if (marker === "cueIn") {
-        applyConstraints({ cueIn: time }, d);
-      } else if (marker === "fadeStart") {
-        // fadeStart marker adjusts segueDuration
-        const newFadeStart = clamp(time, cueIn, cueOut);
-        applyConstraints({ segueDuration: cueOut - newFadeStart }, d);
-      } else if (marker === "cueOut") {
-        applyConstraints({ cueOut: time }, d);
-      }
-    };
-    const handleUp = () => {
-      setDragging(null);
-      document.removeEventListener("mousemove", handleMove);
-      document.removeEventListener("mouseup", handleUp);
-    };
-    document.addEventListener("mousemove", handleMove);
-    document.addEventListener("mouseup", handleUp);
-  };
-
-  /**
-   * Animation loop to update currentTime during playback.  This uses
-   * requestAnimationFrame so the playhead smoothly animates even when
-   * timeupdate events are sparse.
-   */
-  useEffect(() => {
-    if (!isPlaying) {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-        animationFrameRef.current = null;
-      }
-      return;
-    }
-    const tick = () => {
-      const audio = audioRef.current;
-      if (audio) {
-        setCurrentTime(audio.currentTime || 0);
-      }
-      animationFrameRef.current = requestAnimationFrame(tick);
-    };
-    animationFrameRef.current = requestAnimationFrame(tick);
-    return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-        animationFrameRef.current = null;
-      }
-    };
-  }, [isPlaying]);
-
-  // Derived values for timeline marker positions (in percent)
-  const effectiveDuration = getEffectiveDuration();
-  const startPercent = effectiveDuration > 0 ? (cueIn / effectiveDuration) * 100 : 0;
-  const fadeStartPercent =
-    effectiveDuration > 0 ? ((cueOut - segueDuration) / effectiveDuration) * 100 : 0;
-  const endPercent = effectiveDuration > 0 ? (cueOut / effectiveDuration) * 100 : 0;
+  // ── render ────────────────────────────────────────────────────────────────
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[95vw] w-[1400px]">
-        {/* Hidden audio element; we bind events in effect */}
+      <DialogContent className="max-w-[95vw] w-[1300px] p-0 overflow-hidden border border-slate-700 bg-slate-950">
         <audio ref={audioRef} />
-        <div className="bg-gray-900 text-white max-h-[85vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="text-2xl">{trackTitle}</DialogTitle>
-            <DialogDescription>
-              Adjust cue points, fade, and preview the track.
+
+        {/* ── Header ── */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900">
+          <div>
+            <DialogTitle className="text-lg font-bold text-cyan-400 font-mono tracking-wide">
+              {trackTitle}
+            </DialogTitle>
+            <DialogDescription className="text-xs text-slate-400 mt-0.5">
+              Click waveform → drag right to paint fade region · drag ▶ ↘ ■ handles to adjust · timeline row for fine control
             </DialogDescription>
-          </DialogHeader>
-          {/* Playback Controls */}
-          <div className="space-y-4 mt-4">
-            <div className="flex items-center gap-4 bg-gray-800 p-4 rounded-lg">
-              <Button onClick={togglePlayPause} className="" size="lg">
-                {isPlaying ? <Pause className="h-6 w-6" /> : <Play className="h-6 w-6" />}
-              </Button>
-              <Button onClick={handleStop} className="" size="lg">
-                <Square className="h-6 w-6" />
-              </Button>
-              <div className="flex-1 text-center text-2xl font-mono">
-                {formatTime(currentTime)} / {formatTime(effectiveDuration)}
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-sm">Snap:</span>
-                <select
-                  value={snapMode}
-                  onChange={(e) => setSnapMode(e.target.value as any)}
-                  className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm"
-                >
-                  <option value="off">Off</option>
-                  <option value="0.10">0.10s</option>
-                  <option value="0.01">0.01s</option>
-                </select>
-              </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <label className="text-xs text-slate-400 font-mono">Snap</label>
+            <select
+              value={snapMode}
+              onChange={(e) => setSnapMode(e.target.value as typeof snapMode)}
+              className="bg-slate-800 border border-slate-600 text-slate-200 rounded px-2 py-1 text-xs font-mono"
+            >
+              <option value="off">Off</option>
+              <option value="0.10">0.10s</option>
+              <option value="0.01">0.01s</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="px-6 py-4 space-y-4 max-h-[82vh] overflow-y-auto">
+          {/* ── Transport ── */}
+          <div className="flex items-center gap-3 bg-slate-900 rounded-lg px-4 py-3 border border-slate-800">
+            <button
+              onClick={togglePlay}
+              className="flex items-center justify-center w-11 h-11 rounded-full bg-cyan-500 hover:bg-cyan-400 text-black transition-colors shrink-0"
+            >
+              {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-0.5" />}
+            </button>
+            <button
+              onClick={handleStop}
+              className="flex items-center justify-center w-9 h-9 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors shrink-0"
+            >
+              <Square className="w-4 h-4" />
+            </button>
+            <div className="flex-1 text-center font-mono text-2xl text-white tracking-widest select-none">
+              {fmt(currentTime)}
+              <span className="text-slate-500 text-base ml-3">/ {fmt(d)}</span>
             </div>
-            {/* Waveform */}
-            <div className="bg-gray-800 p-3 rounded-lg">
-              <h3 className="font-bold mb-2 text-base">Waveform</h3>
-              <canvas
-                ref={canvasRef}
-                width={1300}
-                height={120}
-                className="w-full h-[120px] bg-gray-900 rounded cursor-crosshair"
-                style={{ touchAction: "none" }}
-                onPointerDown={handleWaveformPointerDown}
-              />
+            {/* Mini legend */}
+            <div className="flex items-center gap-4 text-xs font-mono">
+              <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-emerald-500 inline-block" />start</span>
+              <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-amber-400 inline-block" />fade</span>
+              <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-red-500 inline-block" />end</span>
             </div>
-            {/* Timeline */}
-            <div className="bg-gray-800 p-3 rounded-lg">
-              <h3 className="font-bold mb-2 text-base">Timeline Markers</h3>
-              <div className="bg-gray-800 p-2 rounded">
-                <div className="flex justify-between text-sm mb-2">
-                  <span>0:00</span>
-                  <span>{formatTime(effectiveDuration)}</span>
-                </div>
-                <div
-                  ref={timelineRef}
-                  className="relative h-16 bg-gray-700 rounded cursor-pointer"
-                  onMouseDown={handleTimelineMouseDown}
-                >
-                  {/* Cue In Marker */}
-                  <div
-                    className="absolute top-0 bottom-0 w-2 bg-green-500 cursor-ew-resize hover:w-3 transition-all z-10"
-                    style={{ left: `${startPercent}%` }}
-                    onMouseDown={(e) => handleMarkerDrag(e, "cueIn")}
-                  >
-                    <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-xs whitespace-nowrap bg-green-500 px-2 py-1 rounded">
-                      START: {formatTime(cueIn)}
-                    </div>
-                  </div>
-                  {/* Fade Start Marker */}
-                  <div
-                    className="absolute top-0 bottom-0 w-2 bg-yellow-500 cursor-ew-resize hover:w-3 transition-all z-10"
-                    style={{ left: `${fadeStartPercent}%` }}
-                    onMouseDown={(e) => handleMarkerDrag(e, "fadeStart")}
-                  >
-                    <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-xs whitespace-nowrap bg-yellow-500 px-2 py-1 rounded text-black">
-                      FADE: {formatTime(cueOut - segueDuration)}
-                    </div>
-                  </div>
-                  {/* Cue Out Marker */}
-                  <div
-                    className="absolute top-0 bottom-0 w-2 bg-red-500 cursor-ew-resize hover:w-3 transition-all z-10"
-                    style={{ left: `${endPercent}%` }}
-                    onMouseDown={(e) => handleMarkerDrag(e, "cueOut")}
-                  >
-                    <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-xs whitespace-nowrap bg-red-500 px-2 py-1 rounded">
-                      END: {formatTime(cueOut)}
-                    </div>
-                  </div>
-                  {/* Active region shading */}
-                  <div
-                    className="absolute top-0 bottom-0 bg-blue-500 opacity-30"
-                    style={{ left: `${startPercent}%`, width: `${endPercent - startPercent}%` }}
-                  />
-                </div>
-              </div>
+          </div>
+
+          {/* ── Waveform canvas ── */}
+          <div className="rounded-lg overflow-hidden border border-slate-700">
+            <canvas
+              ref={canvasRef}
+              width={1200}
+              height={180}
+              className="w-full block"
+              style={{ cursor: "crosshair", touchAction: "none", userSelect: "none" }}
+              onPointerDown={handleCanvasPointerDown}
+              onPointerMove={handleCanvasPointerMove}
+              onPointerUp={handleCanvasPointerUp}
+              onPointerCancel={handleCanvasPointerUp}
+            />
+          </div>
+
+          {/* ── Timeline handles row ── */}
+          <div
+            ref={timelineRef}
+            className="relative h-12 bg-slate-800 rounded-lg border border-slate-700 cursor-pointer select-none"
+            onMouseDown={handleTlMouseDown}
+          >
+            {/* Active region */}
+            <div
+              className="absolute top-0 bottom-0 bg-cyan-500/15 pointer-events-none"
+              style={{ left: pct(cueIn), width: `calc(${pct(cueOut)} - ${pct(cueIn)})` }}
+            />
+            {/* Fade region */}
+            <div
+              className="absolute top-0 bottom-0 bg-amber-400/20 pointer-events-none"
+              style={{ left: pct(fadeStart), width: `calc(${pct(cueOut)} - ${pct(fadeStart)})` }}
+            />
+            {/* Labels */}
+            <div className="absolute inset-0 flex items-center justify-between px-2 pointer-events-none">
+              <span className="text-xs text-slate-500 font-mono">0:00</span>
+              <span className="text-xs text-slate-500 font-mono">{fmt(d)}</span>
             </div>
-            {/* Numeric inputs */}
-            <div className="grid grid-cols-3 gap-6 bg-gray-800 p-6 rounded-lg">
-              <div>
-                <label className="block text-sm font-bold mb-2 text-green-400">
-                  Cue In (Start)
-                </label>
-                <input
-                  type="number"
-                  value={cueIn.toFixed(2)}
-                  onChange={(e) => applyConstraints({ cueIn: parseFloat(e.target.value) || 0 })}
-                  className="w-full bg-gray-900 border-2 border-green-500 rounded px-3 py-2 text-base font-mono"
-                  step="0.1"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-bold mb-2 text-yellow-400">
-                  Segue Duration (Fade Length)
-                </label>
-                <input
-                  type="number"
-                  value={segueDuration.toFixed(2)}
-                  onChange={(e) => applyConstraints({ segueDuration: parseFloat(e.target.value) || 0 })}
-                  className="w-full bg-gray-900 border-2 border-yellow-500 rounded px-3 py-2 text-base font-mono"
-                  step="0.1"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-bold mb-2 text-red-400">
-                  Cue Out (End)
-                </label>
-                <input
-                  type="number"
-                  value={cueOut.toFixed(2)}
-                  onChange={(e) => applyConstraints({ cueOut: parseFloat(e.target.value) || 0 })}
-                  className="w-full bg-gray-900 border-2 border-red-500 rounded px-3 py-2 text-base font-mono"
-                  step="0.1"
-                />
-              </div>
-            </div>
-            {/* Action buttons */}
-            <div className="flex justify-end gap-4">
-              <Button variant="outline" onClick={() => onOpenChange(false)}>
-                Cancel
-              </Button>
-              <Button onClick={handleSave}>Save Cue Points</Button>
-            </div>
+            {/* Marker pins */}
+            <TlPin pos={pct(cueIn)} color="bg-emerald-500" time={fmt(cueIn)} label="START" />
+            <TlPin pos={pct(fadeStart)} color="bg-amber-400" time={fmt(fadeStart)} label="FADE" dark />
+            <TlPin pos={pct(cueOut)} color="bg-red-500" time={fmt(cueOut)} label="END" />
+          </div>
+
+          {/* ── Numeric inputs ── */}
+          <div className="grid grid-cols-3 gap-4">
+            <NumField label="Cue In (Start)" accent="text-emerald-400" border="border-emerald-500"
+              value={cueIn} onChange={(v) => applyAll({ cueIn: v })} />
+            <NumField label="Segue Duration" accent="text-amber-400" border="border-amber-500"
+              value={segueDuration} onChange={(v) => applyAll({ segueDuration: v })} />
+            <NumField label="Cue Out (End)" accent="text-red-400" border="border-red-500"
+              value={cueOut} onChange={(v) => applyAll({ cueOut: v })} />
+          </div>
+
+          {/* ── Actions ── */}
+          <div className="flex justify-end gap-3 pt-1 pb-1">
+            <Button variant="outline" onClick={() => onOpenChange(false)}
+              className="border-slate-600 text-slate-300 hover:text-white hover:border-slate-400">
+              Cancel
+            </Button>
+            <Button onClick={handleSave}
+              className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-6">
+              Save Cue Points
+            </Button>
           </div>
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// ── sub-components ────────────────────────────────────────────────────────────
+
+function TlPin({ pos, color, time, label, dark = false }: {
+  pos: string; color: string; time: string; label: string; dark?: boolean;
+}) {
+  return (
+    <div className="absolute top-0 bottom-0" style={{ left: pos, transform: "translateX(-50%)" }}>
+      <div className={`w-0.5 h-full ${color} opacity-80`} />
+      <div
+        className={`absolute -top-7 left-1/2 -translate-x-1/2 whitespace-nowrap text-[10px] font-mono font-bold px-1.5 py-0.5 rounded shadow-md ${color} ${dark ? "text-black" : "text-white"}`}
+      >
+        {label} {time}
+      </div>
+    </div>
+  );
+}
+
+function NumField({ label, accent, border, value, onChange }: {
+  label: string; accent: string; border: string; value: number; onChange: (v: number) => void;
+}) {
+  return (
+    <div className="bg-slate-900 rounded-lg p-3 border border-slate-800">
+      <label className={`block text-xs font-bold mb-2 font-mono ${accent}`}>{label}</label>
+      <input
+        type="number"
+        value={value.toFixed(2)}
+        step="0.1"
+        min="0"
+        onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+        className={`w-full bg-slate-950 border-2 ${border} rounded px-3 py-2 text-sm font-mono text-white focus:outline-none focus:ring-1 focus:ring-cyan-500/50`}
+      />
+    </div>
   );
 }
