@@ -122,6 +122,19 @@ export const tracksApi = {
     const response = await api.patch<Track>(`/tracks/${id}/cuepoints`, cuePoints);
     return response.data;
   },
+
+  batchUpdateCuePoints: async (payload: {
+    trackIds?: string[];
+    cueIn?: number;
+    cueOut?: number;
+    segueDuration?: number;
+  }) => {
+    const response = await api.patch<{ updated: number; total: number }>(
+      '/tracks/batch/cuepoints',
+      payload
+    );
+    return response.data;
+  },
 };
 
 export const categoriesApi = {
