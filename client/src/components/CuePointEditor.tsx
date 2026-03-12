@@ -1,35 +1,19 @@
 "use client";
 
-/**
- * CuePointEditor — precision waveform cue-point editor.
- *
- * Fixes in this version:
- *  - Canvas redraws on every animation frame when playing (RAF loop drives draw)
- *  - Canvas redraws immediately on any cue point or waveform state change
- *  - Play button always works: audio element is lazily created and src is set
- *    on open, not conditionally on filepath
- *  - Waveform decoding uses the stream endpoint with proper error handling
- *  - Numeric inputs use local string state to avoid cursor-jump on edit
- *  - "Jump to" buttons for Start/Fade/End let you audition each point
- *  - Segue visualised as amber gradient on waveform (not just a line)
- */
-
 import React, {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useRef,
   useState,
 } from "react";
 import {
   Dialog,
   DialogContent,
-  DialogHeader,
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Play, Pause, Square, SkipBack, SkipForward } from "lucide-react";
+import { Play, Pause, Square } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 // ─── types ───────────────────────────────────────────────────────────────────
@@ -53,11 +37,8 @@ export interface CuePointEditorProps {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-const clamp = (v: number, lo: number, hi: number) =>
-  Math.max(lo, Math.min(hi, v));
-
-const finite = (v: number, fallback = 0) =>
-  Number.isFinite(v) && !Number.isNaN(v) ? v : fallback;
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+const finite = (v: number, fb = 0) => (Number.isFinite(v) && !Number.isNaN(v) ? v : fb);
 
 const fmt = (s: number): string => {
   const n = finite(s);
@@ -76,94 +57,85 @@ export default function CuePointEditor({
   trackTitle,
   audioUrl,
   initialCuePoints,
-  trackType = "other",
   onSuccess,
 }: CuePointEditorProps) {
   const { toast } = useToast();
 
-  // ── audio element (stable ref, never re-created) ──────────────────────────
+  // ── Single audio element — created once, never recreated ─────────────────
+  // FIX: Do NOT render <audio> in JSX. Create it here and manage it entirely
+  // in JS. A JSX <audio ref={x}/> and new Audio() stored in the same ref
+  // are two different elements and they conflict.
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  if (!audioRef.current) {
+  useEffect(() => {
     audioRef.current = new Audio();
-  }
+    return () => {
+      audioRef.current?.pause();
+      audioRef.current = null;
+    };
+  }, []);
 
-  // ── canvas + timeline refs ────────────────────────────────────────────────
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
 
-  // ── refs that shadow state (avoid stale closures in RAF / pointer handlers)
-  const durationRef = useRef<number>(0);
+  // ── Refs that shadow state (no stale closures in pointer/RAF handlers) ────
+  const durationRef = useRef(0);
   const cueInRef = useRef(initialCuePoints.cueIn || 0);
   const cueOutRef = useRef(initialCuePoints.cueOut || 0);
-  const segueDurationRef = useRef(initialCuePoints.segueDuration || 0);
+  const segueDurRef = useRef(initialCuePoints.segueDuration || 0);
   const currentTimeRef = useRef(0);
   const waveformRef = useRef<Float32Array | null>(null);
-  const snapModeRef = useRef<"off" | "0.10" | "0.01">("off");
+  const snapRef = useRef<"off" | "0.10" | "0.01">("off");
+  const canvasWidthRef = useRef(800); // tracks actual rendered pixel width
 
-  // ── state ─────────────────────────────────────────────────────────────────
+  // ── State (drives re-renders / display) ──────────────────────────────────
   const [duration, setDuration] = useState(0);
   const [cueIn, setCueIn] = useState(initialCuePoints.cueIn || 0);
   const [cueOut, setCueOut] = useState(initialCuePoints.cueOut || 0);
   const [segueDuration, setSegueDuration] = useState(initialCuePoints.segueDuration || 0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
-  const [waveformData, setWaveformData] = useState<Float32Array | null>(null);
   const [snapMode, setSnapMode] = useState<"off" | "0.10" | "0.01">("off");
-  const [waveformLoading, setWaveformLoading] = useState(false);
+  const [waveformStatus, setWaveformStatus] = useState<"loading" | "real" | "placeholder">("loading");
 
-  // Keep refs in sync with state
+  // Sync refs → state
   useEffect(() => { cueInRef.current = cueIn; }, [cueIn]);
   useEffect(() => { cueOutRef.current = cueOut; }, [cueOut]);
-  useEffect(() => { segueDurationRef.current = segueDuration; }, [segueDuration]);
+  useEffect(() => { segueDurRef.current = segueDuration; }, [segueDuration]);
   useEffect(() => { currentTimeRef.current = currentTime; }, [currentTime]);
-  useEffect(() => { waveformRef.current = waveformData; }, [waveformData]);
-  useEffect(() => { snapModeRef.current = snapMode; }, [snapMode]);
+  useEffect(() => { snapRef.current = snapMode; }, [snapMode]);
 
-  // ── pointer interaction (ref — no re-render lag) ──────────────────────────
-  type DragMode =
-    | { kind: "none" }
-    | { kind: "paint"; anchor: number }
-    | { kind: "handle"; which: "start" | "fade" | "end" };
-  const interactionRef = useRef<DragMode>({ kind: "none" });
+  // ── Interaction state in refs (no re-render lag during drag) ─────────────
+  type Drag = { kind: "none" } | { kind: "paint"; anchor: number } | { kind: "handle"; which: "start" | "fade" | "end" };
+  const dragRef = useRef<Drag>({ kind: "none" });
   const tlDragRef = useRef<"start" | "fade" | "end" | null>(null);
-
-  // ── RAF ───────────────────────────────────────────────────────────────────
   const rafRef = useRef<number | null>(null);
 
-  // ── derived ───────────────────────────────────────────────────────────────
-  const dur = durationRef.current > 0 ? durationRef.current : (duration || cueOut || 1);
-  const fadeStart = Math.max(cueIn, cueOut - segueDuration);
-
-  // ── snap helper ───────────────────────────────────────────────────────────
-  const snap = useCallback((v: number) => {
-    const mode = snapModeRef.current;
-    if (mode === "off") return v;
-    const step = mode === "0.10" ? 0.1 : 0.01;
+  // ── Snap ──────────────────────────────────────────────────────────────────
+  const snap = (v: number) => {
+    const m = snapRef.current;
+    if (m === "off") return v;
+    const step = m === "0.10" ? 0.1 : 0.01;
     return Math.round(v / step) * step;
-  }, []);
+  };
 
-  // ── constrained setters ───────────────────────────────────────────────────
-
+  // ── Constrained setters ───────────────────────────────────────────────────
   const setStart = useCallback((v: number) => {
     const d = durationRef.current || 1;
     const n = clamp(snap(finite(v)), 0, d);
     cueInRef.current = n;
     setCueIn(n);
-    if (cueOutRef.current < n + segueDurationRef.current) {
-      const newOut = clamp(n + segueDurationRef.current, n, d);
-      cueOutRef.current = newOut;
-      setCueOut(newOut);
-    }
-  }, [snap]);
+    if (cueOutRef.current < n) { cueOutRef.current = n; setCueOut(n); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const setFadeStartSec = useCallback((fs: number) => {
+  const setFadeStart = useCallback((fs: number) => {
     const co = cueOutRef.current;
     const ci = cueInRef.current;
     const n = clamp(snap(finite(fs)), ci, co);
     const sg = clamp(co - n, 0, co - ci);
-    segueDurationRef.current = sg;
+    segueDurRef.current = sg;
     setSegueDuration(sg);
-  }, [snap]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setEnd = useCallback((v: number) => {
     const d = durationRef.current || 1;
@@ -171,76 +143,65 @@ export default function CuePointEditor({
     const n = clamp(snap(finite(v)), ci, d);
     cueOutRef.current = n;
     setCueOut(n);
-    const sg = clamp(segueDurationRef.current, 0, n - ci);
-    segueDurationRef.current = sg;
+    const sg = clamp(segueDurRef.current, 0, n - ci);
+    segueDurRef.current = sg;
     setSegueDuration(sg);
-  }, [snap]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const applyAll = useCallback((next: Partial<CuePoints>) => {
     const d = durationRef.current || 1;
     let ni = finite(next.cueIn !== undefined ? next.cueIn : cueInRef.current);
     let no = finite(next.cueOut !== undefined ? next.cueOut : cueOutRef.current);
-    let ns = finite(next.segueDuration !== undefined ? next.segueDuration : segueDurationRef.current);
+    let ns = finite(next.segueDuration !== undefined ? next.segueDuration : segueDurRef.current);
     ni = clamp(snap(ni), 0, d);
     no = clamp(snap(no), 0, d);
     if (ni > no) [ni, no] = [no, ni];
     ns = clamp(snap(ns), 0, no - ni);
-    cueInRef.current = ni;
-    cueOutRef.current = no;
-    segueDurationRef.current = ns;
-    setCueIn(ni);
-    setCueOut(no);
-    setSegueDuration(ns);
-  }, [snap]);
+    cueInRef.current = ni; cueOutRef.current = no; segueDurRef.current = ns;
+    setCueIn(ni); setCueOut(no); setSegueDuration(ns);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── canvas draw (pure function reading refs — safe in RAF) ────────────────
-
-  const drawCanvas = useCallback(() => {
+  // ── Canvas draw — reads only refs, safe to call from RAF ─────────────────
+  const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+
+    // FIX: Use actual canvas pixel dimensions, not hardcoded 1200
     const W = canvas.width;
     const H = canvas.height;
 
-    const d = durationRef.current > 0 ? durationRef.current : (duration || cueOutRef.current || 1);
+    const d = durationRef.current > 0 ? durationRef.current : (cueOutRef.current || 1);
     const ci = cueInRef.current;
     const co = cueOutRef.current;
-    const sg = segueDurationRef.current;
+    const sg = segueDurRef.current;
     const fs = Math.max(ci, co - sg);
     const ct = currentTimeRef.current;
     const data = waveformRef.current;
+
+    const toX = (s: number) => clamp((s / d) * W, 0, W);
+    const ciX = toX(ci), fsX = toX(fs), coX = toX(co), ctX = toX(ct);
 
     ctx.clearRect(0, 0, W, H);
     ctx.fillStyle = "#0d1117";
     ctx.fillRect(0, 0, W, H);
 
-    const toX = (sec: number) => d > 0 ? clamp((sec / d) * W, 0, W) : 0;
-    const ciX = toX(ci);
-    const fsX = toX(fs);
-    const coX = toX(co);
-    const ctX = toX(ct);
-
     // Region tints
-    if (ciX > 0) { ctx.fillStyle = "rgba(15,23,42,0.75)"; ctx.fillRect(0, 0, ciX, H); }
+    if (ciX > 0) { ctx.fillStyle = "rgba(15,23,42,0.8)"; ctx.fillRect(0, 0, ciX, H); }
     if (coX > ciX) { ctx.fillStyle = "rgba(6,182,212,0.07)"; ctx.fillRect(ciX, 0, coX - ciX, H); }
     if (coX > fsX) { ctx.fillStyle = "rgba(251,191,36,0.15)"; ctx.fillRect(fsX, 0, coX - fsX, H); }
-    if (coX < W) { ctx.fillStyle = "rgba(15,23,42,0.75)"; ctx.fillRect(coX, 0, W - coX, H); }
+    if (coX < W) { ctx.fillStyle = "rgba(15,23,42,0.8)"; ctx.fillRect(coX, 0, W - coX, H); }
 
     // Waveform bars
     if (data) {
       const bw = W / data.length;
       for (let i = 0; i < data.length; i++) {
         const x = i * bw;
-        const bh = Math.max(2, data[i] * (H - 44) * 0.88);
+        const bh = Math.max(2, data[i] * (H - 40) * 0.88);
         const y = (H - bh) / 2;
         const pos = (i / data.length) * d;
-        let color: string;
-        if (pos < ci) color = "#1e293b";
-        else if (pos < fs) color = "#22d3ee";
-        else if (pos < co) color = "#fbbf24";
-        else color = "#1e293b";
-        ctx.fillStyle = color;
+        ctx.fillStyle = pos < ci ? "#1e293b" : pos < fs ? "#22d3ee" : pos < co ? "#fbbf24" : "#1e293b";
         ctx.fillRect(x, y, Math.max(bw - 0.5, 1), bh);
       }
     }
@@ -248,120 +209,77 @@ export default function CuePointEditor({
     // Marker lines
     const vline = (x: number, color: string, dash: number[] = []) => {
       ctx.save();
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
-      ctx.shadowColor = color;
-      ctx.shadowBlur = 6;
+      ctx.strokeStyle = color; ctx.lineWidth = 2;
+      ctx.shadowColor = color; ctx.shadowBlur = 6;
       ctx.setLineDash(dash);
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, H);
-      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
       ctx.restore();
     };
+    vline(ciX, "#22c55e");
+    vline(fsX, "#fbbf24", [6, 4]);
+    vline(coX, "#ef4444");
 
-    if (d > 0) {
-      vline(ciX, "#22c55e");
-      vline(fsX, "#fbbf24", [6, 4]);
-      vline(coX, "#ef4444");
-    }
-
-    // Handle triangles (at bottom of canvas)
+    // Handle triangles at bottom
     const tri = (x: number, color: string, label: string) => {
-      const hy = H - 14;
+      const hy = H - 16;
       ctx.save();
-      ctx.fillStyle = color;
-      ctx.strokeStyle = "rgba(0,0,0,0.6)";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(x, hy + 10);
-      ctx.lineTo(x - 7, hy - 6);
-      ctx.lineTo(x + 7, hy - 6);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.fillStyle = color;
-      ctx.font = "bold 9px monospace";
-      ctx.textAlign = "center";
+      ctx.fillStyle = color; ctx.strokeStyle = "rgba(0,0,0,0.5)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x, hy + 12); ctx.lineTo(x - 8, hy - 4); ctx.lineTo(x + 8, hy - 4); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = color; ctx.font = "bold 9px monospace"; ctx.textAlign = "center";
       ctx.fillText(label, x, H - 1);
       ctx.restore();
     };
-
-    if (d > 0) {
-      tri(ciX, "#22c55e", `▶ ${fmt(ci)}`);
-      tri(fsX, "#fbbf24", `↘ ${fmt(fs)}`);
-      tri(coX, "#ef4444", `■ ${fmt(co)}`);
-    }
+    tri(ciX, "#22c55e", `▶ ${fmt(ci)}`);
+    tri(fsX, "#fbbf24", `↘ ${fmt(fs)}`);
+    tri(coX, "#ef4444", `■ ${fmt(co)}`);
 
     // Playhead
     ctx.save();
-    ctx.strokeStyle = "rgba(244,63,94,0.9)";
-    ctx.lineWidth = 1.5;
-    ctx.shadowColor = "#f43f5e";
-    ctx.shadowBlur = 10;
-    ctx.beginPath();
-    ctx.moveTo(ctX, 0);
-    ctx.lineTo(ctX, H - 20);
-    ctx.stroke();
-    // Playhead triangle at top
+    ctx.strokeStyle = "rgba(244,63,94,0.9)"; ctx.lineWidth = 1.5;
+    ctx.shadowColor = "#f43f5e"; ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.moveTo(ctX, 0); ctx.lineTo(ctX, H - 20); ctx.stroke();
     ctx.fillStyle = "#f43f5e";
-    ctx.beginPath();
-    ctx.moveTo(ctX, 0);
-    ctx.lineTo(ctX - 5, 10);
-    ctx.lineTo(ctX + 5, 10);
-    ctx.closePath();
-    ctx.fill();
+    ctx.beginPath(); ctx.moveTo(ctX, 0); ctx.lineTo(ctX - 5, 10); ctx.lineTo(ctX + 5, 10); ctx.closePath(); ctx.fill();
     ctx.restore();
-  }, [duration]); // only needs duration from state; everything else via refs
+  }, []);
 
-  // ── RAF loop (only runs while playing) ────────────────────────────────────
-
+  // ── Resize canvas to match actual rendered width ──────────────────────────
   useEffect(() => {
-    if (!isPlaying) {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      return;
-    }
-    const tick = () => {
-      const audio = audioRef.current;
-      if (audio) {
-        currentTimeRef.current = audio.currentTime;
-        setCurrentTime(audio.currentTime);
-      }
-      drawCanvas();
-      rafRef.current = requestAnimationFrame(tick);
-    };
-    rafRef.current = requestAnimationFrame(tick);
-    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
-  }, [isPlaying, drawCanvas]);
-
-  // ── Redraw on any cue point / waveform change (when not playing) ──────────
-
-  useLayoutEffect(() => {
     if (!open) return;
-    drawCanvas();
-  }, [open, drawCanvas, cueIn, cueOut, segueDuration, waveformData, currentTime]);
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const observer = new ResizeObserver(() => {
+      const rect = canvas.getBoundingClientRect();
+      const w = Math.round(rect.width);
+      if (w > 0 && canvas.width !== w) {
+        canvas.width = w;
+        canvas.height = 180;
+        canvasWidthRef.current = w;
+        draw();
+      }
+    });
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [open, draw]);
 
   // ── Waveform generation ───────────────────────────────────────────────────
-
-  const generatePlaceholder = useCallback(() => {
-    const N = 600;
+  const generatePlaceholder = () => {
+    const N = 400;
     const d = new Float32Array(N);
     for (let i = 0; i < N; i++) {
       const p = i / N;
-      const base = 0.25 + Math.sin(p * Math.PI * 10) * 0.18;
-      const noise = (Math.random() - 0.5) * 0.3;
-      const env = Math.min(p * 8, 1) * Math.min((1 - p) * 8, 1);
-      d[i] = Math.max(0, (base + noise) * env);
+      d[i] = Math.max(0, (0.25 + Math.sin(p * Math.PI * 8) * 0.15 + (Math.random() - 0.5) * 0.25) * Math.min(p * 6, 1) * Math.min((1 - p) * 6, 1));
     }
     waveformRef.current = d;
-    setWaveformData(d);
-  }, []);
+    setWaveformStatus("placeholder");
+    draw();
+  };
 
-  const generateReal = useCallback(async (src: string) => {
-    setWaveformLoading(true);
+  const generateReal = async (src: string) => {
     try {
       const ctrl = new AbortController();
-      const tid = setTimeout(() => ctrl.abort(), 12000);
+      const tid = setTimeout(() => ctrl.abort(), 15000);
       const resp = await fetch(src, { signal: ctrl.signal });
       clearTimeout(tid);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -371,7 +289,7 @@ export default function CuePointEditor({
       const ab = await actx.decodeAudioData(buf);
       await actx.close();
       const raw = ab.getChannelData(0);
-      const N = 600;
+      const N = 400;
       const block = Math.floor(raw.length / N);
       const out = new Float32Array(N);
       let mx = 0;
@@ -383,29 +301,25 @@ export default function CuePointEditor({
       }
       if (mx > 0) for (let i = 0; i < N; i++) out[i] /= mx;
       waveformRef.current = out;
-      setWaveformData(out);
+      setWaveformStatus("real");
+      draw();
     } catch (e) {
-      // Keep placeholder — don't show error to user, waveform is cosmetic
-      console.warn("Waveform decode failed:", e);
-    } finally {
-      setWaveformLoading(false);
+      console.warn("Waveform decode:", e);
+      // Keep placeholder — not a fatal error
     }
-  }, []);
+  };
 
   // ── Duration detection ────────────────────────────────────────────────────
-
   useEffect(() => {
     if (!open) return;
-    const audio = audioRef.current!;
+    const audio = audioRef.current;
+    if (!audio) return;
     let cancelled = false;
 
     const tryUpdate = () => {
       if (cancelled) return;
       const d = audio.duration;
-      if (Number.isFinite(d) && d > 0) {
-        durationRef.current = d;
-        setDuration(d);
-      }
+      if (Number.isFinite(d) && d > 0) { durationRef.current = d; setDuration(d); }
     };
 
     const onEnded = () => {
@@ -425,14 +339,14 @@ export default function CuePointEditor({
     audio.addEventListener("timeupdate", onTimeUpdate);
     audio.addEventListener("ended", onEnded);
 
-    // Always set src (even if no filepath — audioUrl may still work)
-    if (audioUrl) {
-      audio.src = audioUrl;
-      audio.preload = "metadata";
-      audio.load();
-    }
-
+    // FIX: Always use stream endpoint by trackId — don't gate on filepath.
+    // LibraryPage passes audioUrl="" when filepath is null, so we build it here.
+    const src = audioUrl || `/api/tracks/${trackId}/stream`;
+    audio.src = src;
+    audio.preload = "metadata";
+    audio.load();
     tryUpdate();
+
     let attempts = 0;
     const poll = setInterval(() => {
       tryUpdate();
@@ -448,101 +362,106 @@ export default function CuePointEditor({
       audio.removeEventListener("timeupdate", onTimeUpdate);
       audio.removeEventListener("ended", onEnded);
     };
-  }, [open, audioUrl]);
+  }, [open, audioUrl, trackId]);
 
-  // ── Reset on open ─────────────────────────────────────────────────────────
-
+  // ── Reset on open/close ───────────────────────────────────────────────────
   useEffect(() => {
     if (!open) {
-      // Stop playback when dialog closes
-      const audio = audioRef.current!;
-      audio.pause();
+      audioRef.current?.pause();
       setIsPlaying(false);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
       return;
     }
     const ci = initialCuePoints.cueIn || 0;
     const co = initialCuePoints.cueOut || 0;
     const sg = initialCuePoints.segueDuration || 0;
-    cueInRef.current = ci;
-    cueOutRef.current = co;
-    segueDurationRef.current = sg;
-    setCueIn(ci);
-    setCueOut(co);
-    setSegueDuration(sg);
-    setCurrentTime(ci);
-    currentTimeRef.current = ci;
+    cueInRef.current = ci; cueOutRef.current = co; segueDurRef.current = sg;
+    setCueIn(ci); setCueOut(co); setSegueDuration(sg);
+    currentTimeRef.current = ci; setCurrentTime(ci);
     setIsPlaying(false);
-    durationRef.current = 0;
-    setDuration(0);
+    durationRef.current = 0; setDuration(0);
     generatePlaceholder();
-    if (audioUrl) {
-      setTimeout(() => generateReal(audioUrl), 200);
-    }
+    const src = audioUrl || `/api/tracks/${trackId}/stream`;
+    setTimeout(() => generateReal(src), 300);
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Playback ──────────────────────────────────────────────────────────────
+  // ── RAF — drives canvas + currentTime while playing ───────────────────────
+  useEffect(() => {
+    if (!isPlaying) { if (rafRef.current) cancelAnimationFrame(rafRef.current); return; }
+    const tick = () => {
+      const audio = audioRef.current;
+      if (audio) { currentTimeRef.current = audio.currentTime; setCurrentTime(audio.currentTime); }
+      draw();
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+  }, [isPlaying, draw]);
 
+  // ── Redraw on cue point / waveform state changes ──────────────────────────
+  useEffect(() => {
+    if (open) draw();
+  }, [open, draw, cueIn, cueOut, segueDuration, waveformStatus, currentTime]);
+
+  // ── Playback ──────────────────────────────────────────────────────────────
   const togglePlay = async () => {
-    const audio = audioRef.current!;
+    const audio = audioRef.current;
+    if (!audio) return;
     if (isPlaying) {
       audio.pause();
       setIsPlaying(false);
-    } else {
-      if (!audio.src && audioUrl) {
-        audio.src = audioUrl;
-        audio.load();
-        await new Promise<void>((res) => {
-          audio.addEventListener("canplay", () => res(), { once: true });
-          setTimeout(res, 2000); // timeout fallback
-        });
-      }
-      try {
-        await audio.play();
-        setIsPlaying(true);
-      } catch (err: any) {
-        toast({
-          title: "Playback failed",
-          description: err?.message || "Could not play audio.",
-          variant: "destructive",
-        });
-      }
+      return;
+    }
+    // Ensure src is set
+    const src = audioUrl || `/api/tracks/${trackId}/stream`;
+    if (!audio.src || audio.src === window.location.href) {
+      audio.src = src;
+      audio.load();
+    }
+    try {
+      await audio.play();
+      setIsPlaying(true);
+    } catch (err: any) {
+      toast({ title: "Playback failed", description: err?.message || "Could not play audio.", variant: "destructive" });
     }
   };
 
   const handleStop = () => {
-    const audio = audioRef.current!;
+    const audio = audioRef.current;
+    if (!audio) return;
     audio.pause();
     audio.currentTime = cueInRef.current;
     currentTimeRef.current = cueInRef.current;
     setIsPlaying(false);
     setCurrentTime(cueInRef.current);
+    draw();
   };
 
   const jumpTo = (sec: number) => {
-    const audio = audioRef.current!;
-    audio.currentTime = sec;
+    const audio = audioRef.current;
+    if (audio) audio.currentTime = sec;
     currentTimeRef.current = sec;
     setCurrentTime(sec);
-    drawCanvas();
+    draw();
   };
 
   // ── Canvas pointer handling ───────────────────────────────────────────────
+  const THRESH = 16;
 
-  const THRESH = 14;
-
+  // FIX: Use canvas.getBoundingClientRect() width for coordinate math,
+  // NOT canvas.width (which is the pixel buffer size)
   const secAt = (clientX: number, rect: DOMRect): number => {
-    const d = durationRef.current || dur;
+    const d = durationRef.current || cueOutRef.current || 1;
     return clamp(((clientX - rect.left) / rect.width) * d, 0, d);
   };
 
   const hitHandle = (clientX: number, rect: DOMRect): "start" | "fade" | "end" | null => {
-    const d = durationRef.current || dur;
+    const d = durationRef.current || cueOutRef.current || 1;
     if (d <= 0) return null;
-    const W = rect.width;
+    const W = rect.width; // rendered width, not buffer width
     const x = clientX - rect.left;
-    const ci = cueInRef.current;
-    const co = cueOutRef.current;
-    const fs = Math.max(ci, co - segueDurationRef.current);
+    const ci = cueInRef.current, co = cueOutRef.current, sg = segueDurRef.current;
+    const fs = Math.max(ci, co - sg);
     const toX = (s: number) => (s / d) * W;
     const hits: [number, "start" | "fade" | "end"][] = [
       [Math.abs(x - toX(ci)), "start"],
@@ -561,74 +480,62 @@ export default function CuePointEditor({
     const rect = canvas.getBoundingClientRect();
     const h = hitHandle(e.clientX, rect);
     if (h) {
-      interactionRef.current = { kind: "handle", which: h };
+      dragRef.current = { kind: "handle", which: h };
     } else {
       const t = secAt(e.clientX, rect);
-      interactionRef.current = { kind: "paint", anchor: t };
+      dragRef.current = { kind: "paint", anchor: t };
       const ci = cueInRef.current;
-      const co = clamp(t, ci, durationRef.current || dur);
-      cueOutRef.current = co;
-      setCueOut(co);
-      segueDurationRef.current = 0;
-      setSegueDuration(0);
+      const co = clamp(t, ci, durationRef.current || 1);
+      cueOutRef.current = co; setCueOut(co);
+      segueDurRef.current = 0; setSegueDuration(0);
     }
-    drawCanvas();
+    draw();
   };
 
   const handleCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const mode = interactionRef.current;
+    const mode = dragRef.current;
     if (mode.kind === "none") return;
     const rect = canvas.getBoundingClientRect();
     const t = secAt(e.clientX, rect);
-
     if (mode.kind === "handle") {
-      switch (mode.which) {
-        case "start": setStart(t); break;
-        case "fade": setFadeStartSec(t); break;
-        case "end": setEnd(t); break;
-      }
+      if (mode.which === "start") setStart(t);
+      else if (mode.which === "fade") setFadeStart(t);
+      else setEnd(t);
     } else if (mode.kind === "paint") {
       const anchor = mode.anchor;
-      const d = durationRef.current || dur;
+      const d = durationRef.current || 1;
       const ci = cueInRef.current;
       if (t >= anchor) {
         const co = clamp(t, anchor, d);
-        cueOutRef.current = co;
-        setCueOut(co);
+        cueOutRef.current = co; setCueOut(co);
         const sg = clamp(co - anchor, 0, co - ci);
-        segueDurationRef.current = sg;
-        setSegueDuration(sg);
+        segueDurRef.current = sg; setSegueDuration(sg);
       } else {
-        cueOutRef.current = clamp(anchor, ci, d);
-        setCueOut(clamp(anchor, ci, d));
-        setFadeStartSec(t);
+        cueOutRef.current = clamp(anchor, ci, d); setCueOut(clamp(anchor, ci, d));
+        setFadeStart(t);
       }
     }
-    drawCanvas();
+    draw();
   };
 
   const handleCanvasPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    interactionRef.current = { kind: "none" };
-    const canvas = canvasRef.current;
-    if (canvas) canvas.releasePointerCapture(e.pointerId);
-    drawCanvas();
+    dragRef.current = { kind: "none" };
+    canvasRef.current?.releasePointerCapture(e.pointerId);
+    draw();
   };
 
   // ── Timeline drag ─────────────────────────────────────────────────────────
-
   const handleTlMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     const tl = timelineRef.current;
     if (!tl) return;
     const rect = tl.getBoundingClientRect();
-    const d = durationRef.current || dur;
-    if (d <= 0) return;
+    const d = durationRef.current || cueOutRef.current || 1;
     const W = rect.width;
     const x = e.clientX - rect.left;
-    const ci = cueInRef.current;
-    const co = cueOutRef.current;
-    const fs = Math.max(ci, co - segueDurationRef.current);
+    const ci = cueInRef.current, co = cueOutRef.current, sg = segueDurRef.current;
+    const fs = Math.max(ci, co - sg);
     const toX = (s: number) => (s / d) * W;
     const hits: [number, "start" | "fade" | "end"][] = [
       [Math.abs(x - toX(ci)), "start"],
@@ -636,14 +543,8 @@ export default function CuePointEditor({
       [Math.abs(x - toX(co)), "end"],
     ];
     hits.sort((a, b) => a[0] - b[0]);
-    if (hits[0][0] <= THRESH) {
-      tlDragRef.current = hits[0][1];
-      e.preventDefault();
-    } else {
-      // Scrub
-      const t = clamp((x / W) * d, 0, d);
-      jumpTo(t);
-    }
+    if (hits[0][0] <= THRESH) { tlDragRef.current = hits[0][1]; e.preventDefault(); }
+    else jumpTo(clamp((x / W) * d, 0, d));
   };
 
   useEffect(() => {
@@ -652,24 +553,18 @@ export default function CuePointEditor({
       if (!tl || !tlDragRef.current) return;
       const rect = tl.getBoundingClientRect();
       const t = secAt(e.clientX, rect);
-      switch (tlDragRef.current) {
-        case "start": setStart(t); break;
-        case "fade": setFadeStartSec(t); break;
-        case "end": setEnd(t); break;
-      }
-      drawCanvas();
+      if (tlDragRef.current === "start") setStart(t);
+      else if (tlDragRef.current === "fade") setFadeStart(t);
+      else setEnd(t);
+      draw();
     };
     const onUp = () => { tlDragRef.current = null; };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
-    return () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    };
-  }, [setStart, setFadeStartSec, setEnd, drawCanvas]);
+    return () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
+  }, [setStart, setFadeStart, setEnd, draw]);
 
   // ── Save ──────────────────────────────────────────────────────────────────
-
   const handleSave = async () => {
     try {
       const res = await fetch(`/api/tracks/${trackId}/cuepoints`, {
@@ -682,21 +577,19 @@ export default function CuePointEditor({
       onSuccess?.();
       setTimeout(() => onOpenChange(false), 300);
     } catch (e: any) {
-      toast({ title: "Save failed", description: e?.message || "Could not save cue points.", variant: "destructive" });
+      toast({ title: "Save failed", description: e?.message, variant: "destructive" });
     }
   };
 
-  // ── Derived for timeline ──────────────────────────────────────────────────
-
-  const d = durationRef.current || dur;
-  const pct = (s: number) => d > 0 ? `${clamp((s / d) * 100, 0, 100).toFixed(4)}%` : "0%";
+  // ── Derived ───────────────────────────────────────────────────────────────
+  const d = durationRef.current || duration || cueOut || 1;
+  const fadeStart = Math.max(cueIn, cueOut - segueDuration);
+  const pct = (s: number) => d > 0 ? `${clamp((s / d) * 100, 0, 100).toFixed(3)}%` : "0%";
 
   // ── Render ────────────────────────────────────────────────────────────────
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[95vw] w-[1300px] p-0 overflow-hidden border border-slate-700 bg-slate-950">
-        <audio ref={audioRef} />
+      <DialogContent className="max-w-[95vw] w-[1200px] p-0 overflow-hidden border border-slate-700 bg-slate-950">
 
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900">
@@ -705,17 +598,15 @@ export default function CuePointEditor({
               {trackTitle}
             </DialogTitle>
             <DialogDescription className="text-xs text-slate-400 mt-0.5">
-              Drag ▶ ↘ ■ handles · click-drag waveform to paint fade region · timeline row for fine control
-              {waveformLoading && <span className="ml-2 text-cyan-500 animate-pulse">Loading waveform…</span>}
+              Drag ▶ ↘ ■ handles · click-drag waveform to set fade region · scrub timeline
+              {waveformStatus === "loading" && <span className="ml-2 text-cyan-500 animate-pulse">· Loading waveform…</span>}
+              {waveformStatus === "placeholder" && <span className="ml-2 text-slate-600">· Approximate waveform</span>}
             </DialogDescription>
           </div>
           <div className="flex items-center gap-3">
-            <label className="text-xs text-slate-400 font-mono">Snap</label>
-            <select
-              value={snapMode}
-              onChange={(e) => setSnapMode(e.target.value as typeof snapMode)}
-              className="bg-slate-800 border border-slate-600 text-slate-200 rounded px-2 py-1 text-xs font-mono"
-            >
+            <span className="text-xs text-slate-400 font-mono">Snap</span>
+            <select value={snapMode} onChange={(e) => setSnapMode(e.target.value as typeof snapMode)}
+              className="bg-slate-800 border border-slate-600 text-slate-200 rounded px-2 py-1 text-xs font-mono">
               <option value="off">Off</option>
               <option value="0.10">0.10s</option>
               <option value="0.01">0.01s</option>
@@ -724,59 +615,50 @@ export default function CuePointEditor({
         </div>
 
         <div className="px-6 py-4 space-y-4 max-h-[82vh] overflow-y-auto">
+
           {/* Transport */}
           <div className="flex items-center gap-3 bg-slate-900 rounded-lg px-4 py-3 border border-slate-800">
-            <button
-              onClick={handleStop}
-              className="flex items-center justify-center w-9 h-9 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors shrink-0"
-              title="Stop / return to start"
-            >
+            <button onClick={handleStop}
+              className="flex items-center justify-center w-9 h-9 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
               <Square className="w-4 h-4" />
             </button>
-            <button
-              onClick={togglePlay}
-              className="flex items-center justify-center w-11 h-11 rounded-full bg-cyan-500 hover:bg-cyan-400 text-black transition-colors shrink-0"
-            >
+            <button onClick={togglePlay}
+              className="flex items-center justify-center w-11 h-11 rounded-full bg-cyan-500 hover:bg-cyan-400 text-black transition-colors">
               {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-0.5" />}
             </button>
             <div className="flex-1 text-center font-mono text-2xl text-white tracking-widest select-none">
-              {fmt(currentTime)}
-              <span className="text-slate-500 text-base ml-3">/ {fmt(d)}</span>
+              {fmt(currentTime)}<span className="text-slate-500 text-base ml-3">/ {fmt(d)}</span>
             </div>
             {/* Jump buttons */}
             <div className="flex items-center gap-1">
-              <button
-                onClick={() => jumpTo(cueIn)}
-                className="text-xs font-mono px-2 py-1 rounded bg-emerald-900/50 hover:bg-emerald-800/60 text-emerald-400 border border-emerald-700/40 transition-colors"
-                title="Jump to Start"
-              >▶ START</button>
-              <button
-                onClick={() => jumpTo(fadeStart)}
-                className="text-xs font-mono px-2 py-1 rounded bg-amber-900/50 hover:bg-amber-800/60 text-amber-400 border border-amber-700/40 transition-colors"
-                title="Jump to Fade"
-              >↘ FADE</button>
-              <button
-                onClick={() => jumpTo(Math.max(0, cueOut - 2))}
-                className="text-xs font-mono px-2 py-1 rounded bg-red-900/50 hover:bg-red-800/60 text-red-400 border border-red-700/40 transition-colors"
-                title="Jump to End"
-              >■ END</button>
+              <button onClick={() => jumpTo(cueIn)}
+                className="text-xs font-mono px-2 py-1 rounded bg-emerald-900/50 hover:bg-emerald-800/70 text-emerald-400 border border-emerald-700/50 transition-colors">
+                ▶ START
+              </button>
+              <button onClick={() => jumpTo(fadeStart)}
+                className="text-xs font-mono px-2 py-1 rounded bg-amber-900/50 hover:bg-amber-800/70 text-amber-400 border border-amber-700/50 transition-colors">
+                ↘ FADE
+              </button>
+              <button onClick={() => jumpTo(Math.max(0, cueOut - 3))}
+                className="text-xs font-mono px-2 py-1 rounded bg-red-900/50 hover:bg-red-800/70 text-red-400 border border-red-700/50 transition-colors">
+                ■ END
+              </button>
             </div>
             {/* Legend */}
             <div className="flex items-center gap-3 text-xs font-mono">
-              <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-emerald-500 inline-block" />start</span>
-              <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-amber-400 inline-block" />fade</span>
-              <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-red-500 inline-block" />end</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-emerald-500 inline-block" />start</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-amber-400 inline-block" />fade</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-red-500 inline-block" />end</span>
             </div>
           </div>
 
-          {/* Waveform */}
-          <div className="rounded-lg overflow-hidden border border-slate-700">
+          {/* Waveform canvas */}
+          <div ref={containerRef} className="rounded-lg overflow-hidden border border-slate-700 w-full">
             <canvas
               ref={canvasRef}
-              width={1200}
               height={180}
               className="w-full block"
-              style={{ cursor: "crosshair", touchAction: "none", userSelect: "none" }}
+              style={{ cursor: "crosshair", touchAction: "none", userSelect: "none", display: "block" }}
               onPointerDown={handleCanvasPointerDown}
               onPointerMove={handleCanvasPointerMove}
               onPointerUp={handleCanvasPointerUp}
@@ -784,12 +666,10 @@ export default function CuePointEditor({
             />
           </div>
 
-          {/* Timeline row */}
-          <div
-            ref={timelineRef}
+          {/* Timeline */}
+          <div ref={timelineRef}
             className="relative h-10 bg-slate-800 rounded-lg border border-slate-700 cursor-pointer select-none overflow-hidden"
-            onMouseDown={handleTlMouseDown}
-          >
+            onMouseDown={handleTlMouseDown}>
             <div className="absolute top-0 bottom-0 bg-cyan-500/15 pointer-events-none"
               style={{ left: pct(cueIn), width: `calc(${pct(cueOut)} - ${pct(cueIn)})` }} />
             <div className="absolute top-0 bottom-0 bg-amber-400/20 pointer-events-none"
@@ -798,11 +678,10 @@ export default function CuePointEditor({
               <span className="text-xs text-slate-500 font-mono">0:00</span>
               <span className="text-xs text-slate-500 font-mono">{fmt(d)}</span>
             </div>
-            <TlPin pos={pct(cueIn)} color="bg-emerald-500" time={fmt(cueIn)} label="START" />
-            <TlPin pos={pct(fadeStart)} color="bg-amber-400" time={fmt(fadeStart)} label="FADE" dark />
-            <TlPin pos={pct(cueOut)} color="bg-red-500" time={fmt(cueOut)} label="END" />
-            {/* Playhead on timeline */}
-            <div className="absolute top-0 bottom-0 w-0.5 bg-rose-500/70 pointer-events-none"
+            <TlPin pos={pct(cueIn)} color="bg-emerald-500" label="START" dark={false} />
+            <TlPin pos={pct(fadeStart)} color="bg-amber-400" label="FADE" dark={true} />
+            <TlPin pos={pct(cueOut)} color="bg-red-500" label="END" dark={false} />
+            <div className="absolute top-0 bottom-0 w-0.5 bg-rose-500/60 pointer-events-none"
               style={{ left: pct(currentTime) }} />
           </div>
 
@@ -816,14 +695,16 @@ export default function CuePointEditor({
               value={cueOut} onChange={(v) => applyAll({ cueOut: v })} />
           </div>
 
-          {/* Actions */}
+          {/* Summary + Actions */}
           <div className="flex justify-between items-center pt-1 pb-1">
             <div className="text-xs font-mono text-slate-500">
-              Active region: <span className="text-cyan-400">{fmt(cueIn)}</span>
+              <span className="text-emerald-400">{fmt(cueIn)}</span>
               {" → "}
               <span className="text-red-400">{fmt(cueOut)}</span>
-              {" · Segue: "}
+              {" · segue "}
               <span className="text-amber-400">{segueDuration.toFixed(2)}s</span>
+              {" · active "}
+              <span className="text-cyan-400">{fmt(cueOut - cueIn)}</span>
             </div>
             <div className="flex gap-3">
               <Button variant="outline" onClick={() => onOpenChange(false)}
@@ -844,9 +725,7 @@ export default function CuePointEditor({
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
 
-function TlPin({ pos, color, time, label, dark = false }: {
-  pos: string; color: string; time: string; label: string; dark?: boolean;
-}) {
+function TlPin({ pos, color, label, dark }: { pos: string; color: string; label: string; dark: boolean }) {
   return (
     <div className="absolute top-0 bottom-0" style={{ left: pos, transform: "translateX(-50%)" }}>
       <div className={`w-0.5 h-full ${color} opacity-80`} />
@@ -861,31 +740,14 @@ function NumField({ label, accent, border, value, onChange }: {
   label: string; accent: string; border: string; value: number; onChange: (v: number) => void;
 }) {
   const [local, setLocal] = useState(value.toFixed(2));
-
-  useEffect(() => {
-    setLocal(value.toFixed(2));
-  }, [value]);
-
+  useEffect(() => { setLocal(value.toFixed(2)); }, [value]);
   return (
     <div className="bg-slate-900 rounded-lg p-3 border border-slate-800">
       <label className={`block text-xs font-bold mb-2 font-mono ${accent}`}>{label}</label>
-      <input
-        type="number"
-        value={local}
-        step="0.1"
-        min="0"
+      <input type="number" value={local} step="0.1" min="0"
         onChange={(e) => setLocal(e.target.value)}
-        onBlur={() => {
-          const n = parseFloat(local);
-          if (!isNaN(n)) onChange(n);
-          else setLocal(value.toFixed(2));
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            const n = parseFloat(local);
-            if (!isNaN(n)) onChange(n);
-          }
-        }}
+        onBlur={() => { const n = parseFloat(local); if (!isNaN(n)) onChange(n); else setLocal(value.toFixed(2)); }}
+        onKeyDown={(e) => { if (e.key === "Enter") { const n = parseFloat(local); if (!isNaN(n)) onChange(n); } }}
         className={`w-full bg-slate-950 border-2 ${border} rounded px-3 py-2 text-sm font-mono text-white focus:outline-none focus:ring-1 focus:ring-cyan-500/50`}
       />
     </div>
