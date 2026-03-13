@@ -35,6 +35,9 @@ export default function CuePointEditor({
 
   // ── audio ──
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
+  const sourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
 
   // ── canvas ──
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -281,9 +284,33 @@ export default function CuePointEditor({
         const t = audio.currentTime;
         ctRef.current = t;
         setCt(t);
+
+        // ── Real-time fade via GainNode ──
+        const gainNode = gainNodeRef.current;
+        const ac = audioCtxRef.current;
+        if (gainNode && ac && hasFadeRef.current) {
+          const co = coRef.current;
+          const fadeStart = co - sgRef.current;
+          if (t >= fadeStart && t < co && sgRef.current > 0) {
+            // linearly ramp gain from 1 → 0 over the fade zone
+            const progress = (t - fadeStart) / sgRef.current;
+            gainNode.gain.setValueAtTime(
+              Math.max(0, 1 - progress),
+              ac.currentTime
+            );
+          } else if (t < fadeStart) {
+            // before fade zone: full volume
+            gainNode.gain.setValueAtTime(1.0, ac.currentTime);
+          }
+        }
+
         // auto-stop at cueOut
         if (t >= coRef.current) {
           audio.pause();
+          // reset gain for next play
+          if (gainNodeRef.current && audioCtxRef.current) {
+            gainNodeRef.current.gain.setValueAtTime(1.0, audioCtxRef.current.currentTime);
+          }
           setPlaying(false);
           playingRef.current = false;
         }
@@ -316,12 +343,28 @@ export default function CuePointEditor({
     zoomRef.current = 1; setZoom(1);
     panRef.current = 0; setPan(0);
 
-    // create audio element
+    // create audio element + Web Audio API chain for real-time fade
     const audio = new Audio();
     audioRef.current = audio;
     audio.crossOrigin = "anonymous";
     audio.src = audioUrl;
     audio.preload = "auto";
+
+    // Build: audio element -> MediaElementSource -> GainNode -> destination
+    try {
+      const ac = new (window.AudioContext || (window as any).webkitAudioContext)() as AudioContext;
+      audioCtxRef.current = ac;
+      const gainNode = ac.createGain();
+      gainNode.gain.value = 1.0;
+      gainNodeRef.current = gainNode;
+      const src = ac.createMediaElementSource(audio);
+      sourceNodeRef.current = src;
+      src.connect(gainNode);
+      gainNode.connect(ac.destination);
+    } catch (e) {
+      // Web Audio API not available - fall back to plain audio
+      console.warn("Web Audio API unavailable:", e);
+    }
 
     // decode waveform
     const ctrl = new AbortController();
@@ -376,6 +419,15 @@ export default function CuePointEditor({
       ctrl.abort();
       audio.pause();
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      // Clean up Web Audio nodes
+      try {
+        sourceNodeRef.current?.disconnect();
+        gainNodeRef.current?.disconnect();
+        audioCtxRef.current?.close();
+      } catch (_) {}
+      sourceNodeRef.current = null;
+      gainNodeRef.current = null;
+      audioCtxRef.current = null;
     };
   }, [open, audioUrl]);
 
@@ -484,15 +536,30 @@ export default function CuePointEditor({
     const audio = audioRef.current;
     if (!audio || !audio.src) return;
     if (audio.paused) {
+      // Resume AudioContext if suspended (browser autoplay policy)
+      const ac = audioCtxRef.current;
+      if (ac && ac.state === "suspended") ac.resume();
+
       if (ctRef.current >= coRef.current) {
         audio.currentTime = ciRef.current;
         ctRef.current = ciRef.current;
+      }
+      // Reset gain to full before starting playback
+      if (gainNodeRef.current && ac) {
+        gainNodeRef.current.gain.cancelScheduledValues(ac.currentTime);
+        gainNodeRef.current.gain.setValueAtTime(1.0, ac.currentTime);
       }
       audio.play().catch(() => {});
       setPlaying(true);
       playingRef.current = true;
     } else {
       audio.pause();
+      // Reset gain when pausing
+      const ac = audioCtxRef.current;
+      if (gainNodeRef.current && ac) {
+        gainNodeRef.current.gain.cancelScheduledValues(ac.currentTime);
+        gainNodeRef.current.gain.setValueAtTime(1.0, ac.currentTime);
+      }
       setPlaying(false);
       playingRef.current = false;
     }
@@ -502,6 +569,12 @@ export default function CuePointEditor({
     const audio = audioRef.current;
     if (!audio) return;
     audio.pause();
+    // Reset gain on stop
+    const ac = audioCtxRef.current;
+    if (gainNodeRef.current && ac) {
+      gainNodeRef.current.gain.cancelScheduledValues(ac.currentTime);
+      gainNodeRef.current.gain.setValueAtTime(1.0, ac.currentTime);
+    }
     audio.currentTime = ciRef.current;
     ctRef.current = ciRef.current;
     setCt(ciRef.current);
