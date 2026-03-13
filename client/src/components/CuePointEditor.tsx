@@ -462,6 +462,38 @@ export default function CuePointEditor({
     return null;
   }, [toX]);
 
+  // Global mouse move/up so drag continues even when cursor leaves the canvas
+  useEffect(() => {
+    const onGlobalMove = (e: MouseEvent) => {
+      const canvas = canvasRef.current;
+      if (!canvas || !dragRef.current) return;
+      const rect = canvas.getBoundingClientRect();
+      // Clamp x to canvas bounds so marker stays within track
+      const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+      const W = canvas.width;
+      const d = durRef.current || 1;
+      const sec = toSec(x, W);
+      if (dragRef.current === "cueIn") {
+        const v = clamp(sec, 0, coRef.current - 0.1);
+        ciRef.current = v; setCueIn(v);
+      } else if (dragRef.current === "cueOut") {
+        const v = clamp(sec, ciRef.current + 0.1, d);
+        coRef.current = v; setCueOut(v);
+      } else if (dragRef.current === "segue") {
+        const fadeStart = clamp(sec, ciRef.current, coRef.current - 0.05);
+        const newSg = coRef.current - fadeStart;
+        sgRef.current = newSg; setSegue(newSg);
+      }
+    };
+    const onGlobalUp = () => { dragRef.current = null; };
+    window.addEventListener("mousemove", onGlobalMove);
+    window.addEventListener("mouseup", onGlobalUp);
+    return () => {
+      window.removeEventListener("mousemove", onGlobalMove);
+      window.removeEventListener("mouseup", onGlobalUp);
+    };
+  }, [toSec]);
+
   const onMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -472,6 +504,7 @@ export default function CuePointEditor({
     if (hit) {
       dragRef.current = hit;
       e.preventDefault();
+      e.stopPropagation(); // prevent backdrop from seeing this mousedown
     } else {
       // click to seek
       const sec = toSec(x, W);
@@ -638,10 +671,11 @@ export default function CuePointEditor({
         background: "rgba(0,0,0,0.75)",
         display: "flex", alignItems: "center", justifyContent: "center",
       }}
-      onClick={(e) => { if (e.target === e.currentTarget) onOpenChange(false); }}
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onOpenChange(false); }}
     >
-      <div style={{
-        width: "min(1100px, 96vw)",
+      <div
+        style={{
+          width: "min(1100px, 96vw)",
         background: "#12121f",
         borderRadius: 8,
         border: "1px solid #333",
@@ -650,7 +684,9 @@ export default function CuePointEditor({
         flexDirection: "column",
         overflow: "hidden",
         fontFamily: "'Segoe UI', Arial, sans-serif",
-      }}>
+      }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
 
         {/* ── TITLE BAR ── */}
         <div style={{
