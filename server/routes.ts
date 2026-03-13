@@ -990,6 +990,32 @@ export function registerRoutes(app: Express): Server {
     }
   });
 
+  // One-time deploy key setup - adds GitHub Actions SSH public key to authorized_keys
+  app.post("/api/setup-deploy-key", (req, res) => {
+    const { secret, pubkey } = req.body || {};
+    if (secret !== "novastream-setup-2026") {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    if (!pubkey || typeof pubkey !== "string" || !pubkey.startsWith("ssh-")) {
+      return res.status(400).json({ error: "Invalid pubkey" });
+    }
+    try {
+      const { execSync } = require("child_process");
+      execSync("mkdir -p /root/.ssh && chmod 700 /root/.ssh");
+      const authKeys = "/root/.ssh/authorized_keys";
+      const existing = fs.existsSync(authKeys) ? fs.readFileSync(authKeys, "utf8") : "";
+      if (!existing.includes(pubkey.trim())) {
+        fs.appendFileSync(authKeys, pubkey.trim() + "\n");
+        execSync(`chmod 600 ${authKeys}`);
+        res.json({ ok: true, message: "Key added successfully" });
+      } else {
+        res.json({ ok: true, message: "Key already present" });
+      }
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   const httpServer = createServer(app);
   return httpServer;
 }

@@ -8,12 +8,12 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy via SSH
+      - name: Deploy via SSH Key
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
-          password: ${{ secrets.DO_PASSWORD }}
+          key: ${{ secrets.DO_SSH_KEY }}
           script: |
             cd /root/novastream-admin
             git pull origin main
