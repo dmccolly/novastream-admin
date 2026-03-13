@@ -504,3 +504,4 @@ function NumField({value,accent,onChange}:{value:number;accent:string;onChange:(
   const commit=()=>{const n=parseFloat(local);if(!isNaN(n))onChange(n);else setLocal(value.toFixed(2));};
   return <input type="number" value={local} step="0.01" min="0" onChange={e=>setLocal(e.target.value)} onBlur={commit} onKeyDown={e=>e.key==="Enter"&&commit()} className={`w-full bg-[#080818] border ${accent} rounded px-3 py-1.5 text-sm font-mono text-white focus:outline-none focus:ring-1 focus:ring-offset-0 transition-colors`}/>;
 }
+// deploy test Fri Mar 13 19:02:17 UTC 2026
