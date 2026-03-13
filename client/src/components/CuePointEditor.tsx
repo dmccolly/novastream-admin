@@ -1,8 +1,7 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useToast } from "@/hooks/use-toast";
 
-// ─── helpers ────────────────────────────────────────────────────────────────
+// ─── helpers ─────────────────────────────────────────────────────────────────
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
 function fmt(s: number): string {
@@ -13,7 +12,7 @@ function fmt(s: number): string {
   return `${m}:${String(sec).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
 }
 
-// ─── types ───────────────────────────────────────────────────────────────────
+// ─── types ────────────────────────────────────────────────────────────────────
 interface CuePoints { cueIn: number; cueOut: number; segueDuration: number; }
 
 export interface CuePointEditorProps {
@@ -27,29 +26,7 @@ export interface CuePointEditorProps {
   onSuccess?: () => void;
 }
 
-// ─── NumField ────────────────────────────────────────────────────────────────
-function NumField({
-  value, onChange, accent,
-}: { value: number; onChange: (v: number) => void; accent: string }) {
-  const [local, setLocal] = useState(value.toFixed(2));
-  useEffect(() => { setLocal(value.toFixed(2)); }, [value]);
-  const commit = () => {
-    const n = parseFloat(local);
-    if (!isNaN(n)) onChange(n);
-    else setLocal(value.toFixed(2));
-  };
-  return (
-    <input
-      type="number" value={local} step="0.01" min="0"
-      onChange={e => setLocal(e.target.value)}
-      onBlur={commit}
-      onKeyDown={e => e.key === "Enter" && commit()}
-      className={`w-full border rounded px-2 py-1 text-sm font-mono bg-white focus:outline-none focus:ring-2 ${accent}`}
-    />
-  );
-}
-
-// ─── main component ───────────────────────────────────────────────────────────
+// ─── Main Component ───────────────────────────────────────────────────────────
 export default function CuePointEditor({
   open, onOpenChange, trackId, trackTitle, audioUrl,
   initialCuePoints, onSuccess,
@@ -58,29 +35,25 @@ export default function CuePointEditor({
 
   // ── audio ──
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  useEffect(() => {
-    audioRef.current = new Audio();
-    return () => { audioRef.current?.pause(); audioRef.current = null; };
-  }, []);
 
-  // ── canvas refs ──
+  // ── canvas ──
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const overviewRef = useRef<HTMLCanvasElement | null>(null);
   const rafRef = useRef<number | null>(null);
 
   // ── mutable refs (avoid stale closures in RAF/events) ──
   const durRef = useRef(0);
   const ciRef = useRef(0);
   const coRef = useRef(0);
-  const sgRef = useRef(0);
+  const sgRef = useRef(0);   // segue duration (seconds before cueOut)
   const ctRef = useRef(0);
   const waveRef = useRef<Float32Array | null>(null);
   const zoomRef = useRef(1);
   const panRef = useRef(0);
-  const dragRef = useRef<"cueIn" | "cueOut" | "segue" | null>(null);
+  const dragRef = useRef<"cueIn" | "cueOut" | "segue" | "playhead" | null>(null);
   const playingRef = useRef(false);
+  const hasFadeRef = useRef(true);
 
-  // ── react state (for rendering) ──
+  // ── react state ──
   const [dur, setDur] = useState(0);
   const [cueIn, setCueIn] = useState(0);
   const [cueOut, setCueOut] = useState(0);
@@ -90,8 +63,11 @@ export default function CuePointEditor({
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState(0);
   const [waveReady, setWaveReady] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [hasFade, setHasFade] = useState(true);
+  const [saving, setSaving] = useState(false);
 
-  // keep refs in sync with state
+  // keep refs in sync
   useEffect(() => { ciRef.current = cueIn; }, [cueIn]);
   useEffect(() => { coRef.current = cueOut; }, [cueOut]);
   useEffect(() => { sgRef.current = segue; }, [segue]);
@@ -99,566 +75,430 @@ export default function CuePointEditor({
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
   useEffect(() => { panRef.current = pan; }, [pan]);
   useEffect(() => { playingRef.current = playing; }, [playing]);
+  useEffect(() => { hasFadeRef.current = hasFade; }, [hasFade]);
 
   // ── coordinate helpers ──
-  const winSize = () => (durRef.current || 1) / zoomRef.current;
-  const toX = (sec: number, W: number) =>
-    clamp(((sec - panRef.current) / winSize()) * W, 0, W);
-  const toSec = (x: number, W: number) =>
-    clamp(panRef.current + (x / W) * winSize(), 0, durRef.current || 1);
+  const winSize = useCallback(() => (durRef.current || 1) / zoomRef.current, []);
+  const toX = useCallback((sec: number, W: number) =>
+    ((sec - panRef.current) / winSize()) * W, [winSize]);
+  const toSec = useCallback((x: number, W: number) =>
+    clamp(panRef.current + (x / W) * winSize(), 0, durRef.current || 1), [winSize]);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // OVERVIEW MINIMAP
-  // ─────────────────────────────────────────────────────────────────────────
-  const drawOverview = useCallback(() => {
-    const canvas = overviewRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    const W = canvas.width, H = canvas.height;
-    const d = durRef.current || 1;
-    const wave = waveRef.current;
-    const ci = ciRef.current, co = coRef.current, sg = sgRef.current;
-    const fs = Math.max(ci, co - sg);
-
-    // background
-    ctx.fillStyle = "#e8edf2";
-    ctx.fillRect(0, 0, W, H);
-
-    // waveform bars
-    if (wave) {
-      for (let i = 0; i < wave.length; i++) {
-        const sec = (i / wave.length) * d;
-        const bh = Math.max(1, wave[i] * H * 0.85);
-        const bw = W / wave.length;
-        if (sec < ci || sec > co) ctx.fillStyle = "#b0bec5";
-        else if (sec >= fs) ctx.fillStyle = "#ff9800";
-        else ctx.fillStyle = "#1976d2";
-        ctx.fillRect(i * bw, (H - bh) / 2, Math.max(1, bw - 0.3), bh);
-      }
-    }
-
-    // cue region outline
-    const ciX = (ci / d) * W, coX = (co / d) * W;
-    ctx.strokeStyle = "rgba(25,118,210,0.6)";
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(ciX, 1, coX - ciX, H - 2);
-
-    // viewport box
-    const ws = winSize();
-    const vpX = (panRef.current / d) * W;
-    const vpW = (ws / d) * W;
-    ctx.fillStyle = "rgba(255,255,255,0.35)";
-    ctx.fillRect(vpX, 0, vpW, H);
-    ctx.strokeStyle = "rgba(0,0,0,0.3)";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(vpX, 0, vpW, H);
-
-    // playhead
-    const phX = (ctRef.current / d) * W;
-    ctx.strokeStyle = "#e53935";
-    ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.moveTo(phX, 0); ctx.lineTo(phX, H); ctx.stroke();
-  }, []);
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // MAIN WAVEFORM CANVAS
-  // ─────────────────────────────────────────────────────────────────────────
+  // ─── DRAW ─────────────────────────────────────────────────────────────────
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const W = canvas.width, H = canvas.height;
-    const RULER_H = 28;
-    const WAVE_H = H - RULER_H;
     const d = durRef.current || 1;
-    const ci = ciRef.current, co = coRef.current, sg = sgRef.current;
-    const fs = Math.max(ci, co - sg);
-    const ph = ctRef.current;
     const wave = waveRef.current;
-    const ws = winSize();
+    const ci = ciRef.current, co = coRef.current, sg = sgRef.current;
+    const fadeStart = co - sg;  // where the fade begins
+    const ph = ctRef.current;
+    const hasFd = hasFadeRef.current;
 
     // ── background ──
-    ctx.fillStyle = "#f5f7fa";
+    ctx.fillStyle = "#1a1a2e";
     ctx.fillRect(0, 0, W, H);
 
-    const ciX = toX(ci, W), fsX = toX(fs, W), coX = toX(co, W), phX = toX(ph, W);
+    // ── waveform ──
+    if (wave && wave.length > 0) {
+      const ws = winSize();
+      const startSec = panRef.current;
+      const endSec = startSec + ws;
+      const samplesPerPx = wave.length / d;
 
-    // ── region fills ──
-    // before cue-in: muted grey
-    ctx.fillStyle = "rgba(180,190,200,0.25)";
-    ctx.fillRect(0, 0, ciX, WAVE_H);
-    // active region (cue-in → segue start): light blue tint
-    ctx.fillStyle = "rgba(25,118,210,0.06)";
-    ctx.fillRect(ciX, 0, fsX - ciX, WAVE_H);
-    // fade region (segue start → cue-out): light amber tint
-    ctx.fillStyle = "rgba(255,152,0,0.10)";
-    ctx.fillRect(fsX, 0, coX - fsX, WAVE_H);
-    // after cue-out: muted grey
-    ctx.fillStyle = "rgba(180,190,200,0.25)";
-    ctx.fillRect(coX, 0, W - coX, WAVE_H);
+      for (let px = 0; px < W; px++) {
+        const sec = startSec + (px / W) * ws;
+        if (sec < 0 || sec > d) continue;
+        const si = Math.floor(sec * samplesPerPx);
+        const amp = wave[Math.min(si, wave.length - 1)] || 0;
+        const bh = Math.max(2, amp * (H - 32) * 0.9);
+        const by = (H - 32 - bh) / 2;
 
-    // ── grid lines ──
-    const tickSec = ws <= 5 ? 0.5 : ws <= 20 ? 1 : ws <= 60 ? 5 : ws <= 300 ? 10 : 30;
-    const firstTick = Math.ceil(panRef.current / tickSec) * tickSec;
-    ctx.strokeStyle = "rgba(0,0,0,0.07)";
-    ctx.lineWidth = 1;
-    for (let t = firstTick; t < panRef.current + ws; t += tickSec) {
-      const x = toX(t, W);
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, WAVE_H); ctx.stroke();
-    }
-
-    // ── waveform bars ──
-    if (wave) {
-      const startFrac = panRef.current / d;
-      const endFrac = Math.min(1, (panRef.current + ws) / d);
-      const si = Math.floor(startFrac * wave.length);
-      const ei = Math.ceil(endFrac * wave.length);
-      const count = Math.max(1, ei - si);
-      const bw = W / count;
-      for (let i = 0; i < count; i++) {
-        const idx = si + i;
-        if (idx >= wave.length) break;
-        const sec = panRef.current + (i / count) * ws;
-        const amp = wave[idx];
-        const bh = Math.max(2, amp * (WAVE_H - 8) * 0.9);
-        const x = i * bw;
-        const y = (WAVE_H - bh) / 2;
-        if (sec < ci || sec > co) ctx.fillStyle = "#90a4ae";
-        else if (sec >= fs) ctx.fillStyle = "#fb8c00";
-        else ctx.fillStyle = "#1e88e5";
-        ctx.fillRect(x + 0.3, y, Math.max(1, bw - 0.6), bh);
+        // color: outside cue region = dark grey, active = blue, fade zone = red
+        if (sec < ci || sec > co) {
+          ctx.fillStyle = "#2d3561";
+        } else if (hasFd && sec >= fadeStart && fadeStart < co) {
+          // fade zone — gradient from blue to red
+          const t = (sec - fadeStart) / Math.max(0.001, co - fadeStart);
+          const r = Math.round(25 + t * 200);
+          const g = Math.round(118 - t * 100);
+          const b = Math.round(210 - t * 180);
+          ctx.fillStyle = `rgb(${r},${g},${b})`;
+        } else {
+          ctx.fillStyle = "#4a9eff";
+        }
+        ctx.fillRect(px, by, 1, bh);
+      }
+    } else {
+      // no waveform yet — draw placeholder bars
+      ctx.fillStyle = "#2d3561";
+      for (let px = 0; px < W; px += 3) {
+        const bh = 20 + Math.sin(px * 0.08) * 15 + Math.random() * 5;
+        ctx.fillRect(px, (H - 32 - bh) / 2, 2, bh);
       }
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // MARKER LINES — tall, clearly visible, with flag labels
-    // Each marker is drawn at a different vertical band so they NEVER overlap
-    // visually even when the times are close together:
-    //   CUE IN   → green line, flag at top-left
-    //   SEGUE    → amber dashed line, flag at mid-left
-    //   CUE OUT  → red line, flag at top-right
-    // ─────────────────────────────────────────────────────────────────────
+    // ── timeline ruler ──
+    ctx.fillStyle = "#0d0d1a";
+    ctx.fillRect(0, H - 32, W, 32);
+    ctx.fillStyle = "#555";
+    ctx.fillRect(0, H - 33, W, 1);
 
-    // shadow helper
-    const shadow = (color: string) => {
-      ctx.shadowColor = color;
-      ctx.shadowBlur = 4;
+    const ws = winSize();
+    const startSec = panRef.current;
+    // pick a tick interval
+    const rawInterval = ws / 10;
+    const intervals = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
+    const tickInterval = intervals.find(i => i >= rawInterval) || 300;
+
+    ctx.fillStyle = "#888";
+    ctx.font = "10px monospace";
+    ctx.textAlign = "center";
+    const firstTick = Math.ceil(startSec / tickInterval) * tickInterval;
+    for (let t = firstTick; t <= startSec + ws + tickInterval; t += tickInterval) {
+      const x = toX(t, W);
+      if (x < 0 || x > W) continue;
+      ctx.fillStyle = "#444";
+      ctx.fillRect(x, H - 32, 1, 8);
+      ctx.fillStyle = "#888";
+      ctx.fillText(fmt(t), x, H - 8);
+    }
+
+    // ── fade region overlay ──
+    if (hasFd && fadeStart < co && fadeStart >= ci) {
+      const fsX = toX(fadeStart, W);
+      const coX = toX(co, W);
+      if (coX > fsX) {
+        const grad = ctx.createLinearGradient(fsX, 0, coX, 0);
+        grad.addColorStop(0, "rgba(220, 80, 20, 0)");
+        grad.addColorStop(1, "rgba(220, 80, 20, 0.25)");
+        ctx.fillStyle = grad;
+        ctx.fillRect(fsX, 0, coX - fsX, H - 32);
+      }
+    }
+
+    // ── marker lines ──
+    const drawMarker = (
+      sec: number,
+      color: string,
+      label: string,
+      labelSide: "left" | "right"
+    ) => {
+      const x = toX(sec, W);
+      if (x < -2 || x > W + 2) return;
+      // line
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, H - 32);
+      ctx.stroke();
+
+      // triangle handle at top
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      if (labelSide === "left") {
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x + 14, 0);
+        ctx.lineTo(x, 14);
+      } else {
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x - 14, 0);
+        ctx.lineTo(x, 14);
+      }
+      ctx.closePath();
+      ctx.fill();
+
+      // label
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 9px sans-serif";
+      ctx.textAlign = labelSide === "left" ? "left" : "right";
+      const lx = labelSide === "left" ? x + 3 : x - 3;
+      ctx.fillText(label, lx, 11);
     };
 
-    // CUE IN — green
-    if (ciX >= 0 && ciX <= W) {
-      ctx.save();
-      shadow("#2e7d32");
-      ctx.strokeStyle = "#2e7d32";
-      ctx.lineWidth = 2.5;
-      ctx.beginPath(); ctx.moveTo(ciX, 0); ctx.lineTo(ciX, WAVE_H); ctx.stroke();
-      ctx.restore();
-
-      // flag
-      ctx.save();
-      ctx.font = "bold 11px Segoe UI, Arial, sans-serif";
-      const label = `▶ IN  ${fmt(ci)}`;
-      const tw = ctx.measureText(label).width;
-      const fw = tw + 10, fh = 20, fx = ciX + 3, fy = 6;
-      ctx.fillStyle = "#2e7d32";
-      ctx.beginPath();
-      ctx.roundRect(fx, fy, fw, fh, 3);
-      ctx.fill();
-      ctx.fillStyle = "#fff";
-      ctx.textBaseline = "middle";
-      ctx.fillText(label, fx + 5, fy + fh / 2);
-      ctx.restore();
+    // segue marker (dashed orange)
+    if (hasFd) {
+      const sgX = toX(fadeStart, W);
+      if (sgX >= -2 && sgX <= W + 2) {
+        ctx.strokeStyle = "#ff9800";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(sgX, 0);
+        ctx.lineTo(sgX, H - 32);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // triangle
+        ctx.fillStyle = "#ff9800";
+        ctx.beginPath();
+        ctx.moveTo(sgX - 7, 0);
+        ctx.lineTo(sgX + 7, 0);
+        ctx.lineTo(sgX, 14);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 9px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("SEG", sgX, 11);
+      }
     }
 
-    // SEGUE — amber dashed
-    if (fsX >= 0 && fsX <= W) {
-      ctx.save();
-      shadow("#e65100");
-      ctx.strokeStyle = "#e65100";
-      ctx.lineWidth = 2;
-      ctx.setLineDash([7, 4]);
-      ctx.beginPath(); ctx.moveTo(fsX, 0); ctx.lineTo(fsX, WAVE_H); ctx.stroke();
-      ctx.restore();
-
-      // flag — placed at mid-height, flipped if near right edge
-      ctx.save();
-      ctx.font = "bold 11px Segoe UI, Arial, sans-serif";
-      const label = `↘ SEG  ${fmt(fs)}`;
-      const tw = ctx.measureText(label).width;
-      const fw = tw + 10, fh = 20;
-      const flip = fsX > W * 0.72;
-      const fx = flip ? fsX - fw - 3 : fsX + 3;
-      const fy = WAVE_H / 2 - fh / 2;
-      ctx.fillStyle = "#e65100";
-      ctx.beginPath();
-      ctx.roundRect(fx, fy, fw, fh, 3);
-      ctx.fill();
-      ctx.fillStyle = "#fff";
-      ctx.textBaseline = "middle";
-      ctx.fillText(label, fx + 5, fy + fh / 2);
-      ctx.restore();
-    }
-
-    // CUE OUT — red
-    if (coX >= 0 && coX <= W) {
-      ctx.save();
-      shadow("#b71c1c");
-      ctx.strokeStyle = "#c62828";
-      ctx.lineWidth = 2.5;
-      ctx.beginPath(); ctx.moveTo(coX, 0); ctx.lineTo(coX, WAVE_H); ctx.stroke();
-      ctx.restore();
-
-      // flag — right-aligned to line
-      ctx.save();
-      ctx.font = "bold 11px Segoe UI, Arial, sans-serif";
-      const label = `OUT ■  ${fmt(co)}`;
-      const tw = ctx.measureText(label).width;
-      const fw = tw + 10, fh = 20;
-      const fx = coX - fw - 3;
-      const fy = 6;
-      ctx.fillStyle = "#c62828";
-      ctx.beginPath();
-      ctx.roundRect(fx, fy, fw, fh, 3);
-      ctx.fill();
-      ctx.fillStyle = "#fff";
-      ctx.textBaseline = "middle";
-      ctx.fillText(label, fx + 5, fy + fh / 2);
-      ctx.restore();
-    }
+    drawMarker(ci, "#00e676", "IN", "right");
+    drawMarker(co, "#ff1744", "OUT", "left");
 
     // ── playhead ──
-    ctx.save();
-    ctx.strokeStyle = "#e53935";
-    ctx.lineWidth = 1.5;
-    ctx.shadowColor = "#e53935";
-    ctx.shadowBlur = 6;
-    ctx.beginPath(); ctx.moveTo(phX, 0); ctx.lineTo(phX, WAVE_H); ctx.stroke();
-    ctx.fillStyle = "#e53935";
-    ctx.beginPath();
-    ctx.moveTo(phX - 6, 0);
-    ctx.lineTo(phX + 6, 0);
-    ctx.lineTo(phX, 9);
-    ctx.closePath();
-    ctx.fill();
-    ctx.restore();
-
-    // ── time ruler ──
-    ctx.fillStyle = "#dde3ea";
-    ctx.fillRect(0, WAVE_H, W, RULER_H);
-    ctx.strokeStyle = "#b0bec5";
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(0, WAVE_H); ctx.lineTo(W, WAVE_H); ctx.stroke();
-    ctx.fillStyle = "#546e7a";
-    ctx.font = "10px 'Segoe UI', Arial, monospace";
-    ctx.textAlign = "center";
-    for (let t = firstTick; t < panRef.current + ws; t += tickSec) {
-      const x = toX(t, W);
-      ctx.fillStyle = "#546e7a";
-      ctx.fillText(fmt(t), x, WAVE_H + 18);
-      ctx.strokeStyle = "#b0bec5";
-      ctx.beginPath(); ctx.moveTo(x, WAVE_H); ctx.lineTo(x, WAVE_H + 6); ctx.stroke();
+    const phX = toX(ph, W);
+    if (phX >= 0 && phX <= W) {
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(phX, 0);
+      ctx.lineTo(phX, H - 32);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // playhead triangle
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.moveTo(phX - 6, 0);
+      ctx.lineTo(phX + 6, 0);
+      ctx.lineTo(phX, 10);
+      ctx.closePath();
+      ctx.fill();
     }
+  }, [toX, winSize]);
 
-    drawOverview();
-  }, [drawOverview]); // eslint-disable-line
-
-  // ── resize observers ──
-  useEffect(() => {
-    if (!open) return;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ro = new ResizeObserver(() => {
-      const w = Math.round(canvas.getBoundingClientRect().width);
-      if (w > 0 && canvas.width !== w) { canvas.width = w; canvas.height = 280; draw(); }
-    });
-    ro.observe(canvas);
-    return () => ro.disconnect();
-  }, [open, draw]);
-
-  useEffect(() => {
-    if (!open) return;
-    const canvas = overviewRef.current;
-    if (!canvas) return;
-    const ro = new ResizeObserver(() => {
-      const w = Math.round(canvas.getBoundingClientRect().width);
-      if (w > 0 && canvas.width !== w) { canvas.width = w; canvas.height = 44; draw(); }
-    });
-    ro.observe(canvas);
-    return () => ro.disconnect();
-  }, [open, draw]);
-
-  // redraw on any state change
-  useEffect(() => {
-    if (open) draw();
-  }, [open, draw, cueIn, cueOut, segue, ct, zoom, pan, waveReady]);
-
-  // ── RAF loop during playback ──
-  useEffect(() => {
-    if (!playing) {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      return;
-    }
-    const tick = () => {
+  // ── RAF loop ──
+  const startRaf = useCallback(() => {
+    const loop = () => {
       const audio = audioRef.current;
-      if (audio) {
-        ctRef.current = audio.currentTime;
-        setCt(audio.currentTime);
-        // auto-pan to keep playhead visible
-        const d = durRef.current || 1;
-        const ws = d / zoomRef.current;
-        const end = panRef.current + ws;
-        if (audio.currentTime > end - ws * 0.1) {
-          const np = clamp(audio.currentTime - ws * 0.1, 0, Math.max(0, d - ws));
-          panRef.current = np;
-          setPan(np);
+      if (audio && !audio.paused) {
+        const t = audio.currentTime;
+        ctRef.current = t;
+        setCt(t);
+        // auto-stop at cueOut
+        if (t >= coRef.current) {
+          audio.pause();
+          setPlaying(false);
+          playingRef.current = false;
         }
       }
       draw();
-      rafRef.current = requestAnimationFrame(tick);
+      rafRef.current = requestAnimationFrame(loop);
     };
-    rafRef.current = requestAnimationFrame(tick);
-    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
-  }, [playing, draw]);
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(loop);
+  }, [draw]);
 
-  // ── load audio + waveform when dialog opens ──
+  // ─── LOAD AUDIO + WAVEFORM ────────────────────────────────────────────────
   useEffect(() => {
-    if (!open) {
-      audioRef.current?.pause();
-      setPlaying(false);
-      playingRef.current = false;
-      return;
-    }
+    if (!open || !audioUrl) return;
+
+    // reset
+    waveRef.current = null;
+    setWaveReady(false);
+    setLoading(true);
+    durRef.current = 0;
+    setDur(0);
+
     const ci = initialCuePoints.cueIn ?? 0;
+    const sg = initialCuePoints.segueDuration ?? 3;
     const co = initialCuePoints.cueOut ?? 0;
-    const sg = initialCuePoints.segueDuration ?? 0;
-    ciRef.current = ci; coRef.current = co; sgRef.current = sg;
-    setCueIn(ci); setCueOut(co); setSegue(sg);
+    ciRef.current = ci; setCueIn(ci);
+    coRef.current = co; setCueOut(co);
+    sgRef.current = sg; setSegue(sg);
     ctRef.current = ci; setCt(ci);
-    setPlaying(false); playingRef.current = false;
-    durRef.current = 0; setDur(0);
     zoomRef.current = 1; setZoom(1);
     panRef.current = 0; setPan(0);
-    setWaveReady(false);
 
-    const audio = audioRef.current;
-    if (!audio) return;
-    const src = audioUrl || `/api/tracks/${trackId}/stream`;
+    // create audio element
+    const audio = new Audio();
+    audioRef.current = audio;
+    audio.crossOrigin = "anonymous";
+    audio.src = audioUrl;
+    audio.preload = "auto";
 
-    const onMeta = () => {
-      if (Number.isFinite(audio.duration) && audio.duration > 0) {
-        durRef.current = audio.duration;
-        setDur(audio.duration);
-      }
-    };
-    const onEnded = () => {
-      setPlaying(false);
-      playingRef.current = false;
-      audio.currentTime = ciRef.current;
-      ctRef.current = ciRef.current;
-      setCt(ciRef.current);
-    };
-    audio.addEventListener("loadedmetadata", onMeta);
-    audio.addEventListener("durationchange", onMeta);
-    audio.addEventListener("ended", onEnded);
-    audio.src = src;
-    audio.preload = "metadata";
-    audio.load();
-
-    // placeholder waveform
-    const N = 800;
-    const ph2 = new Float32Array(N);
-    for (let i = 0; i < N; i++) {
-      const p = i / N;
-      ph2[i] = Math.max(0,
-        (0.3 + Math.sin(p * Math.PI * 18) * 0.2 + (Math.random() - 0.5) * 0.25)
-        * Math.min(p * 10, 1) * Math.min((1 - p) * 10, 1)
-      );
-    }
-    waveRef.current = ph2;
-    draw();
-
-    // real waveform decode
+    // decode waveform
     const ctrl = new AbortController();
     (async () => {
       try {
-        const resp = await fetch(src, { signal: ctrl.signal });
-        if (!resp.ok) return;
+        const resp = await fetch(audioUrl, { signal: ctrl.signal });
         const buf = await resp.arrayBuffer();
-        const AC = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext;
-        const ac = new AC();
+        if (ctrl.signal.aborted) return;
+        const ac = new (window.AudioContext || (window as any).webkitAudioContext)();
         const decoded = await ac.decodeAudioData(buf);
-        await ac.close();
-        const raw = decoded.getChannelData(0);
-        const out = new Float32Array(N);
-        const block = Math.floor(raw.length / N);
-        let mx = 0;
+        if (ctrl.signal.aborted) return;
+        const d = decoded.duration;
+        durRef.current = d;
+        setDur(d);
+
+        // downsample to ~2000 samples
+        const ch = decoded.getChannelData(0);
+        const N = 2000;
+        const step = Math.floor(ch.length / N);
+        const wave = new Float32Array(N);
         for (let i = 0; i < N; i++) {
-          let s = 0;
-          for (let j = 0; j < block; j++) s += Math.abs(raw[i * block + j]);
-          out[i] = s / block;
-          if (out[i] > mx) mx = out[i];
+          let mx = 0;
+          for (let j = 0; j < step; j++) {
+            const v = Math.abs(ch[i * step + j] || 0);
+            if (v > mx) mx = v;
+          }
+          wave[i] = mx;
         }
-        if (mx > 0) for (let i = 0; i < N; i++) out[i] /= mx;
-        waveRef.current = out;
+        waveRef.current = wave;
         setWaveReady(true);
-      } catch (e) {
-        console.warn("waveform decode:", e);
+        setLoading(false);
+        ac.close();
+
+        // fit view to cue region with some padding
+        const pad = Math.max(1, (co - ci) * 0.15);
+        const regionDur = (co - ci) + pad * 2;
+        const newZoom = clamp(d / regionDur, 1, 20);
+        const newPan = clamp(ci - pad, 0, d - d / newZoom);
+        zoomRef.current = newZoom; setZoom(newZoom);
+        panRef.current = newPan; setPan(newPan);
+      } catch (e: any) {
+        if (e.name !== "AbortError") {
+          setLoading(false);
+          setWaveReady(false);
+        }
       }
     })();
 
+    startRaf();
+
     return () => {
       ctrl.abort();
-      audio.removeEventListener("loadedmetadata", onMeta);
-      audio.removeEventListener("durationchange", onMeta);
-      audio.removeEventListener("ended", onEnded);
+      audio.pause();
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [open]); // eslint-disable-line
+  }, [open, audioUrl]);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // POINTER EVENTS
-  // ─────────────────────────────────────────────────────────────────────────
-  const THRESH = 12; // px hit zone around each marker
+  // resize canvas when dialog opens
+  useEffect(() => {
+    if (!open) return;
+    const resize = () => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width > 0) {
+        canvas.width = rect.width;
+        canvas.height = rect.height;
+      }
+    };
+    const t = setTimeout(resize, 50);
+    window.addEventListener("resize", resize);
+    return () => { clearTimeout(t); window.removeEventListener("resize", resize); };
+  }, [open]);
 
-  const hitHandle = (x: number, W: number): "cueIn" | "cueOut" | "segue" | null => {
+  // ─── MOUSE INTERACTION ────────────────────────────────────────────────────
+  const getHit = useCallback((x: number, W: number): "cueIn" | "cueOut" | "segue" | null => {
     const ci = ciRef.current, co = coRef.current, sg = sgRef.current;
-    const fs = Math.max(ci, co - sg);
-    const hits: [number, "cueIn" | "cueOut" | "segue"][] = [
-      [Math.abs(x - toX(ci, W)), "cueIn"],
-      [Math.abs(x - toX(co, W)), "cueOut"],
-      [Math.abs(x - toX(fs, W)), "segue"],
-    ];
-    hits.sort((a, b) => a[0] - b[0]);
-    return hits[0][0] <= THRESH ? hits[0][1] : null;
-  };
+    const fadeStart = co - sg;
+    const ciX = toX(ci, W);
+    const coX = toX(co, W);
+    const sgX = toX(fadeStart, W);
+    const HIT = 10;
+    if (Math.abs(x - ciX) < HIT) return "cueIn";
+    if (Math.abs(x - coX) < HIT) return "cueOut";
+    if (hasFadeRef.current && Math.abs(x - sgX) < HIT) return "segue";
+    return null;
+  }, [toX]);
 
-  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+  const onMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    canvas.setPointerCapture(e.pointerId);
-    e.preventDefault();
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const h = hitHandle(x, rect.width);
-    if (h) {
-      dragRef.current = h;
+    const W = canvas.width;
+    const hit = getHit(x, W);
+    if (hit) {
+      dragRef.current = hit;
+      e.preventDefault();
     } else {
-      // click = move playhead
-      const t = toSec(x, rect.width);
-      ctRef.current = t;
-      setCt(t);
-      if (audioRef.current) audioRef.current.currentTime = t;
-      draw();
+      // click to seek
+      const sec = toSec(x, W);
+      ctRef.current = sec; setCt(sec);
+      if (audioRef.current) audioRef.current.currentTime = sec;
     }
-  };
+  }, [getHit, toSec]);
 
-  const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+  const onMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
-    if (!canvas || !dragRef.current) return;
+    if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const t = toSec(e.clientX - rect.left, rect.width);
+    const x = e.clientX - rect.left;
+    const W = canvas.width;
     const d = durRef.current || 1;
+
+    // cursor
+    const hit = getHit(x, W);
+    canvas.style.cursor = hit ? "ew-resize" : "crosshair";
+
+    if (!dragRef.current) return;
+    const sec = toSec(x, W);
+
     if (dragRef.current === "cueIn") {
-      const n = clamp(t, 0, coRef.current - 0.01);
-      ciRef.current = n; setCueIn(n);
+      const v = clamp(sec, 0, coRef.current - 0.1);
+      ciRef.current = v; setCueIn(v);
     } else if (dragRef.current === "cueOut") {
-      const n = clamp(t, ciRef.current + 0.01, d);
-      coRef.current = n; setCueOut(n);
-      sgRef.current = clamp(sgRef.current, 0, n - ciRef.current);
-      setSegue(sgRef.current);
+      const v = clamp(sec, ciRef.current + 0.1, d);
+      coRef.current = v; setCueOut(v);
     } else if (dragRef.current === "segue") {
-      const fs = clamp(t, ciRef.current, coRef.current);
-      sgRef.current = coRef.current - fs;
-      setSegue(sgRef.current);
+      // segue marker = fadeStart = co - sg
+      // dragging it changes sg = co - fadeStart
+      const fadeStart = clamp(sec, ciRef.current, coRef.current - 0.05);
+      const newSg = coRef.current - fadeStart;
+      sgRef.current = newSg; setSegue(newSg);
     }
-    draw();
-  };
+  }, [getHit, toSec]);
 
-  const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    dragRef.current = null;
-    canvasRef.current?.releasePointerCapture(e.pointerId);
-  };
+  const onMouseUp = useCallback(() => { dragRef.current = null; }, []);
 
-  const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+  // scroll to zoom
+  const onWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
     const d = durRef.current || 1;
-    const factor = e.deltaY < 0 ? 1.5 : 1 / 1.5;
-    const newZ = clamp(zoomRef.current * factor, 1, 64);
-    const ws = d / newZ;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const mouseT = toSec(e.clientX - rect.left, rect.width);
-    const np = clamp(mouseT - (mouseT - panRef.current) / (zoomRef.current / newZ), 0, Math.max(0, d - ws));
-    zoomRef.current = newZ; panRef.current = np;
-    setZoom(newZ); setPan(np);
-    draw();
-  };
+    const mx = e.clientX - rect.left;
+    const W = canvas.width;
+    const focusSec = toSec(mx, W);
 
-  const onOverviewClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = overviewRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const d = durRef.current || 1;
-    const t = clamp(((e.clientX - rect.left) / rect.width) * d, 0, d);
-    const ws = winSize();
-    const np = clamp(t - ws / 2, 0, d - ws);
-    panRef.current = np; setPan(np); draw();
-  };
+    const factor = e.deltaY < 0 ? 1.25 : 0.8;
+    const newZoom = clamp(zoomRef.current * factor, 1, 40);
+    const newWs = d / newZoom;
+    const newPan = clamp(focusSec - (mx / W) * newWs, 0, d - newWs);
+    zoomRef.current = newZoom; setZoom(newZoom);
+    panRef.current = newPan; setPan(newPan);
+  }, [toSec]);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // ZOOM / NAVIGATION
-  // ─────────────────────────────────────────────────────────────────────────
-  const doZoom = (newZ: number) => {
-    const d = durRef.current || 1;
-    const z = clamp(newZ, 1, 64);
-    const ws = d / z;
-    const np = clamp(ctRef.current - ws / 2, 0, Math.max(0, d - ws));
-    zoomRef.current = z; panRef.current = np;
-    setZoom(z); setPan(np); draw();
-  };
-
-  const fitRegion = () => {
-    const d = durRef.current || 1;
-    const ci = ciRef.current, co = coRef.current;
-    const span = Math.max(co - ci, 0.5);
-    const pad = span * 0.25;
-    const ws = span + pad * 2;
-    const z = clamp(d / ws, 1, 64);
-    const actualWs = d / z;
-    const np = clamp(ci - pad, 0, Math.max(0, d - actualWs));
-    zoomRef.current = z; panRef.current = np;
-    setZoom(z); setPan(np); draw();
-  };
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // TRANSPORT
-  // ─────────────────────────────────────────────────────────────────────────
-  const togglePlay = async () => {
+  // ─── TRANSPORT ────────────────────────────────────────────────────────────
+  const togglePlay = useCallback(() => {
     const audio = audioRef.current;
-    if (!audio) return;
-    if (playing) {
+    if (!audio || !audio.src) return;
+    if (audio.paused) {
+      if (ctRef.current >= coRef.current) {
+        audio.currentTime = ciRef.current;
+        ctRef.current = ciRef.current;
+      }
+      audio.play().catch(() => {});
+      setPlaying(true);
+      playingRef.current = true;
+    } else {
       audio.pause();
       setPlaying(false);
       playingRef.current = false;
-      return;
     }
-    const src = audioUrl || `/api/tracks/${trackId}/stream`;
-    if (!audio.src || audio.src === window.location.href || audio.src === "") {
-      audio.src = src;
-      audio.load();
-    }
-    try {
-      await audio.play();
-      setPlaying(true);
-      playingRef.current = true;
-    } catch (err: any) {
-      toast({ title: "Playback failed", description: err?.message, variant: "destructive" });
-    }
-  };
+  }, []);
 
-  const stop = () => {
+  const stop = useCallback(() => {
     const audio = audioRef.current;
     if (!audio) return;
     audio.pause();
@@ -667,461 +507,390 @@ export default function CuePointEditor({
     setCt(ciRef.current);
     setPlaying(false);
     playingRef.current = false;
-    draw();
-  };
+  }, []);
 
-  const jumpTo = (t: number) => {
-    const audio = audioRef.current;
-    if (audio) audio.currentTime = t;
-    ctRef.current = t;
-    setCt(t);
-    draw();
-  };
+  const seekTo = useCallback((sec: number) => {
+    const t = clamp(sec, 0, durRef.current || 1);
+    ctRef.current = t; setCt(t);
+    if (audioRef.current) audioRef.current.currentTime = t;
+  }, []);
 
-  const setToPlayhead = (which: "cueIn" | "cueOut" | "segue") => {
-    const t = ctRef.current;
+  // ─── ZOOM CONTROLS ───────────────────────────────────────────────────────
+  const fitRegion = useCallback(() => {
     const d = durRef.current || 1;
-    if (which === "cueIn") {
-      const n = clamp(t, 0, coRef.current - 0.01);
-      ciRef.current = n; setCueIn(n);
-    } else if (which === "cueOut") {
-      const n = clamp(t, ciRef.current + 0.01, d);
-      coRef.current = n; setCueOut(n);
-      sgRef.current = clamp(sgRef.current, 0, n - ciRef.current);
-      setSegue(sgRef.current);
-    } else {
-      const fs = clamp(t, ciRef.current, coRef.current);
-      sgRef.current = coRef.current - fs;
-      setSegue(sgRef.current);
-    }
-    draw();
-  };
+    const ci = ciRef.current, co = coRef.current;
+    const pad = Math.max(0.5, (co - ci) * 0.1);
+    const regionDur = (co - ci) + pad * 2;
+    const newZoom = clamp(d / regionDur, 1, 40);
+    const newWs = d / newZoom;
+    const newPan = clamp(ci - pad, 0, d - newWs);
+    zoomRef.current = newZoom; setZoom(newZoom);
+    panRef.current = newPan; setPan(newPan);
+  }, []);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // SAVE
-  // ─────────────────────────────────────────────────────────────────────────
+  const fullView = useCallback(() => {
+    zoomRef.current = 1; setZoom(1);
+    panRef.current = 0; setPan(0);
+  }, []);
+
+  // ─── SAVE ─────────────────────────────────────────────────────────────────
   const save = async () => {
+    setSaving(true);
     try {
       const res = await fetch(`/api/tracks/${trackId}/cuepoints`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cueIn, cueOut, segueDuration: segue }),
+        body: JSON.stringify({ cueIn, cueOut, segueDuration: hasFade ? segue : 0 }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      toast({ title: "Saved", description: "Cue points updated." });
+      if (!res.ok) throw new Error(await res.text());
+      toast({ title: "Saved", description: `Cue points saved for "${trackTitle}"` });
       onSuccess?.();
-      setTimeout(() => onOpenChange(false), 300);
+      onOpenChange(false);
     } catch (e: any) {
-      toast({ title: "Save failed", description: e?.message, variant: "destructive" });
+      toast({ title: "Save failed", description: e.message, variant: "destructive" });
+    } finally {
+      setSaving(false);
     }
   };
 
-  const fadeStart = Math.max(cueIn, cueOut - segue);
-  const d = dur || cueOut || 1;
+  if (!open) return null;
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // RENDER
-  // ─────────────────────────────────────────────────────────────────────────
+  const fadeStart = cueOut - segue;
+
+  // ─── RENDER ───────────────────────────────────────────────────────────────
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        className="max-w-[96vw] w-[1300px] p-0 overflow-hidden"
-        style={{
-          background: "#f0f2f5",
-          border: "1px solid #c8d0da",
-          borderRadius: "8px",
-          boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
-          maxHeight: "92vh",
-          display: "flex",
-          flexDirection: "column",
-        }}
-      >
+    <div
+      style={{
+        position: "fixed", inset: 0, zIndex: 9999,
+        background: "rgba(0,0,0,0.75)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onOpenChange(false); }}
+    >
+      <div style={{
+        width: "min(1100px, 96vw)",
+        background: "#12121f",
+        borderRadius: 8,
+        border: "1px solid #333",
+        boxShadow: "0 20px 60px rgba(0,0,0,0.8)",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        fontFamily: "'Segoe UI', Arial, sans-serif",
+      }}>
+
         {/* ── TITLE BAR ── */}
         <div style={{
-          background: "linear-gradient(to bottom, #e8ecf0, #dde2e8)",
-          borderBottom: "1px solid #b8c0cc",
+          background: "#1e1e3a",
+          borderBottom: "1px solid #333",
           padding: "10px 16px",
           display: "flex",
           alignItems: "center",
-          justifyContent: "space-between",
-          flexShrink: 0,
+          gap: 12,
         }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            {/* icon */}
-            <div style={{
-              width: 28, height: 28, borderRadius: 4,
-              background: "linear-gradient(135deg, #1976d2, #42a5f5)",
-              display: "flex", alignItems: "center", justifyContent: "center",
-            }}>
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="white">
-                <rect x="1" y="4" width="2" height="6" rx="1"/>
-                <rect x="4" y="2" width="2" height="10" rx="1"/>
-                <rect x="7" y="5" width="2" height="5" rx="1"/>
-                <rect x="10" y="3" width="2" height="8" rx="1"/>
-              </svg>
-            </div>
-            <div>
-              <div style={{ fontSize: 11, color: "#607080", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>
-                Cue Point Editor
-              </div>
-              <div style={{ fontSize: 14, color: "#1a2535", fontWeight: 700, marginTop: 1 }}>
-                {trackTitle}
-              </div>
-            </div>
-          </div>
-
-          {/* zoom controls */}
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ fontSize: 11, color: "#607080", marginRight: 4 }}>Zoom:</span>
-            <button onClick={() => doZoom(zoom / 1.5)} disabled={zoom <= 1}
-              style={btnStyle("#fff", "#b8c0cc", zoom <= 1 ? "#ccc" : "#1976d2")}>−</button>
-            <span style={{ fontSize: 12, color: "#334", fontWeight: 600, width: 60, textAlign: "center", fontFamily: "monospace" }}>
-              {zoom.toFixed(1)}×
+          <span style={{ color: "#4a9eff", fontSize: 13, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase" }}>
+            Cue Editor
+          </span>
+          <span style={{ color: "#ccc", fontSize: 14, fontWeight: 500, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {trackTitle}
+          </span>
+          {dur > 0 && (
+            <span style={{ color: "#888", fontSize: 12, fontFamily: "monospace" }}>
+              {fmt(dur)}
             </span>
-            <button onClick={() => doZoom(zoom * 1.5)} disabled={zoom >= 64}
-              style={btnStyle("#fff", "#b8c0cc", zoom >= 64 ? "#ccc" : "#1976d2")}>+</button>
-            <button onClick={fitRegion}
-              style={btnStyle("#e3f0fb", "#90c4e8", "#1976d2")}>Fit Region</button>
-            <button onClick={() => doZoom(1)}
-              style={btnStyle("#fff", "#b8c0cc", "#546e7a")}>Full View</button>
-          </div>
+          )}
+          <button
+            onClick={() => onOpenChange(false)}
+            style={{ background: "none", border: "none", color: "#888", cursor: "pointer", fontSize: 18, lineHeight: 1, padding: "0 4px" }}
+          >
+            ✕
+          </button>
         </div>
 
-        {/* ── TRANSPORT BAR ── */}
+        {/* ── TOOLBAR ── */}
         <div style={{
-          background: "#e4e8ed",
-          borderBottom: "1px solid #c0c8d4",
-          padding: "8px 16px",
+          background: "#16162a",
+          borderBottom: "1px solid #2a2a45",
+          padding: "6px 12px",
           display: "flex",
           alignItems: "center",
-          gap: 10,
-          flexShrink: 0,
+          gap: 8,
+          flexWrap: "wrap",
         }}>
-          {/* stop */}
-          <button onClick={stop} title="Stop & Return to Cue In"
-            style={{ ...transportBtn, background: "#fff", color: "#546e7a", border: "1px solid #b8c0cc" }}>
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
-              <rect width="10" height="10" rx="1.5"/>
-            </svg>
+          {/* Transport */}
+          <button
+            onClick={stop}
+            title="Stop"
+            style={btnStyle("#333", "#555")}
+          >
+            ■
+          </button>
+          <button
+            onClick={togglePlay}
+            title={playing ? "Pause" : "Play"}
+            style={btnStyle(playing ? "#1a5a1a" : "#1a3a5a", playing ? "#2a8a2a" : "#2a5a8a")}
+          >
+            {playing ? "⏸" : "▶"}
           </button>
 
-          {/* play/pause */}
-          <button onClick={togglePlay} title={playing ? "Pause" : "Play"}
-            style={{
-              ...transportBtn,
-              width: 40, height: 40,
-              background: playing ? "#fff3e0" : "#e3f2fd",
-              color: playing ? "#e65100" : "#1565c0",
-              border: `1.5px solid ${playing ? "#ffb74d" : "#64b5f6"}`,
-              fontSize: 16,
-            }}>
-            {playing
-              ? <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
-                  <rect x="1" y="1" width="4" height="10" rx="1"/>
-                  <rect x="7" y="1" width="4" height="10" rx="1"/>
-                </svg>
-              : <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
-                  <polygon points="2,1 11,6 2,11"/>
-                </svg>
-            }
-          </button>
+          <div style={{ width: 1, height: 24, background: "#333", margin: "0 4px" }} />
 
-          {/* timecode */}
-          <div style={{
-            fontFamily: "'Courier New', Courier, monospace",
-            fontSize: 22,
-            fontWeight: 700,
-            color: "#1a2535",
-            background: "#fff",
-            border: "1px solid #c0c8d4",
-            borderRadius: 4,
-            padding: "2px 12px",
-            letterSpacing: "0.04em",
-            minWidth: 120,
-            textAlign: "center",
+          {/* Timecode */}
+          <span style={{
+            fontFamily: "monospace", fontSize: 16, fontWeight: 700,
+            color: "#00e676", background: "#0a0a15", padding: "3px 10px",
+            borderRadius: 4, border: "1px solid #1a3a1a", minWidth: 90, textAlign: "center",
           }}>
             {fmt(ct)}
-          </div>
-          <div style={{ fontSize: 12, color: "#78909c", fontFamily: "monospace" }}>
-            / {fmt(d)}
-          </div>
+          </span>
 
-          <div style={{ flex: 1 }}/>
+          <div style={{ width: 1, height: 24, background: "#333", margin: "0 4px" }} />
 
-          {/* jump buttons */}
-          <button onClick={() => jumpTo(cueIn)} title="Jump to Cue In"
-            style={jumpBtn("#e8f5e9", "#a5d6a7", "#2e7d32")}>▶ IN</button>
-          <button onClick={() => jumpTo(fadeStart)} title="Jump to Segue"
-            style={jumpBtn("#fff3e0", "#ffcc80", "#e65100")}>↘ SEG</button>
-          <button onClick={() => jumpTo(Math.max(0, cueOut - 3))} title="Preview Cue Out"
-            style={jumpBtn("#ffebee", "#ef9a9a", "#c62828")}>OUT ▶</button>
+          {/* Jump buttons */}
+          <button onClick={() => seekTo(cueIn)} title="Jump to Cue In" style={btnStyle("#1a2a1a", "#2a4a2a")}>
+            <span style={{ color: "#00e676", fontWeight: 700, fontSize: 11 }}>▶ IN</span>
+          </button>
+          {hasFade && (
+            <button onClick={() => seekTo(fadeStart)} title="Jump to Segue" style={btnStyle("#2a1a0a", "#4a3a1a")}>
+              <span style={{ color: "#ff9800", fontWeight: 700, fontSize: 11 }}>▶ SEG</span>
+            </button>
+          )}
+          <button onClick={() => seekTo(Math.max(0, cueOut - 3))} title="Jump near Cue Out" style={btnStyle("#2a0a0a", "#4a1a1a")}>
+            <span style={{ color: "#ff1744", fontWeight: 700, fontSize: 11 }}>OUT ▶</span>
+          </button>
+
+          <div style={{ flex: 1 }} />
+
+          {/* Zoom */}
+          <button onClick={fitRegion} style={btnStyle("#222", "#444")} title="Fit cue region">
+            <span style={{ fontSize: 11, color: "#aaa" }}>Fit Region</span>
+          </button>
+          <button onClick={fullView} style={btnStyle("#222", "#444")} title="Full view">
+            <span style={{ fontSize: 11, color: "#aaa" }}>Full View</span>
+          </button>
+          <span style={{ color: "#666", fontSize: 11, fontFamily: "monospace" }}>
+            {zoom.toFixed(1)}×
+          </span>
         </div>
 
         {/* ── WAVEFORM CANVAS ── */}
-        <div style={{ position: "relative", flexShrink: 0 }}>
+        <div style={{ position: "relative", flex: "0 0 240px", background: "#1a1a2e" }}>
+          {loading && (
+            <div style={{
+              position: "absolute", inset: 0, display: "flex",
+              alignItems: "center", justifyContent: "center",
+              color: "#4a9eff", fontSize: 13, background: "rgba(18,18,31,0.8)", zIndex: 2,
+            }}>
+              Loading waveform…
+            </div>
+          )}
           <canvas
             ref={canvasRef}
-            height={280}
-            style={{
-              width: "100%",
-              display: "block",
-              cursor: "crosshair",
-              touchAction: "none",
-              userSelect: "none",
-              background: "#f5f7fa",
-            }}
-            onPointerDown={onPointerDown}
-            onPointerMove={onPointerMove}
-            onPointerUp={onPointerUp}
-            onPointerCancel={onPointerUp}
+            style={{ display: "block", width: "100%", height: 240, cursor: "crosshair" }}
+            onMouseDown={onMouseDown}
+            onMouseMove={onMouseMove}
+            onMouseUp={onMouseUp}
+            onMouseLeave={onMouseUp}
             onWheel={onWheel}
           />
-          <div style={{
-            position: "absolute",
-            bottom: 30,
-            right: 10,
-            fontSize: 10,
-            color: "#90a4ae",
-            fontFamily: "monospace",
-            pointerEvents: "none",
-          }}>
-            Drag markers · Scroll to zoom · Click to seek
-          </div>
         </div>
 
-        {/* ── OVERVIEW MINIMAP ── */}
-        <canvas
-          ref={overviewRef}
-          height={44}
-          style={{
-            width: "100%",
-            display: "block",
-            cursor: "pointer",
-            borderTop: "1px solid #c8d0da",
-            background: "#e8edf2",
-            flexShrink: 0,
-          }}
-          onClick={onOverviewClick}
-        />
-
-        {/* ── THREE CUE POINT PANELS ── */}
+        {/* ── HINT ── */}
         <div style={{
+          background: "#0d0d1a", padding: "4px 12px",
+          color: "#555", fontSize: 11, fontFamily: "monospace",
+          borderTop: "1px solid #1a1a2e",
+        }}>
+          Drag markers to adjust • Scroll to zoom • Click to seek
+        </div>
+
+        {/* ── CUE POINT PANELS ── */}
+        <div style={{
+          background: "#16162a",
+          borderTop: "1px solid #2a2a45",
+          padding: "12px 16px",
           display: "grid",
           gridTemplateColumns: "1fr 1fr 1fr",
-          borderTop: "1px solid #c8d0da",
-          flexShrink: 0,
+          gap: 12,
         }}>
           {/* CUE IN */}
           <CuePanel
-            color="#2e7d32" lightBg="#f1f8f1" borderColor="#a5d6a7"
-            label="CUE IN" icon="▶"
-            timeDisplay={fmt(cueIn)}
+            label="CUE IN"
+            color="#00e676"
             value={cueIn}
-            max={d}
-            sliderAccent="#2e7d32"
-            inputAccent="border-green-400 focus:ring-green-300"
-            onSlider={v => { const n = clamp(v, 0, coRef.current - 0.01); ciRef.current = n; setCueIn(n); draw(); }}
-            onInput={v => { const n = clamp(v, 0, coRef.current - 0.01); ciRef.current = n; setCueIn(n); draw(); }}
-            onSet={() => setToPlayhead("cueIn")}
+            min={0}
+            max={cueOut - 0.1}
+            dur={dur}
+            onChange={(v) => { ciRef.current = v; setCueIn(v); }}
+            onSet={() => { const v = ctRef.current; ciRef.current = v; setCueIn(v); }}
           />
 
           {/* SEGUE */}
-          <CuePanel
-            color="#e65100" lightBg="#fff8f0" borderColor="#ffcc80"
-            label="SEGUE START" icon="↘"
-            timeDisplay={fmt(fadeStart)}
-            subLabel={`${segue.toFixed(2)}s fade duration`}
-            value={segue}
-            max={Math.max(0.01, cueOut - cueIn)}
-            sliderAccent="#e65100"
-            inputAccent="border-orange-400 focus:ring-orange-300"
-            onSlider={v => { const n = clamp(v, 0, coRef.current - ciRef.current); sgRef.current = n; setSegue(n); draw(); }}
-            onInput={v => { const n = clamp(v, 0, coRef.current - ciRef.current); sgRef.current = n; setSegue(n); draw(); }}
-            onSet={() => setToPlayhead("segue")}
-            isSegue
-          />
+          <div style={{ opacity: hasFade ? 1 : 0.4 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+              <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#ff9800" }} />
+              <span style={{ color: "#ff9800", fontSize: 11, fontWeight: 700, letterSpacing: 1 }}>SEGUE / FADE</span>
+              <label style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={hasFade}
+                  onChange={e => { setHasFade(e.target.checked); hasFadeRef.current = e.target.checked; }}
+                  style={{ accentColor: "#ff9800" }}
+                />
+                <span style={{ color: "#888", fontSize: 10 }}>Enable</span>
+              </label>
+            </div>
+            {hasFade && (
+              <>
+                <div style={{ color: "#ff9800", fontFamily: "monospace", fontSize: 20, fontWeight: 700, textAlign: "center", marginBottom: 4 }}>
+                  {fmt(fadeStart)}
+                </div>
+                <div style={{ color: "#666", fontSize: 10, textAlign: "center", marginBottom: 6 }}>
+                  Fade duration: {segue.toFixed(2)}s
+                </div>
+                <input
+                  type="range" min={0} max={Math.max(0, cueOut - cueIn)} step={0.01}
+                  value={segue}
+                  onChange={e => {
+                    const v = parseFloat(e.target.value);
+                    sgRef.current = v; setSegue(v);
+                  }}
+                  style={{ width: "100%", accentColor: "#ff9800" }}
+                />
+                <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
+                  <input
+                    type="number" value={segue.toFixed(2)} step="0.01" min="0"
+                    onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) { sgRef.current = v; setSegue(v); } }}
+                    style={numInputStyle("#ff9800")}
+                  />
+                  <button
+                    onClick={() => { const fs = ctRef.current; const newSg = Math.max(0, coRef.current - fs); sgRef.current = newSg; setSegue(newSg); }}
+                    style={setButtonStyle("#ff9800")}
+                    title="Set segue at playhead"
+                  >
+                    ◉ Set
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
 
           {/* CUE OUT */}
           <CuePanel
-            color="#c62828" lightBg="#fff5f5" borderColor="#ef9a9a"
-            label="CUE OUT" icon="■"
-            timeDisplay={fmt(cueOut)}
+            label="CUE OUT"
+            color="#ff1744"
             value={cueOut}
-            max={d}
-            sliderAccent="#c62828"
-            inputAccent="border-red-400 focus:ring-red-300"
-            onSlider={v => { const n = clamp(v, ciRef.current + 0.01, d); coRef.current = n; setCueOut(n); sgRef.current = clamp(sgRef.current, 0, n - ciRef.current); setSegue(sgRef.current); draw(); }}
-            onInput={v => { const n = clamp(v, ciRef.current + 0.01, d); coRef.current = n; setCueOut(n); sgRef.current = clamp(sgRef.current, 0, n - ciRef.current); setSegue(sgRef.current); draw(); }}
-            onSet={() => setToPlayhead("cueOut")}
+            min={cueIn + 0.1}
+            max={dur}
+            dur={dur}
+            onChange={(v) => { coRef.current = v; setCueOut(v); }}
+            onSet={() => { const v = ctRef.current; coRef.current = v; setCueOut(v); }}
           />
         </div>
 
-        {/* ── BOTTOM STATUS + SAVE ── */}
+        {/* ── SAVE BAR ── */}
         <div style={{
-          background: "linear-gradient(to bottom, #e8ecf0, #dde2e8)",
-          borderTop: "1px solid #b8c0cc",
+          background: "#0d0d1a",
+          borderTop: "1px solid #2a2a45",
           padding: "10px 16px",
           display: "flex",
           alignItems: "center",
-          justifyContent: "space-between",
-          flexShrink: 0,
+          justifyContent: "flex-end",
+          gap: 10,
         }}>
-          <div style={{ display: "flex", gap: 20, fontSize: 12, color: "#546e7a", fontFamily: "monospace" }}>
-            <span>
-              <span style={{ color: "#2e7d32", fontWeight: 700 }}>{fmt(cueIn)}</span>
-              {" → "}
-              <span style={{ color: "#c62828", fontWeight: 700 }}>{fmt(cueOut)}</span>
-            </span>
-            <span>Active: <strong style={{ color: "#1a2535" }}>{fmt(cueOut - cueIn)}</strong></span>
-            <span>Segue: <strong style={{ color: "#e65100" }}>{segue.toFixed(2)}s</strong></span>
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => onOpenChange(false)}
-              style={btnStyle("#fff", "#b8c0cc", "#546e7a", "8px 20px")}>
-              Cancel
-            </button>
-            <button onClick={save}
-              style={{
-                padding: "7px 28px",
-                background: "linear-gradient(to bottom, #1e88e5, #1565c0)",
-                color: "#fff",
-                border: "1px solid #1565c0",
-                borderRadius: 5,
-                fontWeight: 700,
-                fontSize: 14,
-                cursor: "pointer",
-                boxShadow: "0 2px 4px rgba(21,101,192,0.3)",
-              }}>
-              Save Cue Points
-            </button>
-          </div>
+          <button
+            onClick={() => onOpenChange(false)}
+            style={{
+              background: "#222", border: "1px solid #444", color: "#aaa",
+              padding: "7px 20px", borderRadius: 5, cursor: "pointer", fontSize: 13,
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={save}
+            disabled={saving}
+            style={{
+              background: saving ? "#1a3a5a" : "#1565c0",
+              border: "1px solid #2a6aaa",
+              color: "#fff",
+              padding: "7px 28px",
+              borderRadius: 5,
+              cursor: saving ? "default" : "pointer",
+              fontSize: 13,
+              fontWeight: 700,
+            }}
+          >
+            {saving ? "Saving…" : "Save Cue Points"}
+          </button>
         </div>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// CuePanel sub-component
-// ─────────────────────────────────────────────────────────────────────────────
-function CuePanel({
-  color, lightBg, borderColor, label, icon,
-  timeDisplay, subLabel, value, max,
-  sliderAccent, inputAccent,
-  onSlider, onInput, onSet, isSegue,
-}: {
-  color: string; lightBg: string; borderColor: string;
-  label: string; icon: string;
-  timeDisplay: string; subLabel?: string;
-  value: number; max: number;
-  sliderAccent: string; inputAccent: string;
-  onSlider: (v: number) => void;
-  onInput: (v: number) => void;
-  onSet: () => void;
-  isSegue?: boolean;
-}) {
-  return (
-    <div style={{
-      padding: "14px 16px",
-      background: lightBg,
-      borderRight: `1px solid ${borderColor}`,
-    }}>
-      {/* header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-          <div style={{
-            width: 8, height: 8, borderRadius: "50%",
-            background: color,
-            boxShadow: `0 0 0 2px ${borderColor}`,
-          }}/>
-          <span style={{ fontSize: 11, fontWeight: 700, color, textTransform: "uppercase", letterSpacing: "0.07em" }}>
-            {icon} {label}
-          </span>
-        </div>
-        <button onClick={onSet}
-          style={{
-            padding: "3px 10px",
-            fontSize: 11,
-            fontWeight: 600,
-            background: "#fff",
-            color,
-            border: `1px solid ${borderColor}`,
-            borderRadius: 4,
-            cursor: "pointer",
-          }}>
-          ◉ Set
-        </button>
       </div>
-
-      {/* time display */}
-      <div style={{
-        fontFamily: "'Courier New', Courier, monospace",
-        fontSize: 24,
-        fontWeight: 700,
-        color,
-        marginBottom: 2,
-        letterSpacing: "0.02em",
-      }}>
-        {timeDisplay}
-      </div>
-      {subLabel && (
-        <div style={{ fontSize: 11, color: "#8d6e63", marginBottom: 6 }}>{subLabel}</div>
-      )}
-
-      {/* slider */}
-      <input
-        type="range"
-        min={0}
-        max={max}
-        step={0.01}
-        value={value}
-        onChange={e => onSlider(parseFloat(e.target.value))}
-        style={{ width: "100%", accentColor: sliderAccent, marginBottom: 8, marginTop: isSegue ? 6 : 2 }}
-      />
-
-      {/* numeric input */}
-      <NumField value={value} accent={inputAccent} onChange={onInput} />
     </div>
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Style helpers
-// ─────────────────────────────────────────────────────────────────────────────
-function btnStyle(bg: string, border: string, color: string, padding = "5px 12px"): React.CSSProperties {
+// ─── CuePanel sub-component ───────────────────────────────────────────────────
+function CuePanel({
+  label, color, value, min, max, dur,
+  onChange, onSet,
+}: {
+  label: string; color: string; value: number;
+  min: number; max: number; dur: number;
+  onChange: (v: number) => void; onSet: () => void;
+}) {
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <div style={{ width: 10, height: 10, borderRadius: "50%", background: color }} />
+        <span style={{ color, fontSize: 11, fontWeight: 700, letterSpacing: 1 }}>{label}</span>
+      </div>
+      <div style={{ color, fontFamily: "monospace", fontSize: 20, fontWeight: 700, textAlign: "center", marginBottom: 4 }}>
+        {fmt(value)}
+      </div>
+      <div style={{ color: "#666", fontSize: 10, textAlign: "center", marginBottom: 6 }}>
+        {dur > 0 ? `${((value / dur) * 100).toFixed(1)}% of track` : "—"}
+      </div>
+      <input
+        type="range" min={min} max={max || 1} step={0.01}
+        value={value}
+        onChange={e => onChange(parseFloat(e.target.value))}
+        style={{ width: "100%", accentColor: color }}
+      />
+      <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
+        <input
+          type="number" value={value.toFixed(2)} step="0.01" min={min}
+          onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) onChange(clamp(v, min, max || 9999)); }}
+          style={numInputStyle(color)}
+        />
+        <button onClick={onSet} style={setButtonStyle(color)} title={`Set ${label} at playhead`}>
+          ◉ Set
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── style helpers ────────────────────────────────────────────────────────────
+function btnStyle(bg: string, hoverBg: string): React.CSSProperties {
   return {
-    padding,
-    background: bg,
-    border: `1px solid ${border}`,
-    borderRadius: 4,
-    color,
-    fontSize: 12,
-    fontWeight: 600,
-    cursor: "pointer",
+    background: bg, border: "1px solid #444", color: "#fff",
+    padding: "4px 10px", borderRadius: 4, cursor: "pointer",
+    fontSize: 14, lineHeight: 1.4, minWidth: 32, textAlign: "center",
   };
 }
 
-const transportBtn: React.CSSProperties = {
-  width: 32,
-  height: 32,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  borderRadius: 5,
-  cursor: "pointer",
-  border: "1px solid #b8c0cc",
-};
-
-function jumpBtn(bg: string, border: string, color: string): React.CSSProperties {
+function numInputStyle(accentColor: string): React.CSSProperties {
   return {
-    padding: "5px 12px",
-    background: bg,
-    border: `1px solid ${border}`,
-    borderRadius: 4,
-    color,
-    fontSize: 12,
-    fontWeight: 700,
-    cursor: "pointer",
-    fontFamily: "monospace",
+    flex: 1, background: "#0a0a15", border: `1px solid ${accentColor}44`,
+    color: accentColor, fontFamily: "monospace", fontSize: 13,
+    padding: "4px 6px", borderRadius: 4, outline: "none", minWidth: 0,
+  };
+}
+
+function setButtonStyle(accentColor: string): React.CSSProperties {
+  return {
+    background: `${accentColor}22`, border: `1px solid ${accentColor}66`,
+    color: accentColor, fontFamily: "monospace", fontSize: 11,
+    padding: "4px 8px", borderRadius: 4, cursor: "pointer", whiteSpace: "nowrap",
   };
 }
