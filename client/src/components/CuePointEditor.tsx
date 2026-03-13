@@ -227,7 +227,7 @@ export default function CuePointEditor({ open, onOpenChange, trackId, trackTitle
     const canvas = canvasRef.current; if (!canvas) return;
     const ro = new ResizeObserver(() => {
       const w = Math.round(canvas.getBoundingClientRect().width);
-      if (w > 0 && canvas.width !== w) { canvas.width = w; canvas.height = 280; draw(); }
+      if (w > 0 && canvas.width !== w) { canvas.width = w; canvas.height = 220; draw(); }
     });
     ro.observe(canvas);
     return () => ro.disconnect();
@@ -401,7 +401,7 @@ export default function CuePointEditor({ open, onOpenChange, trackId, trackTitle
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[98vw] w-[1400px] p-0 bg-[#0d0d1f] border border-[#2a2a4a] shadow-2xl overflow-hidden" style={{top:"50%",transform:"translateY(-50%)"}}>
+      <DialogContent className="max-w-[98vw] w-[1400px] p-0 bg-[#0d0d1f] border border-[#2a2a4a] shadow-2xl overflow-y-auto max-h-[95vh]">
         <div className="flex flex-col">
 
           {/* Title + zoom */}
@@ -438,7 +438,7 @@ export default function CuePointEditor({ open, onOpenChange, trackId, trackTitle
           </div>
 
           {/* Waveform */}
-          <canvas ref={canvasRef} height={280} className="w-full block" style={{cursor:"crosshair",touchAction:"none",userSelect:"none"}}
+          <canvas ref={canvasRef} height={220} className="w-full block" style={{cursor:"crosshair",touchAction:"none",userSelect:"none"}}
             onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp} onWheel={onWheel}/>
 
           {/* Overview minimap */}
