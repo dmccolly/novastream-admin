@@ -1,0 +1,22 @@
+name: Deploy to DigitalOcean
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 137.184.12.217
+          username: root
+          password: ${{ secrets.DO_PASSWORD }}
+          script: |
+            cd /root/novastream-admin
+            git pull origin main
+            NODE_OPTIONS=--max-old-space-size=512 npm run build
+            pm2 restart novastream-admin
+          command_timeout: 10m
