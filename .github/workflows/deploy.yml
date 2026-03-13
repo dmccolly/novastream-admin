@@ -17,6 +17,6 @@ jobs:
           script: |
             cd /root/novastream-admin
             git pull origin main
-            NODE_OPTIONS=--max-old-space-size=512 npm run build
+            NODE_OPTIONS=--max-old-space-size=512 npm run build:all
             pm2 restart novastream-admin
           command_timeout: 10m
