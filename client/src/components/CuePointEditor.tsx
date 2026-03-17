@@ -621,6 +621,19 @@ export default function CuePointEditor({
     if (audioRef.current) audioRef.current.currentTime = t;
   }, []);
 
+  // ─── SPACEBAR PLAYBACK TOGGLE ─────────────────────────────────────────────
+  useEffect(() => {
+    if (!waveReady) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code === "Space" && !(e.target instanceof HTMLInputElement) && !(e.target instanceof HTMLTextAreaElement)) {
+        e.preventDefault();
+        togglePlay();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [waveReady, togglePlay]);
+
   // ─── ZOOM CONTROLS ───────────────────────────────────────────────────────
   const fitRegion = useCallback(() => {
     const d = durRef.current || 1;
@@ -810,7 +823,7 @@ export default function CuePointEditor({
           color: "#555", fontSize: 11, fontFamily: "monospace",
           borderTop: "1px solid #1a1a2e",
         }}>
-          Drag markers to adjust • Scroll to zoom • Click to seek
+          Drag markers to adjust • Scroll to zoom • Click to seek • Space to play/pause
         </div>
 
         {/* ── CUE POINT PANELS ── */}
