@@ -71,10 +71,13 @@ function initDb() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       clock_id INTEGER NOT NULL,
       position INTEGER NOT NULL,
-      category_id INTEGER NOT NULL, -- What to play (can be a subcategory)
-      duration_target INTEGER, -- Optional target duration in seconds
+      slot_type TEXT DEFAULT 'category',
+      category_id INTEGER, -- Nullable: NULL for track slots
+      track_id INTEGER,    -- Set for pinned track slots
+      duration_target INTEGER,
       FOREIGN KEY (clock_id) REFERENCES clocks(id) ON DELETE CASCADE,
-      FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
+      FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE,
+      FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE SET NULL
     );
 
     -- Schedule Grid (Weekly)
@@ -152,13 +155,43 @@ function initDb() {
     insertCat.run("ID", null, "id", "#64748b");
   }
   const clockItemCols = db.pragma("table_info(clock_items)");
-  if (!clockItemCols.some((col) => col.name === "slot_type")) {
-    console.log("[migration] Adding slot_type column to clock_items...");
-    db.exec("ALTER TABLE clock_items ADD COLUMN slot_type TEXT DEFAULT 'category'");
-  }
-  if (!clockItemCols.some((col) => col.name === "track_id")) {
-    console.log("[migration] Adding track_id column to clock_items...");
-    db.exec("ALTER TABLE clock_items ADD COLUMN track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL");
+  const catCol = clockItemCols.find((col) => col.name === "category_id");
+  const needsRebuild = catCol && catCol.notnull === 1;
+  if (needsRebuild) {
+    console.log("[migration] Rebuilding clock_items table to allow nullable category_id...");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS clock_items_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        clock_id INTEGER NOT NULL,
+        position INTEGER NOT NULL,
+        slot_type TEXT DEFAULT 'category',
+        category_id INTEGER,
+        track_id INTEGER,
+        duration_target INTEGER,
+        FOREIGN KEY (clock_id) REFERENCES clocks(id) ON DELETE CASCADE,
+        FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE,
+        FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE SET NULL
+      );
+      INSERT INTO clock_items_new (id, clock_id, position, slot_type, category_id, track_id, duration_target)
+        SELECT id, clock_id, position,
+          COALESCE(slot_type, 'category'),
+          category_id,
+          NULL,
+          duration_target
+        FROM clock_items;
+      DROP TABLE clock_items;
+      ALTER TABLE clock_items_new RENAME TO clock_items;
+    `);
+    console.log("[migration] clock_items rebuilt successfully");
+  } else {
+    if (!clockItemCols.some((col) => col.name === "slot_type")) {
+      console.log("[migration] Adding slot_type column to clock_items...");
+      db.exec("ALTER TABLE clock_items ADD COLUMN slot_type TEXT DEFAULT 'category'");
+    }
+    if (!clockItemCols.some((col) => col.name === "track_id")) {
+      console.log("[migration] Adding track_id column to clock_items...");
+      db.exec("ALTER TABLE clock_items ADD COLUMN track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL");
+    }
   }
   const clockCols = db.pragma("table_info(clocks)");
   if (!clockCols.some((col) => col.name === "mode")) {
