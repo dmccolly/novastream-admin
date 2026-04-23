@@ -397,32 +397,45 @@ export default function Scheduler() {
             </div>
             <ScrollArea className="flex-1 border rounded-md bg-muted/10 p-4">
               {previewLog.length > 0 ? (
-                <div className="space-y-2 font-mono text-sm">
+                <div className="space-y-1 font-mono text-sm">
                   {previewLog.map((entry, i) => (
-                    <div key={i} className="flex gap-4 border-b border-border/50 pb-1">
-                      <div className="w-16 text-muted-foreground">
+                    <div
+                      key={i}
+                      className={`flex gap-4 border-b border-border/50 pb-1 ${
+                        entry.slot_type === 'track' ? 'bg-purple-950/20 rounded px-1' : ''
+                      }`}
+                    >
+                      <div className="w-16 text-muted-foreground flex-shrink-0">
                         +{formatDuration(entry.time_offset)}
                       </div>
-                      <div className="flex-1">
+                      <div className="flex-1 min-w-0">
                         {entry.track ? (
                           <>
-                            <span className="font-bold text-primary">{entry.track.title}</span>
-                            <span className="text-muted-foreground"> - {entry.track.artist}</span>
+                            {entry.slot_type === 'track' && (
+                              <span className="text-purple-400 mr-1" title="Pinned track">📌</span>
+                            )}
+                            <span className={`font-bold ${
+                              entry.slot_type === 'track' ? 'text-purple-200' : 'text-primary'
+                            }`}>{entry.track.title}</span>
+                            <span className="text-muted-foreground"> — {entry.track.artist}</span>
                             <span className="text-xs text-muted-foreground ml-2">({formatDuration(entry.track.duration)})</span>
                           </>
                         ) : (
                           <span className="text-destructive italic">{entry.message}</span>
                         )}
                       </div>
-                      <div className="w-24 text-right text-xs text-muted-foreground">
+                      <div className="w-28 text-right text-xs text-muted-foreground flex-shrink-0">
                         {entry.track?.category}
                       </div>
                     </div>
                   ))}
+                  <div className="pt-2 text-xs text-muted-foreground text-right">
+                    Total runtime: {formatDuration(previewLog.reduce((sum: number, e: any) => sum + (e.track?.duration || 0), 0))}
+                  </div>
                 </div>
               ) : (
                 <div className="text-center text-muted-foreground py-10">
-                  Click Generate to see a preview log
+                  {previewLoading ? 'Generating preview...' : 'Select a clock and click Regenerate'}
                 </div>
               )}
             </ScrollArea>

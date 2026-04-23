@@ -1049,12 +1049,18 @@ export function registerRoutes(app: Express): Server {
     const { clock_id } = req.body;
     
     try {
-      // 1. Get Clock Items
+      // 1. Get Clock Items — LEFT JOIN so pinned track slots (no category_id) are included
       const items = db.prepare(`
-        SELECT ci.*, c.name as category_name 
-        FROM clock_items ci 
-        JOIN categories c ON ci.category_id = c.id 
-        WHERE ci.clock_id = ? 
+        SELECT ci.*,
+               c.name as category_name,
+               t.title as pinned_title,
+               t.artist as pinned_artist,
+               t.duration as pinned_duration,
+               t.status as pinned_status
+        FROM clock_items ci
+        LEFT JOIN categories c ON ci.category_id = c.id
+        LEFT JOIN tracks t ON ci.track_id = t.id
+        WHERE ci.clock_id = ?
         ORDER BY ci.position
       `).all(clock_id) as any[];
 
@@ -1064,40 +1070,68 @@ export function registerRoutes(app: Express): Server {
 
       // 2. Generate Log
       const log: any[] = [];
-      let currentTime = 0; // Relative seconds from start of hour
+      let currentTime = 0;
 
       for (const item of items) {
-        // Find a track for this category
-        // Simple logic: Random track from category (or subcategory)
-        // TODO: Implement full rules engine (separation, etc.)
-        
-        const track = db.prepare(`
-          SELECT * FROM tracks 
-          WHERE (category_id = ? OR subcategory_id = ?) 
-          AND status = 'ready'
-          ORDER BY RANDOM() 
-          LIMIT 1
-        `).get(item.category_id, item.category_id) as any;
+        const slotType = item.slot_type || 'category';
 
-        if (track) {
-          log.push({
-            position: item.position,
-            time_offset: currentTime,
-            track: {
-              title: track.title,
-              artist: track.artist,
-              duration: track.duration,
-              category: item.category_name
-            }
-          });
-          currentTime += (track.duration || 180); // Default 3 mins if unknown
+        if (slotType === 'track') {
+          // Pinned track slot — use the exact track
+          if (item.pinned_title) {
+            log.push({
+              position: item.position,
+              time_offset: currentTime,
+              slot_type: 'track',
+              track: {
+                title: item.pinned_title,
+                artist: item.pinned_artist || 'Unknown Artist',
+                duration: item.pinned_duration,
+                category: '📌 Pinned'
+              }
+            });
+            currentTime += (item.pinned_duration || 180);
+          } else {
+            log.push({
+              position: item.position,
+              time_offset: currentTime,
+              slot_type: 'track',
+              track: null,
+              message: 'Pinned track not found (may have been deleted)'
+            });
+          }
         } else {
-          log.push({
-            position: item.position,
-            time_offset: currentTime,
-            track: null,
-            message: `No track found for category: ${item.category_name}`
-          });
+          // Category slot — pick a random ready track from that category
+          const track = db.prepare(`
+            SELECT * FROM tracks
+            WHERE (category_id = ? OR subcategory_id = ?)
+            AND status = 'ready'
+            ORDER BY RANDOM()
+            LIMIT 1
+          `).get(item.category_id, item.category_id) as any;
+
+          if (track) {
+            log.push({
+              position: item.position,
+              time_offset: currentTime,
+              slot_type: 'category',
+              track: {
+                title: track.title,
+                artist: track.artist,
+                duration: track.duration,
+                category: item.category_name || 'Unknown Category'
+              }
+            });
+            currentTime += (track.duration || 180);
+          } else {
+            log.push({
+              position: item.position,
+              time_offset: currentTime,
+              slot_type: 'category',
+              track: null,
+              message: `No ready track found for category: ${item.category_name || '(unknown)'}`
+            });
+            currentTime += 180;
+          }
         }
       }
 
