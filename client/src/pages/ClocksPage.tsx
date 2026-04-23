@@ -369,7 +369,7 @@ export default function ClocksPage() {
                       className="h-7 text-xs pl-7"
                     />
                   </div>
-                  <ScrollArea className="flex-1 pr-1">
+                  <div className="flex-1 overflow-y-auto min-h-0 pr-1">
                     {trackSearchLoading && (
                       <div className="text-xs text-muted-foreground text-center py-4">Searching...</div>
                     )}
@@ -391,7 +391,7 @@ export default function ClocksPage() {
                         <div className="text-xs text-muted-foreground truncate">{track.artist} · {formatDuration(track.duration)}</div>
                       </div>
                     ))}
-                  </ScrollArea>
+                  </div>
                 </>
               )}
             </CardContent>
