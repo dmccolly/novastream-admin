@@ -901,12 +901,25 @@ export function registerRoutes(app: Express): Server {
   });
 
   app.post("/api/clocks", (req, res) => {
-    const { name, color } = req.body;
+    const { name, color, mode } = req.body;
     try {
-      const result = db.prepare("INSERT INTO clocks (name, color) VALUES (?, ?)").run(name, color);
-      res.json({ id: result.lastInsertRowid, name, color });
+      const result = db.prepare("INSERT INTO clocks (name, color, mode) VALUES (?, ?, ?)").run(name, color, mode || 'loop');
+      res.json({ id: result.lastInsertRowid, name, color, mode: mode || 'loop' });
     } catch (error) {
       res.status(500).json({ error: "Failed to create clock" });
+    }
+  });
+
+  app.put("/api/clocks/:id", (req, res) => {
+    const { id } = req.params;
+    const { name, color, mode } = req.body;
+    try {
+      db.prepare("UPDATE clocks SET name = COALESCE(?, name), color = COALESCE(?, color), mode = COALESCE(?, mode) WHERE id = ?")
+        .run(name || null, color || null, mode || null, id);
+      const updated = db.prepare("SELECT * FROM clocks WHERE id = ?").get(id);
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to update clock" });
     }
   });
 
@@ -917,10 +930,13 @@ export function registerRoutes(app: Express): Server {
       if (!clock) return res.status(404).json({ error: "Clock not found" });
       
       const items = db.prepare(`
-        SELECT ci.*, c.name as category_name, c.color as category_color 
-        FROM clock_items ci 
-        JOIN categories c ON ci.category_id = c.id 
-        WHERE ci.clock_id = ? 
+        SELECT ci.*,
+          c.name as category_name, c.color as category_color,
+          t.title as track_title, t.artist as track_artist, t.duration as track_duration
+        FROM clock_items ci
+        LEFT JOIN categories c ON ci.category_id = c.id
+        LEFT JOIN tracks t ON ci.track_id = t.id
+        WHERE ci.clock_id = ?
         ORDER BY ci.position
       `).all(id);
       
@@ -932,15 +948,20 @@ export function registerRoutes(app: Express): Server {
 
   app.post("/api/clocks/:id/items", (req, res) => {
     const { id } = req.params;
-    const { items } = req.body; // Array of { category_id, duration_target }
+    const { items } = req.body; // Array of { slot_type, category_id, track_id, duration_target }
     
-    const insert = db.prepare("INSERT INTO clock_items (clock_id, position, category_id, duration_target) VALUES (?, ?, ?, ?)");
+    const insert = db.prepare(
+      "INSERT INTO clock_items (clock_id, position, slot_type, category_id, track_id, duration_target) VALUES (?, ?, ?, ?, ?, ?)"
+    );
     const deleteOld = db.prepare("DELETE FROM clock_items WHERE clock_id = ?");
 
     const transaction = db.transaction((clockId, newItems) => {
       deleteOld.run(clockId);
       newItems.forEach((item: any, index: number) => {
-        insert.run(clockId, index, item.category_id, item.duration_target || null);
+        const slotType = item.slot_type || 'category';
+        const categoryId = slotType === 'category' ? (item.category_id || null) : null;
+        const trackId = slotType === 'track' ? (item.track_id || null) : null;
+        insert.run(clockId, index, slotType, categoryId, trackId, item.duration_target || null);
       });
     });
 
@@ -1093,47 +1114,118 @@ export function registerRoutes(app: Express): Server {
   
   app.get("/api/stream/next-track", (req, res) => {
     try {
-      // Get the first clock (TODO: support schedule grid and master clock mode)
-      const clock = db.prepare("SELECT id FROM clocks ORDER BY id LIMIT 1").get() as any;
+      // --- Determine which clock to use ---
+      // 1. Check if there's a currently-running sequential clock that hasn't finished
+      let state = db.prepare("SELECT * FROM playback_state WHERE id = 1").get() as any;
+
+      // 2. Look up the scheduled clock for the current day/hour
+      const now = new Date();
+      const dayOfWeek = now.getDay(); // 0=Sunday
+      const hour = now.getHours();
+      const scheduledEntry = db.prepare(
+        "SELECT sg.clock_id FROM schedule_grid sg WHERE sg.day_of_week = ? AND sg.hour = ?"
+      ).get(dayOfWeek, hour) as any;
+
+      // 3. Resolve the active clock
+      // If a sequential clock is running and hasn't finished, keep using it
+      let activeClockId: number | null = null;
+      if (state && state.current_clock_id) {
+        const runningClock = db.prepare("SELECT * FROM clocks WHERE id = ?").get(state.current_clock_id) as any;
+        if (runningClock && runningClock.mode === 'sequential') {
+          // Check if it has finished (position past end)
+          const totalItems = (db.prepare("SELECT COUNT(*) as cnt FROM clock_items WHERE clock_id = ?").get(state.current_clock_id) as any).cnt;
+          if (state.current_position < totalItems) {
+            // Still playing — keep this clock
+            activeClockId = state.current_clock_id;
+          }
+          // else: sequential clock finished, fall through to scheduled clock
+        }
+      }
+
+      // Use scheduled clock if no sequential override
+      if (!activeClockId) {
+        if (scheduledEntry) {
+          activeClockId = scheduledEntry.clock_id;
+        } else {
+          // Fallback: first clock in DB
+          const fallback = db.prepare("SELECT id FROM clocks ORDER BY id LIMIT 1").get() as any;
+          if (!fallback) return res.json({ track: null, error: "No clock configured" });
+          activeClockId = fallback.id;
+        }
+      }
+
+      const clock = db.prepare("SELECT * FROM clocks WHERE id = ?").get(activeClockId) as any;
       if (!clock) return res.json({ track: null, error: "No clock configured" });
-      
+
       // Get clock items
       const clockItems = db.prepare(`
-        SELECT ci.*, c.name as category_name 
-        FROM clock_items ci 
-        JOIN categories c ON ci.category_id = c.id 
-        WHERE ci.clock_id = ? 
+        SELECT ci.*, c.name as category_name,
+          t.title as track_title, t.artist as track_artist,
+          t.filepath as track_filepath, t.duration as track_duration,
+          t.cue_in as track_cue_in, t.cue_out as track_cue_out
+        FROM clock_items ci
+        LEFT JOIN categories c ON ci.category_id = c.id
+        LEFT JOIN tracks t ON ci.track_id = t.id
+        WHERE ci.clock_id = ?
         ORDER BY ci.position
       `).all(clock.id) as any[];
-      
+
       if (clockItems.length === 0) return res.json({ track: null, error: "No items in clock" });
-      
-      // Get or initialize playback state from database
-      let state = db.prepare("SELECT * FROM playback_state WHERE id = 1").get() as any;
+
+      // Get or initialize playback state
       if (!state) {
-        // Initialize state if it doesn't exist
         db.prepare("INSERT INTO playback_state (id, current_clock_id, current_position) VALUES (1, ?, 0)")
           .run(clock.id);
         state = { id: 1, current_clock_id: clock.id, current_position: 0 };
       }
-      
-      // Reset position if clock changed
+
+      // Reset position when switching to a different clock
       if (state.current_clock_id !== clock.id) {
         db.prepare("UPDATE playback_state SET current_clock_id = ?, current_position = 0, last_updated = datetime('now') WHERE id = 1")
           .run(clock.id);
         state.current_position = 0;
         state.current_clock_id = clock.id;
       }
-      
-      // Get the current clock item based on position (cycle through sequentially)
-      const currentPosition = state.current_position % clockItems.length;
+
+      // Determine current position
+      // Sequential clocks: play straight through (no modulo wrap)
+      // Loop clocks: wrap around with modulo
+      let currentPosition: number;
+      let nextPosition: number;
+      if (clock.mode === 'sequential') {
+        currentPosition = state.current_position; // already bounds-checked above
+        nextPosition = state.current_position + 1; // will exceed length when done — that's intentional
+      } else {
+        currentPosition = state.current_position % clockItems.length;
+        nextPosition = (state.current_position + 1) % clockItems.length;
+      }
+
       const currentItem = clockItems[currentPosition];
-      
-      // Calculate next position and update database
-      const nextPosition = (state.current_position + 1) % clockItems.length;
+      if (!currentItem) return res.json({ track: null, error: "Clock position out of bounds" });
+
+      // Advance position in DB
       db.prepare("UPDATE playback_state SET current_position = ?, last_updated = datetime('now') WHERE id = 1")
         .run(nextPosition);
       
+      // --- TRACK SLOT: play the specific pinned track directly ---
+      if (currentItem.slot_type === 'track' && currentItem.track_id) {
+        const pinnedTrack = db.prepare("SELECT * FROM tracks WHERE id = ?").get(currentItem.track_id) as any;
+        if (!pinnedTrack) return res.json({ track: null, error: "Pinned track not found" });
+        
+        // Log to play history
+        db.prepare(`
+          INSERT INTO play_history (track_id, title, artist, category_id, played_at)
+          VALUES (?, ?, ?, ?, datetime('now'))
+        `).run(pinnedTrack.id, pinnedTrack.title, pinnedTrack.artist, pinnedTrack.category_id);
+        
+        let calculatedCueOut = pinnedTrack.cue_out;
+        if (!calculatedCueOut && pinnedTrack.duration && pinnedTrack.duration > 3) {
+          calculatedCueOut = pinnedTrack.duration - 0.5;
+        }
+        return res.json({ track: { ...pinnedTrack, cue_out: calculatedCueOut }, clock_position: currentPosition, category: 'Pinned Track' });
+      }
+
+      // --- CATEGORY SLOT: pick a track from the category ---
       // Get separation rules for this category (default 120 minutes = 2 hours)
       const rule = db.prepare("SELECT * FROM rules WHERE category_id = ?").get(currentItem.category_id) as any;
       const minSeparationMinutes = rule?.min_separation || 120;

@@ -160,6 +160,16 @@ function initDb() {
     console.log("[migration] Adding track_id column to clock_items...");
     db.exec("ALTER TABLE clock_items ADD COLUMN track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL");
   }
+  const clockCols = db.pragma("table_info(clocks)");
+  if (!clockCols.some((col) => col.name === "mode")) {
+    console.log("[migration] Adding mode column to clocks...");
+    db.exec("ALTER TABLE clocks ADD COLUMN mode TEXT DEFAULT 'loop'");
+  }
+  const trackCols2 = db.pragma("table_info(tracks)");
+  if (!trackCols2.some((col) => col.name === "tags")) {
+    console.log("[migration] Added tags column to tracks table");
+    db.exec("ALTER TABLE tracks ADD COLUMN tags TEXT DEFAULT ''");
+  }
   console.log("Database initialized at", dbPath);
 }
 db.exec(`
@@ -1056,12 +1066,23 @@ function registerRoutes(app2) {
     }
   });
   app2.post("/api/clocks", (req, res) => {
-    const { name, color } = req.body;
+    const { name, color, mode } = req.body;
     try {
-      const result = db.prepare("INSERT INTO clocks (name, color) VALUES (?, ?)").run(name, color);
-      res.json({ id: result.lastInsertRowid, name, color });
+      const result = db.prepare("INSERT INTO clocks (name, color, mode) VALUES (?, ?, ?)").run(name, color, mode || "loop");
+      res.json({ id: result.lastInsertRowid, name, color, mode: mode || "loop" });
     } catch (error) {
       res.status(500).json({ error: "Failed to create clock" });
+    }
+  });
+  app2.put("/api/clocks/:id", (req, res) => {
+    const { id } = req.params;
+    const { name, color, mode } = req.body;
+    try {
+      db.prepare("UPDATE clocks SET name = COALESCE(?, name), color = COALESCE(?, color), mode = COALESCE(?, mode) WHERE id = ?").run(name || null, color || null, mode || null, id);
+      const updated = db.prepare("SELECT * FROM clocks WHERE id = ?").get(id);
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to update clock" });
     }
   });
   app2.get("/api/clocks/:id", (req, res) => {
@@ -1218,7 +1239,33 @@ function registerRoutes(app2) {
   });
   app2.get("/api/stream/next-track", (req, res) => {
     try {
-      const clock = db.prepare("SELECT id FROM clocks ORDER BY id LIMIT 1").get();
+      let state = db.prepare("SELECT * FROM playback_state WHERE id = 1").get();
+      const now = /* @__PURE__ */ new Date();
+      const dayOfWeek = now.getDay();
+      const hour = now.getHours();
+      const scheduledEntry = db.prepare(
+        "SELECT sg.clock_id FROM schedule_grid sg WHERE sg.day_of_week = ? AND sg.hour = ?"
+      ).get(dayOfWeek, hour);
+      let activeClockId = null;
+      if (state && state.current_clock_id) {
+        const runningClock = db.prepare("SELECT * FROM clocks WHERE id = ?").get(state.current_clock_id);
+        if (runningClock && runningClock.mode === "sequential") {
+          const totalItems = db.prepare("SELECT COUNT(*) as cnt FROM clock_items WHERE clock_id = ?").get(state.current_clock_id).cnt;
+          if (state.current_position < totalItems) {
+            activeClockId = state.current_clock_id;
+          }
+        }
+      }
+      if (!activeClockId) {
+        if (scheduledEntry) {
+          activeClockId = scheduledEntry.clock_id;
+        } else {
+          const fallback = db.prepare("SELECT id FROM clocks ORDER BY id LIMIT 1").get();
+          if (!fallback) return res.json({ track: null, error: "No clock configured" });
+          activeClockId = fallback.id;
+        }
+      }
+      const clock = db.prepare("SELECT * FROM clocks WHERE id = ?").get(activeClockId);
       if (!clock) return res.json({ track: null, error: "No clock configured" });
       const clockItems = db.prepare(`
         SELECT ci.*, c.name as category_name,
@@ -1232,7 +1279,6 @@ function registerRoutes(app2) {
         ORDER BY ci.position
       `).all(clock.id);
       if (clockItems.length === 0) return res.json({ track: null, error: "No items in clock" });
-      let state = db.prepare("SELECT * FROM playback_state WHERE id = 1").get();
       if (!state) {
         db.prepare("INSERT INTO playback_state (id, current_clock_id, current_position) VALUES (1, ?, 0)").run(clock.id);
         state = { id: 1, current_clock_id: clock.id, current_position: 0 };
@@ -1242,9 +1288,17 @@ function registerRoutes(app2) {
         state.current_position = 0;
         state.current_clock_id = clock.id;
       }
-      const currentPosition = state.current_position % clockItems.length;
+      let currentPosition;
+      let nextPosition;
+      if (clock.mode === "sequential") {
+        currentPosition = state.current_position;
+        nextPosition = state.current_position + 1;
+      } else {
+        currentPosition = state.current_position % clockItems.length;
+        nextPosition = (state.current_position + 1) % clockItems.length;
+      }
       const currentItem = clockItems[currentPosition];
-      const nextPosition = (state.current_position + 1) % clockItems.length;
+      if (!currentItem) return res.json({ track: null, error: "Clock position out of bounds" });
       db.prepare("UPDATE playback_state SET current_position = ?, last_updated = datetime('now') WHERE id = 1").run(nextPosition);
       if (currentItem.slot_type === "track" && currentItem.track_id) {
         const pinnedTrack = db.prepare("SELECT * FROM tracks WHERE id = ?").get(currentItem.track_id);

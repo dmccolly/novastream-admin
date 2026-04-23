@@ -236,8 +236,12 @@ export const clocksApi = {
     const response = await api.get(`/clocks/${id}`);
     return response.data;
   },
-  create: async (data: { name: string; color: string }) => {
+  create: async (data: { name: string; color: string; mode?: string }) => {
     const response = await api.post('/clocks', data);
+    return response.data;
+  },
+  update: async (id: number, data: { name?: string; color?: string; mode?: string }) => {
+    const response = await api.put(`/clocks/${id}`, data);
     return response.data;
   },
   updateItems: async (id: number, items: any[]) => {

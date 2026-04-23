@@ -167,6 +167,31 @@ export function initDb() {
     insertCat.run("ID", null, "id", "#64748b"); // Slate
   }
 
+  // Migration: Add slot_type and track_id columns to clock_items
+  const clockItemCols = db.pragma("table_info(clock_items)");
+  if (!clockItemCols.some((col: any) => col.name === "slot_type")) {
+    console.log("[migration] Adding slot_type column to clock_items...");
+    db.exec("ALTER TABLE clock_items ADD COLUMN slot_type TEXT DEFAULT 'category'");
+  }
+  if (!clockItemCols.some((col: any) => col.name === "track_id")) {
+    console.log("[migration] Adding track_id column to clock_items...");
+    db.exec("ALTER TABLE clock_items ADD COLUMN track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL");
+  }
+
+  // Migration: Add mode column to clocks (loop = default, sequential = run-to-completion)
+  const clockCols = db.pragma("table_info(clocks)");
+  if (!clockCols.some((col: any) => col.name === "mode")) {
+    console.log("[migration] Adding mode column to clocks...");
+    db.exec("ALTER TABLE clocks ADD COLUMN mode TEXT DEFAULT 'loop'");
+  }
+
+  // Migration: Add tags column to tracks
+  const trackCols2 = db.pragma("table_info(tracks)");
+  if (!trackCols2.some((col: any) => col.name === "tags")) {
+    console.log("[migration] Added tags column to tracks table");
+    db.exec("ALTER TABLE tracks ADD COLUMN tags TEXT DEFAULT ''");
+  }
+
   console.log("Database initialized at", dbPath);
 }
 
