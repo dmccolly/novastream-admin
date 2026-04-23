@@ -71,10 +71,13 @@ function initDb() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       clock_id INTEGER NOT NULL,
       position INTEGER NOT NULL,
-      category_id INTEGER NOT NULL, -- What to play (can be a subcategory)
-      duration_target INTEGER, -- Optional target duration in seconds
+      slot_type TEXT DEFAULT 'category',
+      category_id INTEGER, -- Nullable: NULL for track slots
+      track_id INTEGER,    -- Set for pinned track slots
+      duration_target INTEGER,
       FOREIGN KEY (clock_id) REFERENCES clocks(id) ON DELETE CASCADE,
-      FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
+      FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE,
+      FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE SET NULL
     );
 
     -- Schedule Grid (Weekly)
@@ -150,6 +153,55 @@ function initDb() {
     insertCat.run("News", contentId, "content", "#22d3ee");
     insertCat.run("Segments", contentId, "content", "#22d3ee");
     insertCat.run("ID", null, "id", "#64748b");
+  }
+  const clockItemCols = db.pragma("table_info(clock_items)");
+  const catCol = clockItemCols.find((col) => col.name === "category_id");
+  const needsRebuild = catCol && catCol.notnull === 1;
+  if (needsRebuild) {
+    console.log("[migration] Rebuilding clock_items table to allow nullable category_id...");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS clock_items_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        clock_id INTEGER NOT NULL,
+        position INTEGER NOT NULL,
+        slot_type TEXT DEFAULT 'category',
+        category_id INTEGER,
+        track_id INTEGER,
+        duration_target INTEGER,
+        FOREIGN KEY (clock_id) REFERENCES clocks(id) ON DELETE CASCADE,
+        FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE,
+        FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE SET NULL
+      );
+      INSERT INTO clock_items_new (id, clock_id, position, slot_type, category_id, track_id, duration_target)
+        SELECT id, clock_id, position,
+          COALESCE(slot_type, 'category'),
+          category_id,
+          NULL,
+          duration_target
+        FROM clock_items;
+      DROP TABLE clock_items;
+      ALTER TABLE clock_items_new RENAME TO clock_items;
+    `);
+    console.log("[migration] clock_items rebuilt successfully");
+  } else {
+    if (!clockItemCols.some((col) => col.name === "slot_type")) {
+      console.log("[migration] Adding slot_type column to clock_items...");
+      db.exec("ALTER TABLE clock_items ADD COLUMN slot_type TEXT DEFAULT 'category'");
+    }
+    if (!clockItemCols.some((col) => col.name === "track_id")) {
+      console.log("[migration] Adding track_id column to clock_items...");
+      db.exec("ALTER TABLE clock_items ADD COLUMN track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL");
+    }
+  }
+  const clockCols = db.pragma("table_info(clocks)");
+  if (!clockCols.some((col) => col.name === "mode")) {
+    console.log("[migration] Adding mode column to clocks...");
+    db.exec("ALTER TABLE clocks ADD COLUMN mode TEXT DEFAULT 'loop'");
+  }
+  const trackCols2 = db.pragma("table_info(tracks)");
+  if (!trackCols2.some((col) => col.name === "tags")) {
+    console.log("[migration] Added tags column to tracks table");
+    db.exec("ALTER TABLE tracks ADD COLUMN tags TEXT DEFAULT ''");
   }
   console.log("Database initialized at", dbPath);
 }
@@ -1047,12 +1099,23 @@ function registerRoutes(app2) {
     }
   });
   app2.post("/api/clocks", (req, res) => {
-    const { name, color } = req.body;
+    const { name, color, mode } = req.body;
     try {
-      const result = db.prepare("INSERT INTO clocks (name, color) VALUES (?, ?)").run(name, color);
-      res.json({ id: result.lastInsertRowid, name, color });
+      const result = db.prepare("INSERT INTO clocks (name, color, mode) VALUES (?, ?, ?)").run(name, color, mode || "loop");
+      res.json({ id: result.lastInsertRowid, name, color, mode: mode || "loop" });
     } catch (error) {
       res.status(500).json({ error: "Failed to create clock" });
+    }
+  });
+  app2.put("/api/clocks/:id", (req, res) => {
+    const { id } = req.params;
+    const { name, color, mode } = req.body;
+    try {
+      db.prepare("UPDATE clocks SET name = COALESCE(?, name), color = COALESCE(?, color), mode = COALESCE(?, mode) WHERE id = ?").run(name || null, color || null, mode || null, id);
+      const updated = db.prepare("SELECT * FROM clocks WHERE id = ?").get(id);
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to update clock" });
     }
   });
   app2.get("/api/clocks/:id", (req, res) => {
@@ -1061,10 +1124,13 @@ function registerRoutes(app2) {
       const clock = db.prepare("SELECT * FROM clocks WHERE id = ?").get(id);
       if (!clock) return res.status(404).json({ error: "Clock not found" });
       const items = db.prepare(`
-        SELECT ci.*, c.name as category_name, c.color as category_color 
-        FROM clock_items ci 
-        JOIN categories c ON ci.category_id = c.id 
-        WHERE ci.clock_id = ? 
+        SELECT ci.*,
+          c.name as category_name, c.color as category_color,
+          t.title as track_title, t.artist as track_artist, t.duration as track_duration
+        FROM clock_items ci
+        LEFT JOIN categories c ON ci.category_id = c.id
+        LEFT JOIN tracks t ON ci.track_id = t.id
+        WHERE ci.clock_id = ?
         ORDER BY ci.position
       `).all(id);
       res.json({ ...clock, items });
@@ -1075,12 +1141,17 @@ function registerRoutes(app2) {
   app2.post("/api/clocks/:id/items", (req, res) => {
     const { id } = req.params;
     const { items } = req.body;
-    const insert = db.prepare("INSERT INTO clock_items (clock_id, position, category_id, duration_target) VALUES (?, ?, ?, ?)");
+    const insert = db.prepare(
+      "INSERT INTO clock_items (clock_id, position, slot_type, category_id, track_id, duration_target) VALUES (?, ?, ?, ?, ?, ?)"
+    );
     const deleteOld = db.prepare("DELETE FROM clock_items WHERE clock_id = ?");
     const transaction = db.transaction((clockId, newItems) => {
       deleteOld.run(clockId);
       newItems.forEach((item, index) => {
-        insert.run(clockId, index, item.category_id, item.duration_target || null);
+        const slotType = item.slot_type || "category";
+        const categoryId = slotType === "category" ? item.category_id || null : null;
+        const trackId = slotType === "track" ? item.track_id || null : null;
+        insert.run(clockId, index, slotType, categoryId, trackId, item.duration_target || null);
       });
     });
     try {
@@ -1150,47 +1221,116 @@ function registerRoutes(app2) {
     }
   });
   app2.post("/api/schedule/preview", (req, res) => {
-    const { clock_id } = req.body;
+    const { clock_id, day_of_week, start_hour, hours = 4 } = req.body;
     try {
-      const items = db.prepare(`
-        SELECT ci.*, c.name as category_name 
-        FROM clock_items ci 
-        JOIN categories c ON ci.category_id = c.id 
-        WHERE ci.clock_id = ? 
+      const getClockItems = (cid) => db.prepare(`
+        SELECT ci.*,
+               c.name as category_name,
+               t.title as pinned_title,
+               t.artist as pinned_artist,
+               t.duration as pinned_duration
+        FROM clock_items ci
+        LEFT JOIN categories c ON ci.category_id = c.id
+        LEFT JOIN tracks t ON ci.track_id = t.id
+        WHERE ci.clock_id = ?
         ORDER BY ci.position
-      `).all(clock_id);
-      if (items.length === 0) {
-        return res.json({ log: [] });
-      }
+      `).all(cid);
+      const pickTrack = (catId) => db.prepare(`
+        SELECT id, title, artist, duration, category_id
+        FROM tracks
+        WHERE (category_id = ? OR subcategory_id = ?)
+        AND status = 'ready'
+        ORDER BY RANDOM()
+        LIMIT 1
+      `).get(catId, catId);
+      const getClock = (cid) => db.prepare(
+        "SELECT * FROM clocks WHERE id = ?"
+      ).get(cid);
+      const getScheduledClock = (dow, hr) => db.prepare(
+        "SELECT clock_id FROM schedule_grid WHERE day_of_week = ? AND hour = ?"
+      ).get(dow, hr);
       const log = [];
-      let currentTime = 0;
-      for (const item of items) {
-        const track = db.prepare(`
-          SELECT * FROM tracks 
-          WHERE (category_id = ? OR subcategory_id = ?) 
-          AND status = 'ready'
-          ORDER BY RANDOM() 
-          LIMIT 1
-        `).get(item.category_id, item.category_id);
-        if (track) {
-          log.push({
-            position: item.position,
-            time_offset: currentTime,
-            track: {
-              title: track.title,
-              artist: track.artist,
-              duration: track.duration,
-              category: item.category_name
+      let absoluteTime = 0;
+      const maxSeconds = (hours || 4) * 3600;
+      let currentDow;
+      let currentHour;
+      if (day_of_week !== void 0 && start_hour !== void 0) {
+        currentDow = day_of_week;
+        currentHour = start_hour;
+      } else if (clock_id) {
+        const items = getClockItems(clock_id);
+        for (const item of items) {
+          const slotType = item.slot_type || "category";
+          if (slotType === "track") {
+            log.push({ time_offset: absoluteTime, slot_type: "track", clock_name: "", track: item.pinned_title ? { title: item.pinned_title, artist: item.pinned_artist || "Unknown Artist", duration: item.pinned_duration, category: "\u{1F4CC} Pinned" } : null, message: item.pinned_title ? void 0 : "Pinned track not found" });
+            absoluteTime += item.pinned_duration || 180;
+          } else {
+            const track = pickTrack(item.category_id);
+            log.push({ time_offset: absoluteTime, slot_type: "category", clock_name: "", track: track ? { title: track.title, artist: track.artist, duration: track.duration, category: item.category_name || "Unknown" } : null, message: track ? void 0 : `No track for: ${item.category_name}` });
+            absoluteTime += track ? track.duration || 180 : 180;
+          }
+        }
+        return res.json({ log });
+      } else {
+        return res.status(400).json({ error: "Provide day_of_week + start_hour or clock_id" });
+      }
+      let hourOffset = 0;
+      let carryOverItems = null;
+      let carryOverClockName = "";
+      while (absoluteTime < maxSeconds) {
+        const dow = (currentDow + Math.floor((currentHour + hourOffset) / 24)) % 7;
+        const hr = (currentHour + hourOffset) % 24;
+        const scheduled = getScheduledClock(dow, hr);
+        if (!scheduled) {
+          absoluteTime += 3600;
+          hourOffset++;
+          continue;
+        }
+        const clock = getClock(scheduled.clock_id);
+        if (!clock) {
+          hourOffset++;
+          continue;
+        }
+        const items = carryOverItems || getClockItems(clock.id);
+        const clockName = carryOverItems ? carryOverClockName : clock.name;
+        carryOverItems = null;
+        const isSequential = clock.mode === "sequential";
+        const hourStartTime = absoluteTime;
+        if (isSequential) {
+          for (const item of items) {
+            if (absoluteTime >= maxSeconds) break;
+            const slotType = item.slot_type || "category";
+            if (slotType === "track") {
+              log.push({ time_offset: absoluteTime, slot_type: "track", clock_name: clockName, track: item.pinned_title ? { title: item.pinned_title, artist: item.pinned_artist || "Unknown Artist", duration: item.pinned_duration, category: "\u{1F4CC} Pinned" } : null, message: item.pinned_title ? void 0 : "Pinned track not found" });
+              absoluteTime += item.pinned_duration || 180;
+            } else {
+              const track = pickTrack(item.category_id);
+              log.push({ time_offset: absoluteTime, slot_type: "category", clock_name: clockName, track: track ? { title: track.title, artist: track.artist, duration: track.duration, category: item.category_name || "Unknown" } : null, message: track ? void 0 : `No track for: ${item.category_name}` });
+              absoluteTime += track ? track.duration || 180 : 180;
             }
-          });
-          currentTime += track.duration || 180;
+          }
+          hourOffset++;
         } else {
-          log.push({
-            position: item.position,
-            time_offset: currentTime,
-            track: null,
-            message: `No track found for category: ${item.category_name}`
-          });
+          let itemIndex = 0;
+          const hourEnd = hourStartTime + 3600;
+          while (absoluteTime < hourEnd && absoluteTime < maxSeconds) {
+            if (items.length === 0) {
+              absoluteTime += 3600;
+              break;
+            }
+            const item = items[itemIndex % items.length];
+            itemIndex++;
+            const slotType = item.slot_type || "category";
+            if (slotType === "track") {
+              log.push({ time_offset: absoluteTime, slot_type: "track", clock_name: clockName, track: item.pinned_title ? { title: item.pinned_title, artist: item.pinned_artist || "Unknown Artist", duration: item.pinned_duration, category: "\u{1F4CC} Pinned" } : null, message: item.pinned_title ? void 0 : "Pinned track not found" });
+              absoluteTime += item.pinned_duration || 180;
+            } else {
+              const track = pickTrack(item.category_id);
+              log.push({ time_offset: absoluteTime, slot_type: "category", clock_name: clockName, track: track ? { title: track.title, artist: track.artist, duration: track.duration, category: item.category_name || "Unknown" } : null, message: track ? void 0 : `No track for: ${item.category_name}` });
+              absoluteTime += track ? track.duration || 180 : 180;
+            }
+          }
+          hourOffset++;
         }
       }
       res.json({ log });
@@ -1201,17 +1341,46 @@ function registerRoutes(app2) {
   });
   app2.get("/api/stream/next-track", (req, res) => {
     try {
-      const clock = db.prepare("SELECT id FROM clocks ORDER BY id LIMIT 1").get();
+      let state = db.prepare("SELECT * FROM playback_state WHERE id = 1").get();
+      const now = /* @__PURE__ */ new Date();
+      const dayOfWeek = now.getDay();
+      const hour = now.getHours();
+      const scheduledEntry = db.prepare(
+        "SELECT sg.clock_id FROM schedule_grid sg WHERE sg.day_of_week = ? AND sg.hour = ?"
+      ).get(dayOfWeek, hour);
+      let activeClockId = null;
+      if (state && state.current_clock_id) {
+        const runningClock = db.prepare("SELECT * FROM clocks WHERE id = ?").get(state.current_clock_id);
+        if (runningClock && runningClock.mode === "sequential") {
+          const totalItems = db.prepare("SELECT COUNT(*) as cnt FROM clock_items WHERE clock_id = ?").get(state.current_clock_id).cnt;
+          if (state.current_position < totalItems) {
+            activeClockId = state.current_clock_id;
+          }
+        }
+      }
+      if (!activeClockId) {
+        if (scheduledEntry) {
+          activeClockId = scheduledEntry.clock_id;
+        } else {
+          const fallback = db.prepare("SELECT id FROM clocks ORDER BY id LIMIT 1").get();
+          if (!fallback) return res.json({ track: null, error: "No clock configured" });
+          activeClockId = fallback.id;
+        }
+      }
+      const clock = db.prepare("SELECT * FROM clocks WHERE id = ?").get(activeClockId);
       if (!clock) return res.json({ track: null, error: "No clock configured" });
       const clockItems = db.prepare(`
-        SELECT ci.*, c.name as category_name 
-        FROM clock_items ci 
-        JOIN categories c ON ci.category_id = c.id 
-        WHERE ci.clock_id = ? 
+        SELECT ci.*, c.name as category_name,
+          t.title as track_title, t.artist as track_artist,
+          t.filepath as track_filepath, t.duration as track_duration,
+          t.cue_in as track_cue_in, t.cue_out as track_cue_out
+        FROM clock_items ci
+        LEFT JOIN categories c ON ci.category_id = c.id
+        LEFT JOIN tracks t ON ci.track_id = t.id
+        WHERE ci.clock_id = ?
         ORDER BY ci.position
       `).all(clock.id);
       if (clockItems.length === 0) return res.json({ track: null, error: "No items in clock" });
-      let state = db.prepare("SELECT * FROM playback_state WHERE id = 1").get();
       if (!state) {
         db.prepare("INSERT INTO playback_state (id, current_clock_id, current_position) VALUES (1, ?, 0)").run(clock.id);
         state = { id: 1, current_clock_id: clock.id, current_position: 0 };
@@ -1221,10 +1390,31 @@ function registerRoutes(app2) {
         state.current_position = 0;
         state.current_clock_id = clock.id;
       }
-      const currentPosition = state.current_position % clockItems.length;
+      let currentPosition;
+      let nextPosition;
+      if (clock.mode === "sequential") {
+        currentPosition = state.current_position;
+        nextPosition = state.current_position + 1;
+      } else {
+        currentPosition = state.current_position % clockItems.length;
+        nextPosition = (state.current_position + 1) % clockItems.length;
+      }
       const currentItem = clockItems[currentPosition];
-      const nextPosition = (state.current_position + 1) % clockItems.length;
+      if (!currentItem) return res.json({ track: null, error: "Clock position out of bounds" });
       db.prepare("UPDATE playback_state SET current_position = ?, last_updated = datetime('now') WHERE id = 1").run(nextPosition);
+      if (currentItem.slot_type === "track" && currentItem.track_id) {
+        const pinnedTrack = db.prepare("SELECT * FROM tracks WHERE id = ?").get(currentItem.track_id);
+        if (!pinnedTrack) return res.json({ track: null, error: "Pinned track not found" });
+        db.prepare(`
+          INSERT INTO play_history (track_id, title, artist, category_id, played_at)
+          VALUES (?, ?, ?, ?, datetime('now'))
+        `).run(pinnedTrack.id, pinnedTrack.title, pinnedTrack.artist, pinnedTrack.category_id);
+        let calculatedCueOut2 = pinnedTrack.cue_out;
+        if (!calculatedCueOut2 && pinnedTrack.duration && pinnedTrack.duration > 3) {
+          calculatedCueOut2 = pinnedTrack.duration - 0.5;
+        }
+        return res.json({ track: { ...pinnedTrack, cue_out: calculatedCueOut2 }, clock_position: currentPosition, category: "Pinned Track" });
+      }
       const rule = db.prepare("SELECT * FROM rules WHERE category_id = ?").get(currentItem.category_id);
       const minSeparationMinutes = rule?.min_separation || 120;
       const recentArtists = db.prepare(`
