@@ -1,15 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { tracksApi, categoriesApi, Track, Category } from "@/lib/api";
+import { tracksApi, categoriesApi, tagsApi, parseTags, Track, Category } from "@/lib/api";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { 
-  Search, 
-  Plus, 
-  Edit2, 
-  Trash2, 
-  Music, 
+import {
+  Search,
+  Plus,
+  Edit2,
+  Trash2,
+  Music,
   Filter,
   Download,
   Upload,
@@ -20,7 +20,10 @@ import {
   Loader2,
   Square,
   Volume2,
-  Sliders
+  Sliders,
+  FolderCog,
+  Layers,
+  Tag as TagIcon,
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { Virtuoso } from "react-virtuoso";
@@ -28,34 +31,48 @@ import { Badge } from "@/components/ui/badge";
 import { EditTrackDialog } from "@/components/EditTrackDialog";
 import CuePointEditor from "@/components/CuePointEditor";
 import BatchCueEditor from "@/components/BatchCueEditor";
+import CategoryManager from "@/components/CategoryManager";
+import BatchEditDialog from "@/components/BatchEditDialog";
 
 export default function Library() {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("all");
   const [status, setStatus] = useState("all");
+  const [tag, setTag] = useState("all");
   const [categories, setCategories] = useState<Category[]>([]);
+  const [allTags, setAllTags] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedTracks, setSelectedTracks] = useState<Set<string>>(new Set());
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [total, setTotal] = useState(0);
-    const [editingTrack, setEditingTrack] = useState<Track | null>(null);
-    const [cueEditingTrack, setCueEditingTrack] = useState<Track | null>(null);
-    const [showCueEditor, setShowCueEditor] = useState(false);
-    const [showBatchEditor, setShowBatchEditor] = useState(false);
-    const [playingTrackId, setPlayingTrackId] = useState<string | null>(null);
+  const [editingTrack, setEditingTrack] = useState<Track | null>(null);
+  const [cueEditingTrack, setCueEditingTrack] = useState<Track | null>(null);
+  const [showCueEditor, setShowCueEditor] = useState(false);
+  const [showBatchCueEditor, setShowBatchCueEditor] = useState(false);
+  const [showBatchEditor, setShowBatchEditor] = useState(false);
+  const [showCategoryManager, setShowCategoryManager] = useState(false);
+  const [playingTrackId, setPlayingTrackId] = useState<string | null>(null);
   const [playingTrack, setPlayingTrack] = useState<Track | null>(null);
   const [loadingPreviewId, setLoadingPreviewId] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  
+
   const isFirstRun = useRef(true);
 
-  // Fetch categories on mount
-  useEffect(() => {
+  // Fetch categories + tags on mount
+  const refreshCategories = useCallback(() => {
     categoriesApi.getAll().then(setCategories).catch(console.error);
   }, []);
+  const refreshTags = useCallback(() => {
+    tagsApi.getAll().then(setAllTags).catch(() => setAllTags([]));
+  }, []);
+
+  useEffect(() => {
+    refreshCategories();
+    refreshTags();
+  }, [refreshCategories, refreshTags]);
 
   // Debounce search input
   useEffect(() => {
@@ -63,108 +80,91 @@ export default function Library() {
       isFirstRun.current = false;
       return;
     }
-
     const timer = setTimeout(() => {
       setDebouncedSearch(search);
-      setPage(1); // Reset page on search change
-      setTracks([]); // Clear tracks on search change
+      setPage(1);
+      setTracks([]);
       setHasMore(true);
     }, 300);
     return () => clearTimeout(timer);
   }, [search]);
 
-  // Reset on category change
-  useEffect(() => {
-    if (isFirstRun.current) return; 
-    
-    setPage(1);
-    setTracks([]);
-    setHasMore(true);
-  }, [category]);
-
-  // Reset on status change
+  // Reset on filter changes
   useEffect(() => {
     if (isFirstRun.current) return;
-    
     setPage(1);
     setTracks([]);
     setHasMore(true);
-  }, [status]);
+  }, [category, status, tag]);
 
   // Fetch tracks
-  const loadTracks = useCallback(async (pageNum: number, isNewSearch: boolean) => {
-    if (loading) return;
-    
-    try {
-      setLoading(true);
-      const response = await tracksApi.getAll({ 
-        page: pageNum, 
-        limit: 50, 
-        search: debouncedSearch,
-        status, 
-        category 
-      });
-      
-      if (response && response.data) {
-        setTracks(prev => {
-          if (isNewSearch) return response.data;
-          
-          // Create a map of new tracks for O(1) lookup
-          const newTracksMap = new Map(response.data.map(t => [t.id, t]));
-          
-          // Update existing tracks if they are in the new batch
-          const updatedPrev = prev.map(t => newTracksMap.has(t.id) ? newTracksMap.get(t.id)! : t);
-          
-          // Find tracks that are in the new batch but not in prev (truly new items from pagination)
-          const existingIds = new Set(prev.map(t => t.id));
-          const trulyNewTracks = response.data.filter(t => !existingIds.has(t.id));
-          
-          return [...updatedPrev, ...trulyNewTracks];
-        });
-        setTotal(response.pagination.total);
-        const currentCount = isNewSearch ? response.data.length : tracks.length + response.data.length;
-        setHasMore(currentCount < response.pagination.total);
-      } else {
-        setHasMore(false);
-      }
-    } catch (error) {
-      console.error("Failed to fetch tracks:", error);
-      toast.error("Failed to load tracks");
-    } finally {
-      setLoading(false);
-    }
-  }, [debouncedSearch, category, status]);
+  const loadTracks = useCallback(
+    async (pageNum: number, isNewSearch: boolean) => {
+      if (loading) return;
+      try {
+        setLoading(true);
+        const response = await tracksApi.getAll({
+          page: pageNum,
+          limit: 50,
+          search: debouncedSearch,
+          status,
+          category,
+          tag: tag === "all" ? undefined : tag,
+        } as any);
 
-  // Initial load and subsequent pages
+        if (response && response.data) {
+          setTracks((prev) => {
+            if (isNewSearch) return response.data;
+            const newTracksMap = new Map(response.data.map((t: Track) => [t.id, t]));
+            const updatedPrev = prev.map((t) =>
+              newTracksMap.has(t.id) ? newTracksMap.get(t.id)! : t
+            );
+            const existingIds = new Set(prev.map((t) => t.id));
+            const trulyNewTracks = response.data.filter(
+              (t: Track) => !existingIds.has(t.id)
+            );
+            return [...updatedPrev, ...trulyNewTracks];
+          });
+          setTotal(response.pagination.total);
+          const currentCount = isNewSearch
+            ? response.data.length
+            : tracks.length + response.data.length;
+          setHasMore(currentCount < response.pagination.total);
+        } else {
+          setHasMore(false);
+        }
+      } catch (error) {
+        console.error("Failed to fetch tracks:", error);
+        toast.error("Failed to load tracks");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [debouncedSearch, category, status, tag]
+  );
+
   useEffect(() => {
     loadTracks(page, page === 1);
   }, [page, loadTracks]);
 
   // Polling for status updates
   useEffect(() => {
-    // Only poll if there are tracks downloading
-    const hasDownloading = tracks.some(t => t.status === 'downloading');
+    const hasDownloading = tracks.some((t) => t.status === "downloading");
     if (!hasDownloading) return;
-
     const interval = setInterval(() => {
-      // Silent reload (pass false to avoid clearing tracks)
       loadTracks(page, false);
     }, 3000);
-
     return () => clearInterval(interval);
   }, [tracks, page, loadTracks]);
 
   const loadMore = useCallback(() => {
-    if (!loading && hasMore) {
-      setPage(prev => prev + 1);
-    }
+    if (!loading && hasMore) setPage((prev) => prev + 1);
   }, [loading, hasMore]);
 
   const handleDelete = async (id: string) => {
     try {
       await tracksApi.delete(id);
       toast.success("Track removed from server");
-      // Reload tracks to show updated status (track will now show as "Cloud Only")
       loadTracks(page, false);
     } catch (error) {
       toast.error("Failed to delete track");
@@ -176,8 +176,9 @@ export default function Library() {
       toast.info("Starting download...");
       await tracksApi.download(id);
       toast.success("Track downloaded");
-      // Fix: Convert t.id to string for comparison
-      setTracks(prev => prev.map(t => String(t.id) === id ? { ...t, status: 'downloading' } : t));
+      setTracks((prev) =>
+        prev.map((t) => (String(t.id) === id ? { ...t, status: "downloading" } : t))
+      );
     } catch (error) {
       toast.error("Failed to download track");
     }
@@ -185,12 +186,17 @@ export default function Library() {
 
   const toggleTrackSelection = (id: string) => {
     const newSelected = new Set(selectedTracks);
-    if (newSelected.has(id)) {
-      newSelected.delete(id);
-    } else {
-      newSelected.add(id);
-    }
+    if (newSelected.has(id)) newSelected.delete(id);
+    else newSelected.add(id);
     setSelectedTracks(newSelected);
+  };
+
+  const toggleSelectAllVisible = () => {
+    if (selectedTracks.size === tracks.length && tracks.length > 0) {
+      setSelectedTracks(new Set());
+    } else {
+      setSelectedTracks(new Set(tracks.map((t) => String(t.id))));
+    }
   };
 
   const handlePlay = async (track: Track) => {
@@ -200,17 +206,11 @@ export default function Library() {
       setPlayingTrackId(null);
       setPlayingTrack(null);
     } else {
-      if (audioRef.current) {
-        audioRef.current.pause();
-      }
-      
+      if (audioRef.current) audioRef.current.pause();
       let url: string | undefined;
-      
-      // If track is on server, use streaming endpoint
       if (track.filepath) {
         url = `/api/tracks/${trackId}/stream`;
       } else {
-        // Otherwise, fetch preview URL from Dropbox
         try {
           setLoadingPreviewId(trackId);
           url = await tracksApi.getPreviewUrl(trackId);
@@ -222,14 +222,15 @@ export default function Library() {
           setLoadingPreviewId(null);
         }
       }
-
       if (url) {
         const audio = new Audio(url);
         audio.onended = () => {
           setPlayingTrackId(null);
           setPlayingTrack(null);
         };
-        audio.play().catch(e => toast.error("Failed to play audio: " + e.message));
+        audio
+          .play()
+          .catch((e) => toast.error("Failed to play audio: " + e.message));
         audioRef.current = audio;
         setPlayingTrackId(trackId);
         setPlayingTrack(track);
@@ -246,47 +247,40 @@ export default function Library() {
     setPlayingTrack(null);
   };
 
-    const formatDuration = (seconds?: number) => {
-      if (!seconds) return "--:--";
-      const mins = Math.floor(seconds / 60);
-      const secs = Math.floor(seconds % 60);
-      return `${mins}:${secs.toString().padStart(2, "0")}`;
-    };
+  const formatDuration = (seconds?: number) => {
+    if (!seconds) return "--:--";
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  };
 
-    const handleEditCuePoints = (track: Track) => {
-      setCueEditingTrack(track);
-      setShowCueEditor(true);
-    };
+  const handleEditCuePoints = (track: Track) => {
+    setCueEditingTrack(track);
+    setShowCueEditor(true);
+  };
 
-    const handleSaveCuePoints = async (cuePoints: { 
-      cueIn: number; 
-      cueOut: number; 
-      segueDuration: number 
-    }) => {
-      if (!cueEditingTrack) return;
-    
-      try {
-        await tracksApi.updateCuePoints(String(cueEditingTrack.id), cuePoints);
-        toast.success("Cue points saved successfully");
-        loadTracks(page, false);
-      } catch (error) {
-        toast.error("Failed to save cue points");
-      }
-    };
+  // Called after any batch op or category change — reload everything visible
+  const refreshAfterMutation = () => {
+    loadTracks(page, false);
+    refreshCategories();
+    refreshTags();
+    setSelectedTracks(new Set());
+  };
 
-    const Row = (index: number) => {
+  const Row = (index: number) => {
     try {
       const track = tracks[index];
       if (!track) return null;
-
       const trackId = track.id ? String(track.id) : "";
       if (!trackId) return null;
+
+      const tags = parseTags(track.tags);
 
       return (
         <div className="flex items-center border-b border-border/50 hover:bg-white/5 transition-colors group px-4 py-2 h-[50px]">
           <div className="w-10 flex-shrink-0">
-            <input 
-              type="checkbox" 
+            <input
+              type="checkbox"
               checked={selectedTracks.has(trackId)}
               onChange={() => toggleTrackSelection(trackId)}
               className="w-4 h-4 rounded border-border bg-input cursor-pointer"
@@ -299,39 +293,68 @@ export default function Library() {
                 <span className="font-medium text-foreground truncate block">
                   {track.title || "Unknown Title"}
                 </span>
+                {tags.length > 0 && (
+                  <div className="hidden lg:flex items-center gap-1 flex-shrink-0">
+                    {tags.slice(0, 3).map((t) => (
+                      <span
+                        key={t}
+                        className="text-[10px] px-1.5 py-0 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 font-mono"
+                        title={t}
+                      >
+                        {t}
+                      </span>
+                    ))}
+                    {tags.length > 3 && (
+                      <span className="text-[10px] text-muted-foreground">
+                        +{tags.length - 3}
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="text-xs text-muted-foreground md:hidden truncate mt-0.5 pl-5">
                 {track.artist || "Unknown Artist"}
               </div>
             </div>
           </div>
-          <div className="w-1/4 min-w-0 pr-4 text-muted-foreground truncate hidden md:block">{track.artist || "Unknown Artist"}</div>
-          
+          <div className="w-1/4 min-w-0 pr-4 text-muted-foreground truncate hidden md:block">
+            {track.artist || "Unknown Artist"}
+          </div>
           <div className="w-20 text-center font-mono text-xs text-muted-foreground hidden sm:block">
             {formatDuration(track.duration)}
           </div>
           <div className="w-32 px-2 hidden xl:block">
             <span className="px-2 py-1 rounded-full bg-primary/10 text-primary text-xs font-mono border border-primary/20 truncate block text-center">
-              {track.subcategory_name || track.category_name || track.category || "uncategorized"}
+              {track.subcategory_name ||
+                track.category_name ||
+                track.category ||
+                "uncategorized"}
             </span>
           </div>
           <div className="w-24 text-center">
             {track.filepath ? (
-               <Badge variant="outline" className="bg-green-500/10 text-green-500 border-green-500/20">
-                 <Check className="w-3 h-3 mr-1" /> On Server
-               </Badge>
+              <Badge
+                variant="outline"
+                className="bg-green-500/10 text-green-500 border-green-500/20"
+              >
+                <Check className="w-3 h-3 mr-1" /> On Server
+              </Badge>
             ) : (
-               <Badge variant="outline" className="text-muted-foreground">
-                 <Cloud className="w-3 h-3 mr-1" /> Cloud
-               </Badge>
+              <Badge variant="outline" className="text-muted-foreground">
+                <Cloud className="w-3 h-3 mr-1" /> Cloud
+              </Badge>
             )}
           </div>
           <div className="w-48 text-right">
-            <div className="flex items-center justify-end gap-1 ">
+            <div className="flex items-center justify-end gap-1">
               <Button
                 variant="ghost"
                 size="icon"
-                className={`h-8 w-8 ${playingTrackId === trackId ? 'text-primary' : 'text-muted-foreground hover:text-primary'}`}
+                className={`h-8 w-8 ${
+                  playingTrackId === trackId
+                    ? "text-primary"
+                    : "text-muted-foreground hover:text-primary"
+                }`}
                 onClick={() => handlePlay(track)}
                 disabled={loadingPreviewId === trackId}
                 title={track.url ? "Play Preview" : "Preview from Dropbox"}
@@ -344,35 +367,43 @@ export default function Library() {
                   <Play className="h-3 w-3" />
                 )}
               </Button>
-                            <Button 
-                              variant="ghost" 
-                              size="icon" 
-                              className="h-8 w-8 text-muted-foreground hover:text-primary"
-                              onClick={() => setEditingTrack(track)}
-                              title="Edit Track Info"
-                            >
-                              <Edit2 className="h-3 w-3" />
-                            </Button>
-                            {track.filepath && (
-                              <Button 
-                                variant="ghost" 
-                                size="icon" 
-                                className="h-8 w-8 text-muted-foreground hover:text-yellow-400"
-                                onClick={() => handleEditCuePoints(track)}
-                                title="Edit Cue Points"
-                              >
-                                <Sliders className="h-3 w-3" />
-                              </Button>
-                            )}
-                            <Button 
-                              variant="ghost" 
-                              size="icon" 
-                              className={`h-8 w-8 text-muted-foreground hover:text-blue-400 ${track.status === 'downloading' ? 'animate-pulse text-blue-400' : ''}`}
-                              onClick={() => handleDownload(trackId)}
-                              disabled={track.status === 'downloading'}
-                              title={track.filepath ? "Re-download from Dropbox" : "Download from Dropbox"}
-                            >
-                {track.status === 'downloading' ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 text-muted-foreground hover:text-primary"
+                onClick={() => setEditingTrack(track)}
+                title="Edit Track Info"
+              >
+                <Edit2 className="h-3 w-3" />
+              </Button>
+              {track.filepath && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 text-muted-foreground hover:text-yellow-400"
+                  onClick={() => handleEditCuePoints(track)}
+                  title="Edit Cue Points"
+                >
+                  <Sliders className="h-3 w-3" />
+                </Button>
+              )}
+              <Button
+                variant="ghost"
+                size="icon"
+                className={`h-8 w-8 text-muted-foreground hover:text-blue-400 ${
+                  track.status === "downloading"
+                    ? "animate-pulse text-blue-400"
+                    : ""
+                }`}
+                onClick={() => handleDownload(trackId)}
+                disabled={track.status === "downloading"}
+                title={
+                  track.filepath
+                    ? "Re-download from Dropbox"
+                    : "Download from Dropbox"
+                }
+              >
+                {track.status === "downloading" ? (
                   <Download className="h-3 w-3 animate-bounce" />
                 ) : track.filepath ? (
                   <Download className="h-3 w-3 text-green-500" />
@@ -380,9 +411,9 @@ export default function Library() {
                   <Download className="h-3 w-3" />
                 )}
               </Button>
-              <Button 
-                variant="ghost" 
-                size="icon" 
+              <Button
+                variant="ghost"
+                size="icon"
                 className="h-8 w-8 text-muted-foreground hover:text-destructive"
                 onClick={() => handleDelete(trackId)}
               >
@@ -398,16 +429,34 @@ export default function Library() {
     }
   };
 
+  const allVisibleSelected =
+    tracks.length > 0 && selectedTracks.size === tracks.length;
+
   return (
     <DashboardLayout>
       <div className="space-y-6 h-[calc(100vh-2rem)] flex flex-col pb-16">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 flex-shrink-0">
           <div>
-            <h1 className="text-3xl font-display font-bold text-foreground">Track Library</h1>
-            <p className="text-muted-foreground mt-1 font-mono text-sm">{total} tracks found</p>
+            <h1 className="text-3xl font-display font-bold text-foreground">
+              Track Library
+            </h1>
+            <p className="text-muted-foreground mt-1 font-mono text-sm">
+              {total} tracks found
+            </p>
           </div>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" className="border-primary/20 hover:border-primary hover:bg-primary/10">
+          <div className="flex items-center gap-2 flex-wrap">
+            <Button
+              variant="outline"
+              onClick={() => setShowCategoryManager(true)}
+              className="border-primary/20 hover:border-primary hover:bg-primary/10"
+            >
+              <FolderCog className="h-4 w-4 mr-2" />
+              CATEGORIES
+            </Button>
+            <Button
+              variant="outline"
+              className="border-primary/20 hover:border-primary hover:bg-primary/10"
+            >
               <Upload className="h-4 w-4 mr-2" />
               IMPORT
             </Button>
@@ -420,8 +469,8 @@ export default function Library() {
 
         <Card className="glass-panel flex-shrink-0">
           <CardContent className="pt-6">
-            <div className="flex flex-col md:flex-row gap-4">
-              <div className="flex-1 relative">
+            <div className="flex flex-col md:flex-row gap-4 flex-wrap">
+              <div className="flex-1 relative min-w-[200px]">
                 <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
                 <Input
                   placeholder="Search tracks, artists, albums..."
@@ -438,38 +487,73 @@ export default function Library() {
                   className="px-3 py-2 rounded-sm bg-input border border-border/50 text-foreground text-sm font-mono focus:outline-none focus:border-primary max-w-[200px]"
                 >
                   <option value="all">All Categories</option>
-                  {categories.map(c => (
+                  {categories.map((c) => (
                     <option key={c.id} value={String(c.id)}>
                       {c.parent_id ? `- ${c.name}` : c.name}
                     </option>
                   ))}
                 </select>
               </div>
-              <select
-                  value={status}
-                  onChange={(e) => setStatus(e.target.value)}
-                  className="px-3 py-2 rounded-sm bg-input border border-border/50 text-foreground text-sm font-mono focus:outline-none focus:border-primary"
+              <div className="flex items-center gap-2">
+                <TagIcon className="h-4 w-4 text-muted-foreground" />
+                <select
+                  value={tag}
+                  onChange={(e) => setTag(e.target.value)}
+                  className="px-3 py-2 rounded-sm bg-input border border-border/50 text-foreground text-sm font-mono focus:outline-none focus:border-primary max-w-[180px]"
                 >
-                  <option value="all">All Status</option>
-                  <option value="on_server">On Server</option>
-                  <option value="cloud">Cloud Only</option>
+                  <option value="all">All Tags</option>
+                  {allTags.map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
                 </select>
+              </div>
+              <select
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+                className="px-3 py-2 rounded-sm bg-input border border-border/50 text-foreground text-sm font-mono focus:outline-none focus:border-primary"
+              >
+                <option value="all">All Status</option>
+                <option value="on_server">On Server</option>
+                <option value="cloud">Cloud Only</option>
+              </select>
             </div>
           </CardContent>
         </Card>
 
         <Card className="glass-panel flex-1 overflow-hidden flex flex-col">
           <CardHeader className="pb-2 flex-shrink-0">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between flex-wrap gap-2">
               <CardTitle className="text-lg font-medium">Tracks</CardTitle>
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 flex-wrap">
                 <div className="text-xs text-muted-foreground font-mono">
                   {selectedTracks.size} selected
                 </div>
+                {tracks.length > 0 && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={toggleSelectAllVisible}
+                    className="text-xs h-7"
+                  >
+                    {allVisibleSelected ? "Clear" : "Select visible"}
+                  </Button>
+                )}
                 <Button
                   size="sm"
                   variant="outline"
                   onClick={() => setShowBatchEditor(true)}
+                  className="flex items-center gap-1.5 text-xs border-primary/50 text-primary hover:bg-primary/10"
+                  title="Change category, tag, or delete for many tracks at once"
+                >
+                  <Layers className="h-3.5 w-3.5" />
+                  Batch Edit
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setShowBatchCueEditor(true)}
                   className="flex items-center gap-1.5 text-xs border-amber-500/50 text-amber-400 hover:bg-amber-500/10"
                   title="Batch edit cue points for all or selected tracks"
                 >
@@ -484,13 +568,12 @@ export default function Library() {
               <div className="w-10"></div>
               <div className="flex-1">TITLE</div>
               <div className="w-1/4 hidden md:block">ARTIST</div>
-              
               <div className="w-20 text-center hidden sm:block">TIME</div>
               <div className="w-32 hidden xl:block">CATEGORY</div>
               <div className="w-24 text-center">STATUS</div>
               <div className="w-48 text-right">ACTIONS</div>
             </div>
-            
+
             {tracks.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-muted-foreground p-8 text-center">
                 {loading ? (
@@ -499,13 +582,15 @@ export default function Library() {
                   <>
                     <Music className="h-12 w-12 mb-4 opacity-20" />
                     <p className="text-lg font-medium">No tracks found</p>
-                    <p className="text-sm opacity-70 mt-1">Try adjusting your search or filters</p>
+                    <p className="text-sm opacity-70 mt-1">
+                      Try adjusting your search or filters
+                    </p>
                   </>
                 )}
               </div>
             ) : (
               <Virtuoso
-                style={{ height: '100%' }}
+                style={{ height: "100%" }}
                 totalCount={tracks.length}
                 itemContent={Row}
                 endReached={loadMore}
@@ -538,9 +623,13 @@ export default function Library() {
               <div className="flex items-center gap-2 flex-shrink-0">
                 <Badge variant="outline" className="hidden sm:flex">
                   {playingTrack.filepath ? (
-                    <><Check className="w-3 h-3 mr-1 text-green-500" /> Local</>
+                    <>
+                      <Check className="w-3 h-3 mr-1 text-green-500" /> Local
+                    </>
                   ) : (
-                    <><Cloud className="w-3 h-3 mr-1" /> Dropbox</>
+                    <>
+                      <Cloud className="w-3 h-3 mr-1" /> Dropbox
+                    </>
                   )}
                 </Badge>
                 <Button
@@ -565,45 +654,72 @@ export default function Library() {
         </div>
       )}
 
-          <EditTrackDialog 
-            track={editingTrack} 
-            open={!!editingTrack} 
-            onOpenChange={(open) => !open && setEditingTrack(null)}
-            onSuccess={() => loadTracks(page, false)}
-          />
+      <EditTrackDialog
+        track={editingTrack}
+        open={!!editingTrack}
+        onOpenChange={(open) => !open && setEditingTrack(null)}
+        onSuccess={() => loadTracks(page, false)}
+      />
 
-          {cueEditingTrack && (
-            <CuePointEditor
-              open={showCueEditor}
-              onOpenChange={setShowCueEditor}
-              trackId={String(cueEditingTrack.id)}
-              trackTitle={cueEditingTrack.title || "Unknown Track"}
-              audioUrl={cueEditingTrack.filepath ? `/api/tracks/${cueEditingTrack.id}/stream` : ""}
-              initialCuePoints={{
-                cueIn: cueEditingTrack.cue_in || 0,
-                cueOut: cueEditingTrack.cue_out || cueEditingTrack.duration || 0,
-                segueDuration: cueEditingTrack.segue_duration || (cueEditingTrack.category_name === 'Music' ? 3 : 0.5),
-              }}
-              trackType={cueEditingTrack.category_name === 'Music' ? 'song' : 'other'}
-              onSuccess={async () => {
-                // Refetch the specific track to get updated cue points
-                const updatedTrack = await tracksApi.getById(cueEditingTrack.id);
-                // Update the track in the tracks array
-                setTracks(prevTracks => 
-                  prevTracks.map(t => t.id === updatedTrack.id ? updatedTrack : t)
-                );
-                // Update cueEditingTrack so if modal is reopened, it has fresh data
-                setCueEditingTrack(updatedTrack);
-              }}
-            />
-          )}
+      {cueEditingTrack && (
+        <CuePointEditor
+          open={showCueEditor}
+          onOpenChange={setShowCueEditor}
+          trackId={String(cueEditingTrack.id)}
+          trackTitle={cueEditingTrack.title || "Unknown Track"}
+          audioUrl={
+            cueEditingTrack.filepath
+              ? `/api/tracks/${cueEditingTrack.id}/stream`
+              : ""
+          }
+          initialCuePoints={{
+            cueIn: cueEditingTrack.cue_in || 0,
+            cueOut:
+              cueEditingTrack.cue_out || cueEditingTrack.duration || 0,
+            segueDuration:
+              cueEditingTrack.segue_duration ||
+              (cueEditingTrack.category_name === "Music" ? 3 : 0.5),
+          }}
+          trackType={
+            cueEditingTrack.category_name === "Music" ? "song" : "other"
+          }
+          onSuccess={async () => {
+            const updatedTrack = await tracksApi.getById(cueEditingTrack.id);
+            setTracks((prevTracks) =>
+              prevTracks.map((t) =>
+                t.id === updatedTrack.id ? updatedTrack : t
+              )
+            );
+            setCueEditingTrack(updatedTrack);
+          }}
+        />
+      )}
 
-          <BatchCueEditor
-            open={showBatchEditor}
-            onOpenChange={setShowBatchEditor}
-            selectedIds={selectedTracks}
-            onComplete={() => loadTracks(page, false)}
-          />
-        </DashboardLayout>
+      <BatchCueEditor
+        open={showBatchCueEditor}
+        onOpenChange={setShowBatchCueEditor}
+        selectedIds={selectedTracks}
+        onComplete={() => loadTracks(page, false)}
+      />
+
+      <BatchEditDialog
+        open={showBatchEditor}
+        onOpenChange={setShowBatchEditor}
+        selectedIds={selectedTracks}
+        totalCount={total}
+        currentFilter={{
+          search: debouncedSearch,
+          category,
+          status,
+        }}
+        onComplete={refreshAfterMutation}
+      />
+
+      <CategoryManager
+        open={showCategoryManager}
+        onOpenChange={setShowCategoryManager}
+        onChange={refreshAfterMutation}
+      />
+    </DashboardLayout>
   );
 }

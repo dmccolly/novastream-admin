@@ -21,9 +21,23 @@ if (!fs.existsSync(musicDir)) {
   fs.mkdirSync(musicDir, { recursive: true });
 }
 
+function ensureTagsColumn() {
+  try {
+    const cols = db.prepare("PRAGMA table_info(tracks)").all() as any[];
+    if (!cols.some((c) => c.name === "tags")) {
+      db.prepare("ALTER TABLE tracks ADD COLUMN tags TEXT DEFAULT '[]'").run();
+      db.prepare("UPDATE tracks SET tags = '[]' WHERE tags IS NULL").run();
+      console.log("[migration] Added tags column to tracks table");
+    }
+  } catch (e: any) {
+    console.error("[migration] ensureTagsColumn failed:", e.message);
+  }
+}
+
 export function registerRoutes(app: Express): Server {
   // Initialize DB
   initDb();
+  ensureTagsColumn();
 
   app.use(cors());
   app.use(express.json());
@@ -123,7 +137,16 @@ export function registerRoutes(app: Express): Server {
         countQuery += statusCondition;
       }
 
+      const tag = (req.query.tag as string) || "";
+      if (tag) {
+        const tagCondition = " AND tags LIKE ?";
+        query += tagCondition;
+        countQuery += tagCondition;
+        params.push(`%"${tag}"%`);
+      }
+
       query += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+
       const queryParams = [...params, limit, offset];
 
       const tracks = db.prepare(query).all(...queryParams).map((t: any) => ({
@@ -570,6 +593,300 @@ export function registerRoutes(app: Express): Server {
       res.json(categories);
     } catch (error) {
       res.status(500).json({ error: "Failed to fetch categories" });
+    }
+  });
+
+  // ========================================================================
+  // CATEGORIES — create / rename / delete with reassignment
+  // ========================================================================
+
+  // Create category (or subcategory, if parent_id provided)
+  app.post("/api/categories", (req, res) => {
+    const { name, parent_id, type, color } = req.body || {};
+    if (!name || typeof name !== "string" || !name.trim()) {
+      return res.status(400).json({ error: "Name is required" });
+    }
+    try {
+      // If parent_id is given, inherit type from parent unless explicitly overridden
+      let resolvedType = type || null;
+      if (parent_id && !resolvedType) {
+        const parent = db.prepare("SELECT type FROM categories WHERE id = ?").get(parent_id) as any;
+        if (!parent) return res.status(400).json({ error: "Parent category not found" });
+        resolvedType = parent.type;
+      }
+
+      const result = db.prepare(
+        "INSERT INTO categories (name, parent_id, type, color) VALUES (?, ?, ?, ?)"
+      ).run(name.trim(), parent_id || null, resolvedType, color || null);
+
+      const created = db.prepare("SELECT * FROM categories WHERE id = ?").get(result.lastInsertRowid);
+      res.json(created);
+    } catch (error: any) {
+      console.error("Error creating category:", error);
+      res.status(500).json({ error: "Failed to create category", details: error.message });
+    }
+  });
+
+  // Rename / update a category (name, color, type, parent_id)
+  app.patch("/api/categories/:id", (req, res) => {
+    const { id } = req.params;
+    const { name, color, type, parent_id } = req.body || {};
+    try {
+      const existing = db.prepare("SELECT * FROM categories WHERE id = ?").get(id) as any;
+      if (!existing) return res.status(404).json({ error: "Category not found" });
+
+      // Prevent making a category its own parent
+      if (parent_id !== undefined && parent_id !== null && Number(parent_id) === Number(id)) {
+        return res.status(400).json({ error: "Category cannot be its own parent" });
+      }
+
+      db.prepare(`
+        UPDATE categories
+        SET name      = COALESCE(?, name),
+            color     = COALESCE(?, color),
+            type      = COALESCE(?, type),
+            parent_id = ?
+        WHERE id = ?
+      `).run(
+        name ?? null,
+        color ?? null,
+        type ?? null,
+        parent_id === undefined ? existing.parent_id : (parent_id || null),
+        id
+      );
+
+      // Sync the legacy string `category` column on tracks (best-effort; ignores errors)
+      if (name && name !== existing.name) {
+        try {
+          db.prepare("UPDATE tracks SET category = ? WHERE category = ?").run(name, existing.name);
+        } catch {}
+      }
+
+      const updated = db.prepare("SELECT * FROM categories WHERE id = ?").get(id);
+      res.json(updated);
+    } catch (error: any) {
+      console.error("Error updating category:", error);
+      res.status(500).json({ error: "Failed to update category", details: error.message });
+    }
+  });
+
+  // Get counts (tracks + child categories) for a category — used by delete modal
+  app.get("/api/categories/:id/usage", (req, res) => {
+    const { id } = req.params;
+    try {
+      const category = db.prepare("SELECT * FROM categories WHERE id = ?").get(id) as any;
+      if (!category) return res.status(404).json({ error: "Category not found" });
+
+      const trackCount = (db.prepare(
+        "SELECT COUNT(*) as n FROM tracks WHERE category_id = ? OR subcategory_id = ?"
+      ).get(id, id) as any).n;
+
+      const childCount = (db.prepare(
+        "SELECT COUNT(*) as n FROM categories WHERE parent_id = ?"
+      ).get(id) as any).n;
+
+      const clockItemCount = (db.prepare(
+        "SELECT COUNT(*) as n FROM clock_items WHERE category_id = ?"
+      ).get(id) as any).n;
+
+      res.json({ category, trackCount, childCount, clockItemCount });
+    } catch (error: any) {
+      console.error("Error getting category usage:", error);
+      res.status(500).json({ error: "Failed to get category usage", details: error.message });
+    }
+  });
+
+  // Delete category, reassigning tracks to another category (required if any exist)
+  //   DELETE /api/categories/:id?moveTo=<id>
+  app.delete("/api/categories/:id", (req, res) => {
+    const { id } = req.params;
+    const moveTo = req.query.moveTo ? String(req.query.moveTo) : null;
+
+    try {
+      const category = db.prepare("SELECT * FROM categories WHERE id = ?").get(id) as any;
+      if (!category) return res.status(404).json({ error: "Category not found" });
+
+      const trackCount = (db.prepare(
+        "SELECT COUNT(*) as n FROM tracks WHERE category_id = ? OR subcategory_id = ?"
+      ).get(id, id) as any).n;
+
+      const childCount = (db.prepare(
+        "SELECT COUNT(*) as n FROM categories WHERE parent_id = ?"
+      ).get(id) as any).n;
+
+      // Validate moveTo if provided
+      if (moveTo) {
+        if (Number(moveTo) === Number(id)) {
+          return res.status(400).json({ error: "Cannot move tracks to the category being deleted" });
+        }
+        const target = db.prepare("SELECT id FROM categories WHERE id = ?").get(moveTo);
+        if (!target) return res.status(400).json({ error: "Target category not found" });
+      }
+
+      // Require moveTo if anything references this category
+      if ((trackCount > 0 || childCount > 0) && !moveTo) {
+        return res.status(400).json({
+          error: "Category is in use; provide ?moveTo=<categoryId> to reassign",
+          trackCount,
+          childCount
+        });
+      }
+
+      const tx = db.transaction(() => {
+        if (moveTo) {
+          db.prepare("UPDATE tracks SET category_id = ? WHERE category_id = ?").run(moveTo, id);
+          db.prepare("UPDATE tracks SET subcategory_id = ? WHERE subcategory_id = ?").run(moveTo, id);
+          db.prepare("UPDATE tracks SET category = (SELECT name FROM categories WHERE id = ?) WHERE category = ?")
+            .run(moveTo, category.name);
+          db.prepare("UPDATE clock_items SET category_id = ? WHERE category_id = ?").run(moveTo, id);
+          db.prepare("UPDATE categories SET parent_id = ? WHERE parent_id = ?").run(moveTo, id);
+          const targetHasRule = db.prepare("SELECT id FROM rules WHERE category_id = ?").get(moveTo);
+          if (!targetHasRule) {
+            db.prepare("UPDATE rules SET category_id = ? WHERE category_id = ?").run(moveTo, id);
+          } else {
+            db.prepare("DELETE FROM rules WHERE category_id = ?").run(id);
+          }
+        }
+        db.prepare("DELETE FROM categories WHERE id = ?").run(id);
+      });
+
+      tx();
+      res.json({ success: true, movedTracks: moveTo ? trackCount : 0 });
+    } catch (error: any) {
+      console.error("Error deleting category:", error);
+      res.status(500).json({ error: "Failed to delete category", details: error.message });
+    }
+  });
+
+
+  // ========================================================================
+  // BATCH TRACK OPERATIONS
+  //   POST /api/tracks/batch
+  // ========================================================================
+  app.post("/api/tracks/batch", (req, res) => {
+    const { ids, filter, action, value } = req.body || {};
+    if (!action) return res.status(400).json({ error: "action is required" });
+
+    try {
+      let targetIds: number[] = [];
+      if (ids === "all") {
+        let q = "SELECT id FROM tracks WHERE 1=1";
+        const params: any[] = [];
+        const f = filter || {};
+        if (f.search) {
+          q += " AND (title LIKE ? OR artist LIKE ? OR album LIKE ? OR source_url LIKE ?)";
+          const s = `%${f.search}%`;
+          params.push(s, s, s, s);
+        }
+        if (f.category && f.category !== "all") {
+          if (isNaN(Number(f.category))) {
+            q += " AND category = ?";
+            params.push(f.category);
+          } else {
+            q += " AND (category_id = ? OR subcategory_id = ?)";
+            params.push(f.category, f.category);
+          }
+        }
+        if (f.status === "on_server") q += " AND filepath IS NOT NULL";
+        else if (f.status === "cloud") q += " AND filepath IS NULL";
+
+        targetIds = (db.prepare(q).all(...params) as any[]).map((r) => r.id);
+      } else if (Array.isArray(ids)) {
+        targetIds = ids.map((x) => Number(x)).filter((n) => !isNaN(n));
+      } else {
+        return res.status(400).json({ error: 'ids must be an array or "all"' });
+      }
+
+      if (targetIds.length === 0) return res.json({ updated: 0, ids: [] });
+
+      const placeholders = targetIds.map(() => "?").join(",");
+      let updated = 0;
+
+      const tx = db.transaction(() => {
+        if (action === "setCategory") {
+          if (value === undefined || value === null) throw new Error("value (category_id) is required");
+          const cat = db.prepare("SELECT name FROM categories WHERE id = ?").get(value) as any;
+          const catName = cat?.name || null;
+          const info = db.prepare(
+            `UPDATE tracks SET category_id = ?, category = COALESCE(?, category) WHERE id IN (${placeholders})`
+          ).run(value, catName, ...targetIds);
+          updated = info.changes;
+        } else if (action === "setSubcategory") {
+          const info = db.prepare(
+            `UPDATE tracks SET subcategory_id = ? WHERE id IN (${placeholders})`
+          ).run(value || null, ...targetIds);
+          updated = info.changes;
+        } else if (action === "addTag" || action === "removeTag") {
+          const tag = typeof value === "string" ? value.trim() : "";
+          if (!tag) throw new Error("value (tag) is required");
+          const rows = db.prepare(
+            `SELECT id, tags FROM tracks WHERE id IN (${placeholders})`
+          ).all(...targetIds) as any[];
+          const upd = db.prepare("UPDATE tracks SET tags = ? WHERE id = ?");
+          for (const r of rows) {
+            let tags: string[] = [];
+            try { tags = JSON.parse(r.tags || "[]"); } catch { tags = []; }
+            if (action === "addTag") {
+              if (!tags.includes(tag)) tags.push(tag);
+            } else {
+              tags = tags.filter((t) => t !== tag);
+            }
+            upd.run(JSON.stringify(tags), r.id);
+            updated++;
+          }
+        } else if (action === "clearTags") {
+          const info = db.prepare(
+            `UPDATE tracks SET tags = '[]' WHERE id IN (${placeholders})`
+          ).run(...targetIds);
+          updated = info.changes;
+        } else if (action === "delete") {
+          const rows = db.prepare(
+            `SELECT id, filepath FROM tracks WHERE id IN (${placeholders})`
+          ).all(...targetIds) as any[];
+          for (const r of rows) {
+            if (r.filepath && fs.existsSync(r.filepath)) {
+              try { fs.unlinkSync(r.filepath); } catch (e: any) {
+                console.warn(`[batch delete] Failed to unlink ${r.filepath}:`, e.message);
+              }
+            }
+          }
+          const info = db.prepare(
+            `DELETE FROM tracks WHERE id IN (${placeholders})`
+          ).run(...targetIds);
+          updated = info.changes;
+        } else {
+          throw new Error(`Unknown action: ${action}`);
+        }
+      });
+
+      tx();
+      res.json({ updated, ids: targetIds, action });
+    } catch (error: any) {
+      console.error("Error in batch track operation:", error);
+      res.status(500).json({ error: "Batch operation failed", details: error.message });
+    }
+  });
+
+
+  // ========================================================================
+  // TAGS — list all tags currently in use (for typeahead / filter UI)
+  // ========================================================================
+  app.get("/api/tags", (_req, res) => {
+    try {
+      const rows = db.prepare(
+        "SELECT tags FROM tracks WHERE tags IS NOT NULL AND tags != '[]'"
+      ).all() as any[];
+      const set = new Set<string>();
+      for (const r of rows) {
+        try {
+          const arr = JSON.parse(r.tags || "[]") as string[];
+          for (const t of arr) if (t) set.add(t);
+        } catch {}
+      }
+      res.json(Array.from(set).sort());
+    } catch (error: any) {
+      console.error("Error fetching tags:", error);
+      res.status(500).json({ error: "Failed to fetch tags" });
     }
   });
 

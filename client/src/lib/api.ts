@@ -14,8 +14,8 @@ export interface Category {
   id: number;
   name: string;
   parent_id: number | null;
-  type: string;
-  color: string;
+  type: string | null;
+  color: string | null;
 }
 
 export interface Track {
@@ -33,7 +33,7 @@ export interface Track {
   cue_in?: number; // Start point in seconds
   segue_duration?: number; // Crossfade duration in seconds
   mood?: string;
-  tags?: string[];
+  tags?: string[] | string;   // backend stores JSON string, normalize on read
   format?: string;
   isActive: boolean;
   isDownloaded: boolean;
@@ -53,19 +53,31 @@ export interface PaginatedResponse<T> {
   };
 }
 
+export function parseTags(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw as string[];
+  if (typeof raw === "string") {
+    try { const p = JSON.parse(raw); return Array.isArray(p) ? p : []; }
+    catch { return []; }
+  }
+  return [];
+}
+
 export const tracksApi = {
-  getAll: async (params?: { 
-    search?: string; 
+  getAll: async (params?: {
+    search?: string;
     category?: string;
-    status?: string; 
-    limit?: number; 
+    status?: string;
+    limit?: number;
     page?: number;
-    offset?: number 
+    offset?: number;
+    tag?: string;
   }) => {
-    const response = await api.get<any>('/tracks', { 
-      params: { ...params, _t: Date.now() } 
+    const qs: Record<string, any> = { ...params, _t: Date.now() };
+    if (params?.tag) qs['tag'] = params.tag;
+    const response = await api.get<any>('/tracks', {
+      params: qs
     });
-    
+
     // Handle both old (array) and new (paginated object) formats
     if (Array.isArray(response.data)) {
       return {
@@ -77,7 +89,7 @@ export const tracksApi = {
         }
       };
     }
-    
+
     return response.data;
   },
 
@@ -114,10 +126,10 @@ export const tracksApi = {
     return response.data.url;
   },
 
-  updateCuePoints: async (id: string, cuePoints: { 
-    cueIn: number; 
-    cueOut: number; 
-    segueDuration: number 
+  updateCuePoints: async (id: string, cuePoints: {
+    cueIn: number;
+    cueOut: number;
+    segueDuration: number
   }) => {
     const response = await api.patch<Track>(`/tracks/${id}/cuepoints`, cuePoints);
     return response.data;
@@ -135,13 +147,84 @@ export const tracksApi = {
     );
     return response.data;
   },
+
+  batch: async (
+    ids: (string | number)[] | "all",
+    action:
+      | "setCategory"
+      | "setSubcategory"
+      | "addTag"
+      | "removeTag"
+      | "clearTags"
+      | "delete",
+    value?: any,
+    filter?: { search?: string; category?: string; status?: string }
+  ) => {
+    const res = await fetch("/api/tracks/batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids, action, value, filter }),
+    });
+    if (!res.ok) throw new Error((await res.json()).error || "Batch failed");
+    return res.json();
+  },
 };
 
 export const categoriesApi = {
   getAll: async () => {
     const response = await api.get<Category[]>('/categories');
     return response.data;
-  }
+  },
+  create: async (data: {
+    name: string;
+    parent_id?: number | null;
+    type?: string | null;
+    color?: string | null;
+  }) => {
+    const res = await fetch("/api/categories", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error((await res.json()).error || "Create failed");
+    return res.json() as Promise<Category>;
+  },
+  update: async (
+    id: number | string,
+    data: Partial<{ name: string; color: string | null; type: string | null; parent_id: number | null }>
+  ) => {
+    const res = await fetch(`/api/categories/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error((await res.json()).error || "Update failed");
+    return res.json() as Promise<Category>;
+  },
+  usage: async (id: number | string) => {
+    const res = await fetch(`/api/categories/${id}/usage`);
+    if (!res.ok) throw new Error((await res.json()).error || "Failed");
+    return res.json() as Promise<{
+      category: Category;
+      trackCount: number;
+      childCount: number;
+      clockItemCount: number;
+    }>;
+  },
+  delete: async (id: number | string, moveTo?: number | string | null) => {
+    const qs = moveTo ? `?moveTo=${moveTo}` : "";
+    const res = await fetch(`/api/categories/${id}${qs}`, { method: "DELETE" });
+    if (!res.ok) throw new Error((await res.json()).error || "Delete failed");
+    return res.json();
+  },
+};
+
+export const tagsApi = {
+  getAll: async (): Promise<string[]> => {
+    const res = await fetch("/api/tags");
+    if (!res.ok) throw new Error("Failed to fetch tags");
+    return res.json();
+  },
 };
 
 export const clocksApi = {
