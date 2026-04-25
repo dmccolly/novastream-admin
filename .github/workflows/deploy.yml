@@ -19,5 +19,5 @@ jobs:
             git pull origin main
             NODE_OPTIONS=--max-old-space-size=512 npm run build:all
             pm2 restart novastream-admin
-            bash /root/novastream-admin/deploy/update_player.sh
+            bash /root/novastream-admin/deploy/update_player.sh 2>&1 || true
           command_timeout: 10m
