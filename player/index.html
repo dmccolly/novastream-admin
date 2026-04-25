@@ -24,6 +24,7 @@
         .status { font-size: 1.2rem; margin-bottom: 20px; min-height: 30px; }
         .status.playing { color: #4ade80; }
         .status.stopped { color: #f87171; }
+        .status.buffering { color: #facc15; }
         .buttons { display: flex; gap: 15px; justify-content: center; margin-bottom: 30px; }
         button { padding: 15px 40px; font-size: 1.2rem; font-weight: bold; border: none; border-radius: 10px; cursor: pointer; }
         .play-btn { background: #22c55e; color: white; }
@@ -58,7 +59,7 @@
         <div class="player-box">
             <div id="status" class="status stopped">Tap PLAY to start</div>
             <div class="buttons">
-                <button id="playBtn" class="play-btn" onclick="playStream()">PLAY</button>
+                <button id="playBtn" class="play-btn" onclick="document.getElementById('status').textContent='Buffering…';document.getElementById('status').className='status buffering';playStream()">PLAY</button>
                 <button id="stopBtn" class="stop-btn" onclick="stopStream()">STOP</button>
             </div>
             <div class="volume-section">
