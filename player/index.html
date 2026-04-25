@@ -25,6 +25,17 @@
         .status.playing { color: #4ade80; }
         .status.stopped { color: #f87171; }
         .status.buffering { color: #facc15; }
+        @keyframes ellipsis {
+            0%   { content: ''; }
+            33%  { content: '.'; }
+            66%  { content: '..'; }
+            100% { content: '...'; }
+        }
+        .status.buffering::after {
+            content: '';
+            display: inline-block;
+            animation: ellipsis 1.2s steps(1, end) infinite;
+        }
         .buttons { display: flex; gap: 15px; justify-content: center; margin-bottom: 30px; }
         button { padding: 15px 40px; font-size: 1.2rem; font-weight: bold; border: none; border-radius: 10px; cursor: pointer; }
         .play-btn { background: #22c55e; color: white; }
@@ -49,17 +60,102 @@
         .strip-recent li { font-size: 0.8rem; color: #9ca3af; padding: 3px 0; border-top: 1px solid rgba(255,255,255,0.05); }
         .strip-recent li:first-child { border-top: none; }
         .strip-recent .recent-artist { color: #6b7280; }
+
+        /* Password gate */
+        #gate {
+            position: fixed;
+            inset: 0;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+        }
+        #gate h2 { font-size: 1.6rem; margin-bottom: 8px; color: #e5e7eb; }
+        #gate p { color: #6b7280; font-size: 0.9rem; margin-bottom: 28px; }
+        #gate-form { display: flex; flex-direction: column; align-items: center; gap: 14px; width: 260px; }
+        #gate-input {
+            width: 100%;
+            padding: 14px 18px;
+            font-size: 1.1rem;
+            border: 2px solid rgba(255,255,255,0.15);
+            border-radius: 12px;
+            background: rgba(255,255,255,0.07);
+            color: white;
+            outline: none;
+            text-align: center;
+            letter-spacing: 0.05em;
+            transition: border-color 0.2s;
+        }
+        #gate-input:focus { border-color: rgba(255,255,255,0.4); }
+        #gate-input.shake {
+            animation: shake 0.35s ease;
+            border-color: #f87171;
+        }
+        @keyframes shake {
+            0%,100% { transform: translateX(0); }
+            20%      { transform: translateX(-8px); }
+            40%      { transform: translateX(8px); }
+            60%      { transform: translateX(-6px); }
+            80%      { transform: translateX(6px); }
+        }
+        #gate-btn {
+            width: 100%;
+            padding: 14px;
+            font-size: 1rem;
+            font-weight: 700;
+            background: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        #gate-btn:hover { background: #2563eb; }
+        #gate-error { color: #f87171; font-size: 0.85rem; min-height: 1.2em; }
+
+        /* Inconspicuous dot — bottom-right corner of the page */
+        #unlock-dot {
+            position: fixed;
+            bottom: 12px;
+            right: 14px;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.18);
+            cursor: pointer;
+            z-index: 200;
+            transition: background 0.2s;
+        }
+        #unlock-dot:hover { background: rgba(255,255,255,0.45); }
     </style>
 </head>
 <body>
-    <div class="container">
+
+    <!-- Password gate (shown until correct password entered) -->
+    <div id="gate">
+        <h2>Stream of Dan</h2>
+        <p>Enter password to listen</p>
+        <div id="gate-form">
+            <input id="gate-input" type="password" placeholder="Password" autocomplete="current-password" />
+            <button id="gate-btn" onclick="checkPassword()">Enter</button>
+            <div id="gate-error"></div>
+        </div>
+    </div>
+
+    <!-- Inconspicuous dot — clicking re-shows the gate if somehow dismissed -->
+    <div id="unlock-dot" title="" onclick="showGate()"></div>
+
+    <!-- Main player (hidden until unlocked) -->
+    <div class="container" id="player-wrap" style="display:none;">
         <h1>Stream of Dan</h1>
         <p class="subtitle">Internet Radio</p>
 
         <div class="player-box">
             <div id="status" class="status stopped">Tap PLAY to start</div>
             <div class="buttons">
-                <button id="playBtn" class="play-btn" onclick="document.getElementById('status').textContent='Buffering…';document.getElementById('status').className='status buffering';playStream()">PLAY</button>
+                <button id="playBtn" class="play-btn" onclick="playStream()">PLAY</button>
                 <button id="stopBtn" class="stop-btn" onclick="stopStream()">STOP</button>
             </div>
             <div class="volume-section">
@@ -91,19 +187,80 @@
     </div>
 
     <script>
+        // ── Password gate ──────────────────────────────────────────────────
+        var CORRECT = 'borah'; // case-insensitive: compare lowercase
+
+        function checkPassword() {
+            var val = document.getElementById('gate-input').value.trim().toLowerCase();
+            if (val === CORRECT) {
+                // Store in sessionStorage so refresh doesn't re-prompt
+                try { sessionStorage.setItem('sod_auth', '1'); } catch(e) {}
+                unlockPlayer();
+            } else {
+                var inp = document.getElementById('gate-input');
+                inp.classList.remove('shake');
+                // Force reflow to restart animation
+                void inp.offsetWidth;
+                inp.classList.add('shake');
+                document.getElementById('gate-error').textContent = 'Incorrect password.';
+                inp.value = '';
+                inp.focus();
+            }
+        }
+
+        function unlockPlayer() {
+            document.getElementById('gate').style.display = 'none';
+            document.getElementById('player-wrap').style.display = '';
+            pollNowPlaying();
+            setInterval(pollNowPlaying, POLL_INTERVAL_MS);
+        }
+
+        function showGate() {
+            document.getElementById('gate').style.display = 'flex';
+            document.getElementById('player-wrap').style.display = 'none';
+            document.getElementById('gate-input').value = '';
+            document.getElementById('gate-error').textContent = '';
+            document.getElementById('gate-input').focus();
+        }
+
+        // Allow Enter key to submit
+        document.getElementById('gate-input').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') checkPassword();
+        });
+
+        // Check if already authenticated this session
+        (function() {
+            try {
+                if (sessionStorage.getItem('sod_auth') === '1') {
+                    unlockPlayer();
+                    return;
+                }
+            } catch(e) {}
+            document.getElementById('gate-input').focus();
+        })();
+
+        // ── Audio player ───────────────────────────────────────────────────
         var audio = null;
         var volume = 100;
 
         function playStream() {
             if (audio) { audio.pause(); audio.src = ''; audio = null; }
+
+            // Show buffering label immediately
+            var statusEl = document.getElementById('status');
+            statusEl.textContent = 'Buffering';
+            statusEl.className = 'status buffering';
+
             audio = new Audio('https://streamofdan.com/stream');
             audio.volume = volume / 100;
             audio.play().then(function() {
-                document.getElementById('status').textContent = 'Now Playing';
-                document.getElementById('status').className = 'status playing';
+                statusEl.textContent = 'Now Playing';
+                statusEl.className = 'status playing';
             }).catch(function(e) {
-                document.getElementById('status').textContent = 'Error: ' + e.message;
-                document.getElementById('status').className = 'status stopped';
+                // Ignore AbortError — that just means the user hit STOP before playback started
+                if (e.name === 'AbortError') return;
+                statusEl.textContent = 'Error: ' + e.message;
+                statusEl.className = 'status stopped';
             });
         }
 
@@ -119,10 +276,12 @@
             if (audio) audio.volume = volume / 100;
         }
 
+        // ── Now Playing strip ──────────────────────────────────────────────
         // Relative URL — nginx proxies /api/stream/now to the admin app on localhost
         var NOW_PLAYING_URL = '/api/stream/now';
         var POLL_INTERVAL_MS = 12000;
         var lastPayload = '';
+        var pollTimer = null;
 
         function fmt(track) {
             if (!track) return { title: '—', artist: '' };
@@ -140,7 +299,6 @@
 
         function renderStrip(data) {
             document.getElementById('strip').classList.add('visible');
-
             var now = fmt(data.current);
             setText('nowTitle', now.title);
             setText('nowArtist', now.artist);
@@ -184,9 +342,6 @@
                 })
                 .catch(function() { /* silent — strip stays hidden */ });
         }
-
-        pollNowPlaying();
-        setInterval(pollNowPlaying, POLL_INTERVAL_MS);
     </script>
 </body>
 </html>
