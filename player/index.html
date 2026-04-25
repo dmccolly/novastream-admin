@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stream of Dan</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            color: white;
+        }
+        .container { text-align: center; max-width: 400px; width: 100%; }
+        h1 { font-size: 2.5rem; margin-bottom: 10px; }
+        .subtitle { color: #aaa; margin-bottom: 40px; font-size: 1.1rem; }
+        .player-box { background: rgba(255,255,255,0.1); border-radius: 20px; padding: 30px; }
+        .status { font-size: 1.2rem; margin-bottom: 20px; min-height: 30px; }
+        .status.playing { color: #4ade80; }
+        .status.stopped { color: #f87171; }
+        .buttons { display: flex; gap: 15px; justify-content: center; margin-bottom: 30px; }
+        button { padding: 15px 40px; font-size: 1.2rem; font-weight: bold; border: none; border-radius: 10px; cursor: pointer; }
+        .play-btn { background: #22c55e; color: white; }
+        .stop-btn { background: #ef4444; color: white; }
+        .volume-section { margin-top: 20px; }
+        .volume-label { font-size: 1rem; margin-bottom: 10px; color: #ccc; }
+        .volume-controls { display: flex; align-items: center; justify-content: center; gap: 20px; }
+        .vol-btn { width: 50px; height: 50px; font-size: 1.5rem; background: #3b82f6; color: white; border-radius: 50%; padding: 0; }
+        .volume-display { font-size: 1.5rem; min-width: 60px; font-weight: bold; }
+
+        /* Now Playing strip */
+        .strip { margin-top: 24px; background: rgba(255,255,255,0.06); border-radius: 16px; padding: 20px; text-align: left; display: none; }
+        .strip.visible { display: block; }
+        .strip-section { margin-bottom: 16px; }
+        .strip-section:last-child { margin-bottom: 0; }
+        .strip-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: #6b7280; margin-bottom: 4px; font-weight: 600; }
+        .strip-now .strip-title { font-size: 1.1rem; font-weight: 600; color: #4ade80; }
+        .strip-now .strip-artist { font-size: 0.95rem; color: #d1d5db; }
+        .strip-next .strip-title { font-size: 0.95rem; color: #e5e7eb; }
+        .strip-next .strip-artist { font-size: 0.85rem; color: #9ca3af; }
+        .strip-recent ul { list-style: none; }
+        .strip-recent li { font-size: 0.8rem; color: #9ca3af; padding: 3px 0; border-top: 1px solid rgba(255,255,255,0.05); }
+        .strip-recent li:first-child { border-top: none; }
+        .strip-recent .recent-artist { color: #6b7280; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Stream of Dan</h1>
+        <p class="subtitle">Internet Radio</p>
+
+        <div class="player-box">
+            <div id="status" class="status stopped">Tap PLAY to start</div>
+            <div class="buttons">
+                <button id="playBtn" class="play-btn" onclick="playStream()">PLAY</button>
+                <button id="stopBtn" class="stop-btn" onclick="stopStream()">STOP</button>
+            </div>
+            <div class="volume-section">
+                <div class="volume-label">VOLUME</div>
+                <div class="volume-controls">
+                    <button class="vol-btn" onclick="changeVolume(-10)">-</button>
+                    <span id="volumeDisplay" class="volume-display">100%</span>
+                    <button class="vol-btn" onclick="changeVolume(10)">+</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="strip" class="strip">
+            <div class="strip-section strip-now">
+                <div class="strip-label">Now Playing</div>
+                <div id="nowTitle" class="strip-title">—</div>
+                <div id="nowArtist" class="strip-artist"></div>
+            </div>
+            <div class="strip-section strip-next" id="nextSection">
+                <div class="strip-label">Up Next</div>
+                <div id="nextTitle" class="strip-title">—</div>
+                <div id="nextArtist" class="strip-artist"></div>
+            </div>
+            <div class="strip-section strip-recent" id="recentSection">
+                <div class="strip-label">Recently Played</div>
+                <ul id="recentList"></ul>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        var audio = null;
+        var volume = 100;
+
+        function playStream() {
+            if (audio) { audio.pause(); audio.src = ''; audio = null; }
+            audio = new Audio('https://streamofdan.com/stream');
+            audio.volume = volume / 100;
+            audio.play().then(function() {
+                document.getElementById('status').textContent = 'Now Playing';
+                document.getElementById('status').className = 'status playing';
+            }).catch(function(e) {
+                document.getElementById('status').textContent = 'Error: ' + e.message;
+                document.getElementById('status').className = 'status stopped';
+            });
+        }
+
+        function stopStream() {
+            if (audio) { audio.pause(); audio.src = ''; audio = null; }
+            document.getElementById('status').textContent = 'Stopped';
+            document.getElementById('status').className = 'status stopped';
+        }
+
+        function changeVolume(delta) {
+            volume = Math.max(0, Math.min(100, volume + delta));
+            document.getElementById('volumeDisplay').textContent = volume + '%';
+            if (audio) audio.volume = volume / 100;
+        }
+
+        // Relative URL — nginx proxies /api/stream/now to the admin app on localhost
+        var NOW_PLAYING_URL = '/api/stream/now';
+        var POLL_INTERVAL_MS = 12000;
+        var lastPayload = '';
+
+        function fmt(track) {
+            if (!track) return { title: '—', artist: '' };
+            return { title: track.title || '—', artist: track.artist || '' };
+        }
+
+        function setText(id, text) {
+            var el = document.getElementById(id);
+            if (el && el.textContent !== text) el.textContent = text;
+        }
+
+        function escapeHtml(s) {
+            return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        function renderStrip(data) {
+            document.getElementById('strip').classList.add('visible');
+
+            var now = fmt(data.current);
+            setText('nowTitle', now.title);
+            setText('nowArtist', now.artist);
+
+            var nextSection = document.getElementById('nextSection');
+            if (data.next) {
+                var next = fmt(data.next);
+                setText('nextTitle', next.title);
+                setText('nextArtist', next.artist);
+                nextSection.style.display = '';
+            } else {
+                nextSection.style.display = 'none';
+            }
+
+            var recentSection = document.getElementById('recentSection');
+            var list = document.getElementById('recentList');
+            if (data.recent && data.recent.length) {
+                var html = '';
+                for (var i = 0; i < data.recent.length; i++) {
+                    var t = fmt(data.recent[i]);
+                    html += '<li>' + escapeHtml(t.title);
+                    if (t.artist) html += ' <span class="recent-artist">— ' + escapeHtml(t.artist) + '</span>';
+                    html += '</li>';
+                }
+                if (list.innerHTML !== html) list.innerHTML = html;
+                recentSection.style.display = '';
+            } else {
+                recentSection.style.display = 'none';
+            }
+        }
+
+        function pollNowPlaying() {
+            fetch(NOW_PLAYING_URL, { cache: 'no-store' })
+                .then(function(r) { return r.ok ? r.json() : null; })
+                .then(function(data) {
+                    if (!data) return;
+                    var key = JSON.stringify(data);
+                    if (key === lastPayload) return;
+                    lastPayload = key;
+                    renderStrip(data);
+                })
+                .catch(function() { /* silent — strip stays hidden */ });
+        }
+
+        pollNowPlaying();
+        setInterval(pollNowPlaying, POLL_INTERVAL_MS);
+    </script>
+</body>
+</html>

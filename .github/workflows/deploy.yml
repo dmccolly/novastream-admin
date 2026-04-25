@@ -19,4 +19,28 @@ jobs:
             git pull origin main
             NODE_OPTIONS=--max-old-space-size=512 npm run build:all
             pm2 restart novastream-admin
+
+            # --- Update player index.html ---
+            # Find nginx web root serving streamofdan.com
+            WEBROOT=$(grep -r "root " /etc/nginx/sites-enabled/ /etc/nginx/conf.d/ 2>/dev/null \
+              | grep -v "#" | awk '{print $NF}' | tr -d ';' | head -1)
+            if [ -z "$WEBROOT" ]; then
+              WEBROOT="/var/www/html"
+            fi
+            echo "Copying player/index.html to $WEBROOT/index.html"
+            cp /root/novastream-admin/player/index.html "$WEBROOT/index.html"
+
+            # --- Add nginx proxy for /api/stream/now if not already present ---
+            NGINX_CONF=$(grep -rl "streamofdan\|stream" /etc/nginx/sites-enabled/ /etc/nginx/conf.d/ 2>/dev/null | head -1)
+            if [ -z "$NGINX_CONF" ]; then
+              NGINX_CONF="/etc/nginx/sites-enabled/default"
+            fi
+            if ! grep -q "api/stream/now" "$NGINX_CONF"; then
+              echo "Adding /api/stream/now proxy to $NGINX_CONF"
+              # Insert proxy location before the last closing brace of the server block
+              sed -i 's|}\s*$|\n    location /api/stream/now {\n        proxy_pass http://127.0.0.1:3001/api/stream/now;\n        proxy_set_header Host $host;\n        add_header Cache-Control no-store;\n    }\n}|' "$NGINX_CONF"
+              nginx -t && systemctl reload nginx
+            else
+              echo "/api/stream/now proxy already present, skipping"
+            fi
           command_timeout: 10m
