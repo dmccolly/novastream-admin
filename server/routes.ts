@@ -1459,6 +1459,30 @@ export function registerRoutes(app: Express): Server {
     }
   });
 
+  // --- Public Now Playing endpoint (for player strip) ---
+  app.get("/api/stream/now", (req, res) => {
+    try {
+      const rows = db.prepare(`
+        SELECT title, artist, played_at
+        FROM play_history
+        ORDER BY played_at DESC
+        LIMIT 4
+      `).all() as { title: string; artist: string; played_at: string }[];
+
+      const [current, ...history] = rows;
+
+      res.set("Cache-Control", "no-store");
+      res.json({
+        current: current ? { title: current.title, artist: current.artist } : null,
+        next: null,
+        recent: history.slice(0, 3).map((r) => ({ title: r.title, artist: r.artist })),
+      });
+    } catch (err) {
+      console.error("[/api/stream/now]", err);
+      res.status(500).json({ error: "unavailable" });
+    }
+  });
+
   const httpServer = createServer(app);
   return httpServer;
 }
