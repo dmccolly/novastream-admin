@@ -85,7 +85,7 @@ output.icecast(
   %mp3(bitrate=192),
   host="localhost",
   port=8000,
-  password="novastream2024",
+  password="Nv9xK2mP7q",
   mount="stream",
   radio
 )
