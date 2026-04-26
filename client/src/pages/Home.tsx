@@ -1,22 +1,19 @@
 import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { 
-  Activity, 
-  Users, 
-  Music, 
-  Clock, 
-  Play, 
-  Pause,
+import {
+  Activity,
+  Users,
+  Music,
+  Clock,
+  Play,
   RefreshCw,
-  Server,
-  SkipForward,
-  Music2,
-  HardDrive
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { tracksApi } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 export default function Home() {
   const { toast } = useToast();
@@ -27,6 +24,10 @@ export default function Home() {
     listeners: 1248,
     uptime: "14d 02h",
   });
+  const [nowPlaying, setNowPlaying] = useState<{
+    current: { title: string; artist: string } | null;
+    recent: { title: string; artist: string }[];
+  }>({ current: null, recent: [] });
 
   useEffect(() => {
     const loadStats = async () => {
@@ -42,6 +43,21 @@ export default function Home() {
       }
     };
     loadStats();
+  }, []);
+
+  useEffect(() => {
+    const fetchNowPlaying = async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/stream/now`);
+        const data = await res.json();
+        setNowPlaying({ current: data.current || null, recent: data.recent || [] });
+      } catch {
+        // silent
+      }
+    };
+    fetchNowPlaying();
+    const interval = setInterval(fetchNowPlaying, 10000);
+    return () => clearInterval(interval);
   }, []);
 
   return (
@@ -163,52 +179,28 @@ export default function Home() {
                   <Music className="h-16 w-16 text-primary/50" />
                 </div>
                 <div className="flex-1 text-center md:text-left space-y-2">
-                  <h3 className="text-4xl font-display font-bold text-foreground">Bohemian Rhapsody</h3>
-                  <p className="text-xl text-primary font-medium">Queen</p>
-                  <p className="text-sm text-muted-foreground font-mono">A Night at the Opera • 1975</p>
-                  
-                  <div className="w-full bg-secondary/50 h-1.5 rounded-full mt-6 overflow-hidden">
-                    <div className="bg-primary h-full w-1/3 relative">
-                      <div className="absolute right-0 top-1/2 -translate-y-1/2 h-3 w-3 bg-white rounded-full shadow-lg" />
-                    </div>
-                  </div>
-                  <div className="flex justify-between text-xs font-mono text-muted-foreground mt-1">
-                    <span>02:14</span>
-                    <span>05:55</span>
-                  </div>
-
-                  <div className="flex items-center justify-center md:justify-start gap-4 mt-4">
-                    <Button variant="outline" size="icon" className="h-10 w-10 rounded-full border-primary/20 hover:border-primary hover:bg-primary/10">
-                      <Pause className="h-4 w-4" />
-                    </Button>
-                    <Button variant="outline" size="icon" className="h-10 w-10 rounded-full border-primary/20 hover:border-primary hover:bg-primary/10">
-                      <Play className="h-4 w-4" />
-                    </Button>
-                    <div className="ml-auto px-3 py-1 rounded-full bg-red-500/10 border border-red-500/20 text-red-500 text-xs font-bold uppercase tracking-wider flex items-center gap-2">
-                      <div className="h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse" />
-                      Live Broadcast
-                    </div>
-                  </div>
+                  <h3 className="text-4xl font-display font-bold text-foreground">
+                    {nowPlaying.current?.title ?? "—"}
+                  </h3>
+                  <p className="text-xl text-primary font-medium">
+                    {nowPlaying.current?.artist ?? ""}
+                  </p>
                 </div>
               </div>
             </CardContent>
           </Card>
 
-          {/* Up Next */}
+          {/* Recently Played */}
           <Card className="glass-panel">
             <CardHeader>
-              <CardTitle className="font-display tracking-wider text-sm uppercase">Up Next</CardTitle>
+              <CardTitle className="font-display tracking-wider text-sm uppercase">Recently Played</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
-                {[
-                  { title: "Enter Sandman", artist: "Metallica", time: "05:55" },
-                  { title: "Sweet Child O' Mine", artist: "Guns N' Roses", time: "06:02" },
-                  { title: "Back in Black", artist: "AC/DC", time: "06:15" },
-                  { title: "Smells Like Teen Spirit", artist: "Nirvana", time: "06:20" },
-                  { title: "Whole Lotta Love", artist: "Led Zeppelin", time: "06:25" },
-                ].map((track, i) => (
-                  <div key={i} className="flex items-center gap-3 p-2 rounded hover:bg-white/5 transition-colors group cursor-pointer">
+                {nowPlaying.recent.length === 0 ? (
+                  <p className="text-xs text-muted-foreground font-mono">No history yet</p>
+                ) : nowPlaying.recent.map((track, i) => (
+                  <div key={i} className="flex items-center gap-3 p-2 rounded hover:bg-white/5 transition-colors group">
                     <div className="h-8 w-8 rounded bg-secondary/50 flex items-center justify-center text-xs font-mono text-muted-foreground group-hover:text-primary group-hover:bg-primary/10 transition-colors">
                       {i + 1}
                     </div>
@@ -216,7 +208,6 @@ export default function Home() {
                       <div className="font-medium text-sm text-foreground truncate">{track.title}</div>
                       <div className="text-xs text-muted-foreground truncate">{track.artist}</div>
                     </div>
-                    <div className="text-xs font-mono text-muted-foreground">{track.time}</div>
                   </div>
                 ))}
               </div>
