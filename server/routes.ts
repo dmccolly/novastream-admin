@@ -207,10 +207,15 @@ export function registerRoutes(app: Express): Server {
         return res.status(404).json({ error: "Track not found" });
       }
       
-      // If file is on server, return local URL
+      // If file is on server, return appropriate URL
+      // WMA and other non-browser-native formats must go through the stream endpoint for transcoding
       if (track.filepath) {
-        const localUrl = `/music/${path.basename(track.filepath)}`;
-        console.log("[PREVIEW] Track has filepath, returning local URL:", localUrl);
+        const ext = path.extname(track.filepath).toLowerCase();
+        const needsTranscode = ['.wma', '.ogg', '.flac', '.aiff', '.aif'].includes(ext);
+        const localUrl = needsTranscode
+          ? `/api/tracks/${id}/stream`
+          : `/music/${path.basename(track.filepath)}`;
+        console.log(`[PREVIEW] Track has filepath (${ext}), returning URL:`, localUrl);
         return res.json({ url: localUrl });
       }
       
@@ -218,6 +223,14 @@ export function registerRoutes(app: Express): Server {
       if (!track.source_url) {
         console.log("[PREVIEW] Track has no source_url, returning 400");
         return res.status(400).json({ error: "Track has no source URL" });
+      }
+
+      // WMA and other non-browser-native cloud files: route through transcoding stream endpoint
+      const cloudExt = path.extname(track.source_url).toLowerCase();
+      const cloudNeedsTranscode = ['.wma', '.ogg', '.flac', '.aiff', '.aif'].includes(cloudExt);
+      if (cloudNeedsTranscode) {
+        console.log(`[PREVIEW] Cloud file is ${cloudExt}, routing through transcode stream`);
+        return res.json({ url: `/api/tracks/${id}/stream-cloud` });
       }
 
       console.log("[PREVIEW] Getting Dropbox client...");
@@ -230,6 +243,61 @@ export function registerRoutes(app: Express): Server {
     } catch (error) {
       console.error("[PREVIEW] Error getting preview link:", error);
       res.status(500).json({ error: "Failed to get preview link" });
+    }
+  });
+
+  // Stream-cloud: fetch WMA/non-native from Dropbox and transcode to MP3 on the fly
+  app.get("/api/tracks/:id/stream-cloud", async (req, res) => {
+    const { id } = req.params;
+    try {
+      const track = db.prepare("SELECT source_url FROM tracks WHERE id = ?").get(id) as any;
+      if (!track || !track.source_url) {
+        return res.status(404).json({ error: "Track not found or has no source URL" });
+      }
+
+      const dbx = await getDropboxClient();
+      const response = await dbx.filesGetTemporaryLink({ path: track.source_url });
+      const dropboxUrl = response.result.link;
+
+      console.log(`[STREAM-CLOUD] Transcoding cloud file for track ${id}: ${track.source_url}`);
+
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.writeHead(200);
+
+      const ffmpeg = spawn('ffmpeg', [
+        '-i', dropboxUrl,
+        '-vn',
+        '-acodec', 'libmp3lame',
+        '-ab', '192k',
+        '-ar', '44100',
+        '-f', 'mp3',
+        'pipe:1'
+      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+      ffmpeg.stdout.pipe(res);
+
+      ffmpeg.stderr.on('data', (data: Buffer) => {
+        // suppress ffmpeg progress output
+      });
+
+      ffmpeg.on('error', (err: Error) => {
+        console.error('[STREAM-CLOUD] ffmpeg spawn error:', err);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Transcoding failed' });
+        }
+      });
+
+      req.on('close', () => {
+        ffmpeg.kill('SIGKILL');
+      });
+
+    } catch (error) {
+      console.error("[STREAM-CLOUD] Error:", error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Failed to stream cloud track" });
+      }
     }
   });
 
@@ -511,7 +579,7 @@ export function registerRoutes(app: Express): Server {
       }
     });
 
-    // Stream Track Audio - for waveform editor
+    // Stream Track Audio - for waveform editor and library preview
     app.get("/api/tracks/:id/stream", (req, res) => {
       const { id } = req.params;
       try {
@@ -525,15 +593,61 @@ export function registerRoutes(app: Express): Server {
           return res.status(404).json({ error: "Audio file not found on server" });
         }
 
-        const stat = fs.statSync(track.filepath);
-        const fileSize = stat.size;
-        const range = req.headers.range;
-
         // Set CORS headers for WaveSurfer.js WebAudio backend
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Range');
         res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length');
+
+        const ext = path.extname(track.filepath).toLowerCase();
+
+        // WMA and other non-browser-native formats: transcode to MP3 via ffmpeg
+        if (ext === '.wma' || ext === '.ogg' || ext === '.flac' || ext === '.aiff' || ext === '.aif') {
+          console.log(`[STREAM] Transcoding ${ext} file to MP3: ${track.filepath}`);
+          res.setHeader('Content-Type', 'audio/mpeg');
+          res.setHeader('Cache-Control', 'no-cache');
+          res.writeHead(200);
+
+          const ffmpeg = spawn('ffmpeg', [
+            '-i', track.filepath,
+            '-vn',                  // no video
+            '-acodec', 'libmp3lame',
+            '-ab', '192k',
+            '-ar', '44100',
+            '-f', 'mp3',
+            'pipe:1'                // output to stdout
+          ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+          ffmpeg.stdout.pipe(res);
+
+          ffmpeg.stderr.on('data', (data: Buffer) => {
+            // ffmpeg writes progress to stderr — suppress unless debugging
+            // console.log('[ffmpeg]', data.toString());
+          });
+
+          ffmpeg.on('error', (err: Error) => {
+            console.error('[STREAM] ffmpeg spawn error:', err);
+            if (!res.headersSent) {
+              res.status(500).json({ error: 'Transcoding failed' });
+            }
+          });
+
+          req.on('close', () => {
+            ffmpeg.kill('SIGKILL');
+          });
+
+          return;
+        }
+
+        // Native browser formats (MP3, AAC, WAV, etc.): serve directly with range support
+        const stat = fs.statSync(track.filepath);
+        const fileSize = stat.size;
+        const range = req.headers.range;
+
+        const mimeType = ext === '.mp3' ? 'audio/mpeg'
+          : ext === '.aac' || ext === '.m4a' ? 'audio/aac'
+          : ext === '.wav' ? 'audio/wav'
+          : 'audio/mpeg';
 
         if (range) {
           const parts = range.replace(/bytes=/, "").split("-");
@@ -545,14 +659,14 @@ export function registerRoutes(app: Express): Server {
             'Content-Range': `bytes ${start}-${end}/${fileSize}`,
             'Accept-Ranges': 'bytes',
             'Content-Length': chunksize,
-            'Content-Type': 'audio/mpeg',
+            'Content-Type': mimeType,
           };
           res.writeHead(206, head);
           file.pipe(res);
         } else {
           const head = {
             'Content-Length': fileSize,
-            'Content-Type': 'audio/mpeg',
+            'Content-Type': mimeType,
           };
           res.writeHead(200, head);
           fs.createReadStream(track.filepath).pipe(res);
