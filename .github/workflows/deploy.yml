@@ -15,15 +15,15 @@ jobs:
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
+            # EMERGENCY: Restart the old novastream process to restore port 3006
+            pm2 restart novastream 2>/dev/null || pm2 start /root/novastream/dist/index.js --name novastream -- --port 3006 2>/dev/null || true
+            echo "novastream process status:"
+            pm2 list | grep novastream
+            # Build and restart novastream-admin (runs on port 3001)
             cd /root/novastream-admin
             git pull origin main
             NODE_OPTIONS=--max-old-space-size=512 npm run build:all
-            # Stop the old novastream process (it runs the old codebase on port 3006)
-            pm2 stop novastream 2>/dev/null || true
-            # Start/restart novastream-admin with PORT=3006 via ecosystem config
-            pm2 startOrRestart ecosystem.config.cjs --update-env
-            pm2 save
-            echo "novastream-admin now running on port 3006"
+            pm2 restart novastream-admin || true
           command_timeout: 10m
 
       - name: Update player HTML and nginx
