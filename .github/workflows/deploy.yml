@@ -18,37 +18,8 @@ jobs:
             cd /root/novastream-admin
             git pull origin main
             NODE_OPTIONS=--max-old-space-size=512 npm run build:all
-            # Find where the 'novastream' PM2 process runs from and copy the new dist there
-            NOVA_SCRIPT=$(pm2 jlist 2>/dev/null | python3 -c "import json,sys; procs=json.load(sys.stdin); [print(p['pm2_env']['pm_exec_path']) for p in procs if p['name']=='novastream']" 2>/dev/null | head -1)
-            if [ -n "$NOVA_SCRIPT" ]; then
-              NOVA_DIR=$(dirname "$NOVA_SCRIPT")
-              echo "novastream runs from: $NOVA_DIR"
-              cp /root/novastream-admin/dist/index.js "$NOVA_DIR/index.js"
-              echo "Copied new dist/index.js to $NOVA_DIR"
-            fi
-            # Restart both PM2 processes
-            pm2 restart novastream || true
+            # Only restart novastream-admin (the correct process for this codebase)
             pm2 restart novastream-admin || true
-            # Run WMA-to-MP3 migration on existing files (background, non-blocking)
-            nohup node -e "
-              const {execSync} = require('child_process');
-              const fs = require('fs');
-              const path = require('path');
-              const musicDir = '/root/novastream/storage/music';
-              if (!fs.existsSync(musicDir)) process.exit(0);
-              const files = fs.readdirSync(musicDir).filter(f => f.toLowerCase().endsWith('.wma'));
-              console.log('[MIGRATE] Found', files.length, 'WMA files to convert');
-              files.forEach(f => {
-                const inp = path.join(musicDir, f);
-                const out = inp.replace(/\\.wma$/i, '.mp3');
-                try {
-                  execSync('ffmpeg -y -i ' + JSON.stringify(inp) + ' -vn -acodec libmp3lame -ab 192k -ar 44100 -f mp3 ' + JSON.stringify(out), {stdio:'pipe'});
-                  fs.unlinkSync(inp);
-                  console.log('[MIGRATE] Converted:', f);
-                } catch(e) { console.error('[MIGRATE] Failed:', f, e.message.slice(0,100)); }
-              });
-            " > /tmp/wma-migrate.log 2>&1 &
-            echo "WMA migration started in background (see /tmp/wma-migrate.log)"
           command_timeout: 10m
 
       - name: Update player HTML and nginx
