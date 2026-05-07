@@ -15,16 +15,15 @@ jobs:
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            # Restore novastream process first (it was accidentally overwritten)
-            cd /root/novastream && git checkout dist/index.js 2>/dev/null || echo "novastream git restore failed, trying npm build"
-            if [ -f package.json ]; then npm run build 2>/dev/null || true; fi
-            pm2 restart novastream || true
-            echo "novastream restored and restarted"
-            # Now build and restart novastream-admin
             cd /root/novastream-admin
             git pull origin main
             NODE_OPTIONS=--max-old-space-size=512 npm run build:all
-            pm2 restart novastream-admin || true
+            # Stop the old novastream process (it runs the old codebase on port 3006)
+            pm2 stop novastream 2>/dev/null || true
+            # Start/restart novastream-admin with PORT=3006 via ecosystem config
+            pm2 startOrRestart ecosystem.config.cjs --update-env
+            pm2 save
+            echo "novastream-admin now running on port 3006"
           command_timeout: 10m
 
       - name: Update player HTML and nginx
