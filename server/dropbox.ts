@@ -52,7 +52,7 @@ export async function syncDropbox() {
 
 function isAudioFile(filename: string): boolean {
   const ext = filename.split('.').pop()?.toLowerCase();
-  return ['mp3', 'wav', 'm4a', 'flac', 'aac', 'ogg'].includes(ext || '');
+  return ['mp3', 'wav', 'm4a', 'flac', 'aac', 'ogg', 'wma', 'aiff', 'aif'].includes(ext || '');
 }
 
 function parseFilename(filename: string): { artist: string, title: string } {

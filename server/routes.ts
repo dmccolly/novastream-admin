@@ -331,11 +331,53 @@ export function registerRoutes(app: Express): Server {
     }
   });
 
+  // Helper: convert a WMA (or other non-native) file to MP3 using ffmpeg
+  // Returns the new MP3 filepath on success, or null on failure
+  async function convertToMp3(inputPath: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      const outputPath = inputPath.replace(/\.[^.]+$/, '.mp3');
+      console.log(`[CONVERT] Converting ${inputPath} -> ${outputPath}`);
+
+      const ffmpeg = spawn('ffmpeg', [
+        '-y',                    // overwrite output if exists
+        '-i', inputPath,
+        '-vn',
+        '-acodec', 'libmp3lame',
+        '-ab', '192k',
+        '-ar', '44100',
+        '-f', 'mp3',
+        outputPath
+      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+      let stderr = '';
+      ffmpeg.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+
+      ffmpeg.on('close', (code: number) => {
+        if (code === 0 && fs.existsSync(outputPath)) {
+          // Remove the original WMA file
+          try { fs.unlinkSync(inputPath); } catch {}
+          console.log(`[CONVERT] Conversion successful: ${outputPath}`);
+          resolve(outputPath);
+        } else {
+          console.error(`[CONVERT] ffmpeg exited with code ${code}:`, stderr.slice(-500));
+          resolve(null);
+        }
+      });
+
+      ffmpeg.on('error', (err: Error) => {
+        console.error('[CONVERT] ffmpeg spawn error:', err);
+        resolve(null);
+      });
+    });
+  }
+
   // Helper function to handle Dropbox download
   async function downloadFromDropbox(trackId: number, dropboxPath: string) {
     try {
       const dbx = await getDropboxClient();
-      const filename = `${trackId}_${Date.now()}.mp3`; // Force MP3 extension for consistency
+      // Preserve the original extension so we know what we downloaded
+      const srcExt = path.extname(dropboxPath).toLowerCase() || '.mp3';
+      const filename = `${trackId}_${Date.now()}${srcExt}`;
       const filepath = path.join(musicDir, filename);
 
       console.log(`Downloading ${dropboxPath} to ${filepath}...`);
@@ -349,9 +391,23 @@ export function registerRoutes(app: Express): Server {
 
       fs.writeFileSync(filepath, fileBinary);
       console.log(`Download ${trackId} completed successfully.`);
+
+      // Convert WMA and other non-browser-native formats to MP3
+      const needsConvert = ['.wma', '.ogg', '.flac', '.aiff', '.aif'].includes(srcExt);
+      let finalPath = filepath;
+      if (needsConvert) {
+        console.log(`[Download] ${srcExt.toUpperCase()} detected for track ${trackId}, converting to MP3...`);
+        const converted = await convertToMp3(filepath);
+        if (converted) {
+          finalPath = converted;
+          console.log(`[Download] Track ${trackId} converted to MP3: ${finalPath}`);
+        } else {
+          console.warn(`[Download] Conversion failed for track ${trackId}, keeping original ${srcExt} file`);
+        }
+      }
       
-      // Extract duration using ffprobe
-      const duration = await extractDuration(filepath);
+      // Extract duration using ffprobe (use finalPath which may be the converted MP3)
+      const duration = await extractDuration(finalPath);
       
       if (duration) {
         console.log(`[Download] Extracted duration for track ${trackId}: ${duration}s`);
@@ -371,10 +427,10 @@ export function registerRoutes(app: Express): Server {
         
         db.prepare(
           "UPDATE tracks SET status = 'ready', filepath = ?, duration = ?, cue_out = ? WHERE id = ?"
-        ).run(filepath, duration, defaultCueOut, trackId);
+        ).run(finalPath, duration, defaultCueOut, trackId);
       } else {
         console.warn(`[Download] Could not extract duration for track ${trackId}, setting without duration`);
-        db.prepare("UPDATE tracks SET status = 'ready', filepath = ? WHERE id = ?").run(filepath, trackId);
+        db.prepare("UPDATE tracks SET status = 'ready', filepath = ? WHERE id = ?").run(finalPath, trackId);
       }
 
     } catch (error: any) {
@@ -1595,6 +1651,52 @@ export function registerRoutes(app: Express): Server {
       console.error("[/api/stream/now]", err);
       res.status(500).json({ error: "unavailable" });
     }
+  });
+
+  // Migrate existing WMA files on server to MP3 (one-time background job)
+  app.post("/api/admin/convert-wma", async (req, res) => {
+    const { secret } = req.body || {};
+    if (secret !== "novastream-setup-2026") {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    // Find all on-server tracks with WMA filepath
+    const wmaTracksList = db.prepare(
+      "SELECT id, filepath FROM tracks WHERE filepath IS NOT NULL AND filepath LIKE '%.wma'"
+    ).all() as { id: number; filepath: string }[];
+
+    res.json({ message: `Starting background conversion of ${wmaTracksList.length} WMA files`, count: wmaTracksList.length });
+
+    // Run conversions sequentially in background to avoid CPU saturation
+    (async () => {
+      let converted = 0, failed = 0, skipped = 0;
+      for (const t of wmaTracksList) {
+        if (!fs.existsSync(t.filepath)) {
+          console.log(`[MIGRATE] File not found, skipping track ${t.id}: ${t.filepath}`);
+          skipped++;
+          continue;
+        }
+        console.log(`[MIGRATE] Converting track ${t.id}: ${t.filepath}`);
+        const mp3Path = await convertToMp3(t.filepath);
+        if (mp3Path) {
+          // Update DB filepath and duration
+          const dur = await extractDuration(mp3Path);
+          if (dur) {
+            db.prepare("UPDATE tracks SET filepath = ?, duration = ? WHERE id = ?").run(mp3Path, dur, t.id);
+          } else {
+            db.prepare("UPDATE tracks SET filepath = ? WHERE id = ?").run(mp3Path, t.id);
+          }
+          console.log(`[MIGRATE] Track ${t.id} converted OK -> ${mp3Path}`);
+          converted++;
+        } else {
+          console.warn(`[MIGRATE] Conversion failed for track ${t.id}`);
+          failed++;
+        }
+        // Small pause between conversions to keep CPU load manageable
+        await new Promise(r => setTimeout(r, 500));
+      }
+      console.log(`[MIGRATE] Done: ${converted} converted, ${failed} failed, ${skipped} skipped`);
+    })();
   });
 
   const httpServer = createServer(app);
