@@ -15,10 +15,15 @@ jobs:
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
+            # Restore novastream process first (it was accidentally overwritten)
+            cd /root/novastream && git checkout dist/index.js 2>/dev/null || echo "novastream git restore failed, trying npm build"
+            if [ -f package.json ]; then npm run build 2>/dev/null || true; fi
+            pm2 restart novastream || true
+            echo "novastream restored and restarted"
+            # Now build and restart novastream-admin
             cd /root/novastream-admin
             git pull origin main
             NODE_OPTIONS=--max-old-space-size=512 npm run build:all
-            # Only restart novastream-admin (the correct process for this codebase)
             pm2 restart novastream-admin || true
           command_timeout: 10m
 
