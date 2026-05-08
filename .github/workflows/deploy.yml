@@ -8,37 +8,33 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Build and deploy novastream-admin on port 3006
+      - name: Build novastream-admin and restore port 3006
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            set -e
+            # STEP 1: Ensure port 3006 is served by novastream (the stable process)
+            # Restore it if it was stopped
+            if ! pm2 list | grep -q "novastream "; then
+              pm2 start /root/novastream/dist/index.js --name novastream 2>/dev/null || true
+            fi
+            pm2 restart novastream 2>/dev/null || true
 
-            # 1. Pull latest code and build (force-sync to avoid divergent branch issues)
+            # STEP 2: Build and restart novastream-admin (port 3001, internal only)
             cd /root/novastream-admin
             git fetch origin main
             git reset --hard origin/main
             NODE_OPTIONS=--max-old-space-size=512 npm run build:all
+            pm2 restart novastream-admin 2>/dev/null || true
 
-            # 2. Stop the old novastream process (which holds port 3006) if it exists
-            pm2 stop novastream 2>/dev/null || true
-            pm2 delete novastream 2>/dev/null || true
-
-            # 3. Delete and re-create novastream-admin so the new PORT=3006 env is applied
-            pm2 delete novastream-admin 2>/dev/null || true
-            pm2 start /root/novastream-admin/ecosystem.config.cjs
-
-            # 4. Save PM2 process list so it survives reboots
             pm2 save --force
-
             echo "=== PM2 status ==="
             pm2 list
-            echo "=== Port 3006 health check ==="
-            sleep 4
-            curl -sf http://localhost:3006/api/health && echo "OK" || echo "FAILED"
+            echo "=== Port 3006 health ==="
+            sleep 2
+            curl -sf http://localhost:3006/api/health && echo " OK" || echo " FAILED"
           command_timeout: 10m
 
       - name: Update player HTML and nginx
