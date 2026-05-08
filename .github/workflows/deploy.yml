@@ -27,8 +27,9 @@ jobs:
             pm2 stop novastream 2>/dev/null || true
             pm2 delete novastream 2>/dev/null || true
 
-            # 3. Start/restart novastream-admin on port 3006 using ecosystem config
-            pm2 startOrRestart /root/novastream-admin/ecosystem.config.cjs --update-env
+            # 3. Delete and re-create novastream-admin so the new PORT=3006 env is applied
+            pm2 delete novastream-admin 2>/dev/null || true
+            pm2 start /root/novastream-admin/ecosystem.config.cjs
 
             # 4. Save PM2 process list so it survives reboots
             pm2 save --force
