@@ -17,9 +17,10 @@ jobs:
           script: |
             set -e
 
-            # 1. Pull latest code and build
+            # 1. Pull latest code and build (force-sync to avoid divergent branch issues)
             cd /root/novastream-admin
-            git pull origin main
+            git fetch origin main
+            git reset --hard origin/main
             NODE_OPTIONS=--max-old-space-size=512 npm run build:all
 
             # 2. Stop the old novastream process (which holds port 3006) if it exists
