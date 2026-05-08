@@ -13,16 +13,16 @@ jobs:
         with:
           host: 137.184.12.217
           username: root
-          password: ${{ secrets.DO_PASSWORD }}
+          key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            # Restore novastream on port 3006 first
+            # RESTORE: bring novastream back on port 3006
             cd /root/novastream
             git checkout dist/index.js 2>/dev/null || true
             pm2 start dist/index.js --name novastream 2>/dev/null || pm2 restart novastream
-            sleep 2
+            sleep 3
             curl -sf http://localhost:3006/api/health && echo "port 3006 OK" || echo "port 3006 FAILED"
 
-            # Now build and restart novastream-admin (stays on port 3001 internal)
+            # BUILD: update novastream-admin (port 3001, internal)
             cd /root/novastream-admin
             git fetch origin main
             git reset --hard origin/main
@@ -39,7 +39,7 @@ jobs:
         with:
           host: 137.184.12.217
           username: root
-          password: ${{ secrets.DO_PASSWORD }}
+          key: ${{ secrets.DO_SSH_KEY }}
           script: |
             for WEBROOT in /var/www/html /var/www/streamofdan.com/html /var/www/streamofdan/html /usr/share/nginx/html; do
               if [ -f "$WEBROOT/index.html" ]; then
