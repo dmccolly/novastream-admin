@@ -645,8 +645,18 @@ export function registerRoutes(app: Express): Server {
           return res.status(404).json({ error: "Track not found or not downloaded" });
         }
 
-        if (!fs.existsSync(track.filepath)) {
-          return res.status(404).json({ error: "Audio file not found on server" });
+        // Resolve the actual file path — the DB may store an old path from a previous
+        // installation (e.g. /root/novastream/storage/music/) while the files now live
+        // under the current app's storage directory.
+        let resolvedPath = track.filepath;
+        if (!fs.existsSync(resolvedPath)) {
+          const filename = path.basename(track.filepath);
+          const localStoragePath = path.join(__dirname, '..', 'storage', 'music', filename);
+          if (fs.existsSync(localStoragePath)) {
+            resolvedPath = localStoragePath;
+          } else {
+            return res.status(404).json({ error: "Audio file not found on server" });
+          }
         }
 
         // Set CORS headers for WaveSurfer.js WebAudio backend
@@ -655,17 +665,17 @@ export function registerRoutes(app: Express): Server {
         res.setHeader('Access-Control-Allow-Headers', 'Range');
         res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length');
 
-        const ext = path.extname(track.filepath).toLowerCase();
+        const ext = path.extname(resolvedPath).toLowerCase();
 
         // WMA and other non-browser-native formats: transcode to MP3 via ffmpeg
         if (ext === '.wma' || ext === '.ogg' || ext === '.flac' || ext === '.aiff' || ext === '.aif') {
-          console.log(`[STREAM] Transcoding ${ext} file to MP3: ${track.filepath}`);
+          console.log(`[STREAM] Transcoding ${ext} file to MP3: ${resolvedPath}`);
           res.setHeader('Content-Type', 'audio/mpeg');
           res.setHeader('Cache-Control', 'no-cache');
           res.writeHead(200);
 
           const ffmpeg = spawn('ffmpeg', [
-            '-i', track.filepath,
+            '-i', resolvedPath,
             '-vn',                  // no video
             '-acodec', 'libmp3lame',
             '-ab', '192k',
@@ -696,7 +706,7 @@ export function registerRoutes(app: Express): Server {
         }
 
         // Native browser formats (MP3, AAC, WAV, etc.): serve directly with range support
-        const stat = fs.statSync(track.filepath);
+        const stat = fs.statSync(resolvedPath);
         const fileSize = stat.size;
         const range = req.headers.range;
 
@@ -710,7 +720,7 @@ export function registerRoutes(app: Express): Server {
           const start = parseInt(parts[0], 10);
           const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
           const chunksize = (end - start) + 1;
-          const file = fs.createReadStream(track.filepath, { start, end });
+          const file = fs.createReadStream(resolvedPath, { start, end });
           const head = {
             'Content-Range': `bytes ${start}-${end}/${fileSize}`,
             'Accept-Ranges': 'bytes',
@@ -725,7 +735,7 @@ export function registerRoutes(app: Express): Server {
             'Content-Type': mimeType,
           };
           res.writeHead(200, head);
-          fs.createReadStream(track.filepath).pipe(res);
+          fs.createReadStream(resolvedPath).pipe(res);
         }
       } catch (error: any) {
         console.error("Error streaming track:", error);

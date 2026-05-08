@@ -57,6 +57,8 @@ export default function Library() {
   const [playingTrackId, setPlayingTrackId] = useState<string | null>(null);
   const [playingTrack, setPlayingTrack] = useState<Track | null>(null);
   const [loadingPreviewId, setLoadingPreviewId] = useState<string | null>(null);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const isFirstRun = useRef(true);
@@ -224,16 +226,42 @@ export default function Library() {
       }
       if (url) {
         const audio = new Audio(url);
+        // Only show Now Playing bar once audio actually starts
+        audio.onplay = () => {
+          setPlayingTrackId(trackId);
+          setPlayingTrack(track);
+          setCurrentTime(0);
+        };
         audio.onended = () => {
           setPlayingTrackId(null);
           setPlayingTrack(null);
+          setCurrentTime(0);
+          setAudioDuration(0);
         };
+        audio.onerror = () => {
+          toast.error("Failed to play audio");
+          setPlayingTrackId(null);
+          setPlayingTrack(null);
+          setCurrentTime(0);
+          setAudioDuration(0);
+        };
+        audio.onloadedmetadata = () => {
+          setAudioDuration(audio.duration || 0);
+        };
+        audio.ontimeupdate = () => {
+          setCurrentTime(audio.currentTime);
+        };
+        audioRef.current = audio;
+        // Set loading state immediately so the row shows a spinner
+        setLoadingPreviewId(trackId);
         audio
           .play()
-          .catch((e) => toast.error("Failed to play audio: " + e.message));
-        audioRef.current = audio;
-        setPlayingTrackId(trackId);
-        setPlayingTrack(track);
+          .catch((e) => {
+            toast.error("Failed to play audio: " + e.message);
+            setPlayingTrackId(null);
+            setPlayingTrack(null);
+          })
+          .finally(() => setLoadingPreviewId(null));
       }
     }
   };
@@ -245,6 +273,8 @@ export default function Library() {
     }
     setPlayingTrackId(null);
     setPlayingTrack(null);
+    setCurrentTime(0);
+    setAudioDuration(0);
   };
 
   const formatDuration = (seconds?: number) => {
@@ -605,6 +635,13 @@ export default function Library() {
       {/* Floating Mini Player */}
       {playingTrack && (
         <div className="fixed bottom-0 left-0 right-0 bg-background/95 backdrop-blur-sm border-t border-border shadow-lg z-50">
+          {/* Progress bar */}
+          <div className="w-full h-1 bg-border">
+            <div
+              className="h-1 bg-primary transition-all duration-300"
+              style={{ width: audioDuration > 0 ? `${(currentTime / audioDuration) * 100}%` : '0%' }}
+            />
+          </div>
           <div className="max-w-screen-xl mx-auto px-4 py-3">
             <div className="flex items-center justify-between gap-4">
               <div className="flex items-center gap-3 min-w-0 flex-1">
@@ -620,7 +657,12 @@ export default function Library() {
                   </p>
                 </div>
               </div>
-              <div className="flex items-center gap-2 flex-shrink-0">
+              <div className="flex items-center gap-3 flex-shrink-0">
+                {/* Elapsed / Total time */}
+                <span className="text-xs font-mono text-muted-foreground hidden sm:block">
+                  {formatDuration(currentTime)}
+                  {audioDuration > 0 ? ` / ${formatDuration(audioDuration)}` : ""}
+                </span>
                 <Badge variant="outline" className="hidden sm:flex">
                   {playingTrack.filepath ? (
                     <>
