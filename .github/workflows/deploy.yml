@@ -8,41 +8,38 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Build novastream-admin and restore port 3006
+      - name: Restore and deploy
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
-          key: ${{ secrets.DO_SSH_KEY }}
+          password: ${{ secrets.DO_PASSWORD }}
           script: |
-            # STEP 1: Ensure port 3006 is served by novastream (the stable process)
-            # Restore it if it was stopped
-            if ! pm2 list | grep -q "novastream "; then
-              pm2 start /root/novastream/dist/index.js --name novastream 2>/dev/null || true
-            fi
-            pm2 restart novastream 2>/dev/null || true
+            # Restore novastream on port 3006 first
+            cd /root/novastream
+            git checkout dist/index.js 2>/dev/null || true
+            pm2 start dist/index.js --name novastream 2>/dev/null || pm2 restart novastream
+            sleep 2
+            curl -sf http://localhost:3006/api/health && echo "port 3006 OK" || echo "port 3006 FAILED"
 
-            # STEP 2: Build and restart novastream-admin (port 3001, internal only)
+            # Now build and restart novastream-admin (stays on port 3001 internal)
             cd /root/novastream-admin
             git fetch origin main
             git reset --hard origin/main
             NODE_OPTIONS=--max-old-space-size=512 npm run build:all
-            pm2 restart novastream-admin 2>/dev/null || true
+            pm2 restart novastream-admin 2>/dev/null || pm2 start dist/index.js --name novastream-admin
 
             pm2 save --force
-            echo "=== PM2 status ==="
+            echo "=== PM2 ==="
             pm2 list
-            echo "=== Port 3006 health ==="
-            sleep 2
-            curl -sf http://localhost:3006/api/health && echo " OK" || echo " FAILED"
           command_timeout: 10m
 
-      - name: Update player HTML and nginx
+      - name: Update player HTML
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
-          key: ${{ secrets.DO_SSH_KEY }}
+          password: ${{ secrets.DO_PASSWORD }}
           script: |
             for WEBROOT in /var/www/html /var/www/streamofdan.com/html /var/www/streamofdan/html /usr/share/nginx/html; do
               if [ -f "$WEBROOT/index.html" ]; then
@@ -51,10 +48,4 @@ jobs:
                 break
               fi
             done
-            CONF=$(grep -rl "server_name" /etc/nginx/sites-enabled/ 2>/dev/null | head -1)
-            if [ -z "$CONF" ]; then CONF="/etc/nginx/sites-enabled/default"; fi
-            if ! grep -q "stream/now" "$CONF"; then
-              sed -i 's|location /stream {|location /api/stream/now {\n        proxy_pass http://127.0.0.1:3001/api/stream/now;\n        proxy_set_header Host $http_host;\n        add_header Cache-Control no-store;\n    }\n\n    location /stream {|' "$CONF"
-              nginx -t && systemctl reload nginx && echo "nginx updated"
-            fi
           command_timeout: 5m
