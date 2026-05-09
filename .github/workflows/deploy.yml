@@ -7,7 +7,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Restore all server files to pre-today state
+      - name: Restore all files to pre-today state
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,29 +16,65 @@ jobs:
           script: |
             set -e
 
-            echo "=== What backups exist? ==="
-            ls -la /root/novastream-admin/dist/index.js.bak* 2>/dev/null || echo "no bak files"
-            ls -la /root/novastream/dist/index.js.bak* 2>/dev/null || echo "no bak files in novastream"
-            ls -la /var/www/html/index.html.bak* 2>/dev/null || echo "no bak files in www"
+            echo "=== Step 1: Restore novastream-admin dist/index.js from .bak ==="
+            cp /root/novastream-admin/dist/index.js.bak /root/novastream-admin/dist/index.js
+            echo "Restored novastream-admin/dist/index.js from bak (Apr 26)"
 
             echo ""
-            echo "=== Git log on novastream-admin (server) ==="
-            cd /root/novastream-admin && git log --oneline -10 2>/dev/null || echo "not a git repo"
+            echo "=== Step 2: Restore novastream dist/index.js from .bak ==="
+            cp /root/novastream/dist/index.js.bak /root/novastream/dist/index.js
+            echo "Restored novastream/dist/index.js from bak (May 8 18:19 - before WMA patches)"
 
             echo ""
-            echo "=== Git log on novastream (server) ==="
-            cd /root/novastream && git log --oneline -10 2>/dev/null || echo "not a git repo"
+            echo "=== Step 3: Restore frontend assets from git ==="
+            cd /root/novastream
+            git stash 2>/dev/null || true
+            git checkout -- dist/public/assets/ 2>/dev/null || echo "No git changes to revert in assets"
+            echo "Frontend assets restored"
 
             echo ""
-            echo "=== Files modified today on server ==="
-            find /root/novastream-admin/dist -newer /root/novastream-admin/dist/index.js -name "*.js" 2>/dev/null | head -20
-            find /root/novastream/dist -newer /root/novastream/dist/index.js -name "*.js" 2>/dev/null | head -20
+            echo "=== Step 4: Restore /var/www/html/index.html from bak4 (pre-today) ==="
+            cp /var/www/html/index.html.bak4 /var/www/html/index.html
+            echo "Restored /var/www/html/index.html from bak4"
 
             echo ""
-            echo "=== Check modification times of key files ==="
-            stat /root/novastream-admin/dist/index.js 2>/dev/null | grep Modify
-            stat /root/novastream/dist/index.js 2>/dev/null | grep Modify
-            stat /var/www/html/index.html 2>/dev/null | grep Modify
+            echo "=== Step 5: Restore SQLite DB - remove slot_type column we added ==="
+            # The migration code will handle this on restart - we just need to ensure
+            # the DB is in a state the OLD code can handle
+            # The old code (bak from Apr 26) may not have the slot_type migration
+            # Check if the old code has slot_type
+            if grep -q "slot_type" /root/novastream-admin/dist/index.js; then
+              echo "Old code has slot_type - DB is fine as-is"
+            else
+              echo "Old code does NOT have slot_type - need to check DB"
+              sqlite3 /root/novastream-admin/radio.db ".schema clock_items" 2>/dev/null
+            fi
 
-            echo "DONE"
-          command_timeout: 30s
+            echo ""
+            echo "=== Step 6: Restart all services ==="
+            pm2 restart novastream-admin
+            pm2 restart novastream
+            sleep 5
+
+            echo ""
+            echo "=== Step 7: Verify services are up ==="
+            pm2 list
+            ss -tlnp | grep -E "3001|3006|8000" || echo "Checking ports..."
+
+            echo ""
+            echo "=== Step 8: Test the stream ==="
+            sleep 3
+            curl -s -o /dev/null -w "HTTP %{http_code}" http://localhost:8000/stream --max-time 8
+            echo ""
+
+            echo ""
+            echo "=== Step 9: Test next-track API ==="
+            curl -s http://localhost:3006/api/stream/next-track --max-time 5
+            echo ""
+
+            echo ""
+            echo "=== Step 10: Liquidsoap log (last 5 lines) ==="
+            journalctl -u liquidsoap --no-pager -n 5 2>&1
+
+            echo "RESTORE COMPLETE"
+          command_timeout: 90s
