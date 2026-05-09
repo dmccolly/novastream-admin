@@ -8,17 +8,68 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read nginx config files
+      - name: Fix nginx music route
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 30s
+          command_timeout: 60s
           script: |
-            echo "=== danielmccolly config ==="
-            cat /etc/nginx/sites-enabled/danielmccolly
-            echo "=== streamofdan config ==="
-            cat /etc/nginx/sites-enabled/streamofdan
-            echo "=== novastream config ==="
-            cat /etc/nginx/sites-enabled/novastream
+            # Write the complete corrected nginx config for api.danielmccolly.com
+            cat > /etc/nginx/sites-enabled/novastream << 'NGINXEOF'
+            server {
+                listen 80;
+                server_name api.danielmccolly.com;
+                return 301 https://$host$request_uri;
+            }
+            server {
+                listen 443 ssl;
+                server_name api.danielmccolly.com;
+                ssl_certificate /etc/letsencrypt/live/api.danielmccolly.com/fullchain.pem;
+                ssl_certificate_key /etc/letsencrypt/live/api.danielmccolly.com/privkey.pem;
+                root /var/www/novastream;
+                index index.html;
+
+                # Serve music files for preview player
+                location /music/ {
+                    alias /root/novastream/storage/music/;
+                    add_header Access-Control-Allow-Origin "*" always;
+                    add_header Cache-Control "public, max-age=3600";
+                }
+
+                # API requests go to Node.js
+                location /api {
+                    proxy_pass http://127.0.0.1:3001;
+                    proxy_http_version 1.1;
+                    proxy_set_header Upgrade $http_upgrade;
+                    proxy_set_header Connection 'upgrade';
+                    proxy_set_header Host $host;
+                    proxy_cache_bypass $http_upgrade;
+                }
+
+                # All other requests go to Frontend (SPA support)
+                location / {
+                    try_files $uri $uri/ /index.html;
+                }
+            }
+            NGINXEOF
+
+            # Test nginx config
+            nginx -t
+
+            # Reload nginx if config is valid
+            if [ $? -eq 0 ]; then
+                systemctl reload nginx
+                echo "nginx reloaded successfully"
+            else
+                echo "ERROR: nginx config test failed"
+                exit 1
+            fi
+
+            # Verify the fix
+            sleep 2
+            echo "=== Testing /music/ route ==="
+            curl -sI http://localhost/music/ -H "Host: api.danielmccolly.com" | head -5
+            echo "=== Checking config ==="
+            grep -n "music" /etc/nginx/sites-enabled/novastream
