@@ -8,21 +8,128 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Check file locations and fix stream route
+      - name: Patch novastream stream route for WMA transcoding
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            echo "=== Find WMA files on disk ==="
-            find /root/novastream /root/novastream-admin -name "*.wma" 2>/dev/null | head -10
-            echo "=== DB filepath for track 185103 ==="
-            sqlite3 /root/novastream/radio.db "SELECT filepath FROM tracks WHERE id=185103;" 2>/dev/null
-            echo "=== Storage dirs ==="
-            ls /root/novastream/storage/music/ 2>/dev/null | head -5 || echo "no storage/music"
-            ls /root/novastream/music/ 2>/dev/null | head -5 || echo "no music dir"
-            ls /root/novastream-admin/storage/music/ 2>/dev/null | head -5 || echo "no admin storage/music"
+            # Write a Node.js patch script that modifies dist/index.js in-place
+            cat > /tmp/patch_novastream.js << 'PATCHEOF'
+            const fs = require('fs');
+            const path = require('path');
+
+            const distFile = '/root/novastream/dist/index.js';
+            let code = fs.readFileSync(distFile, 'utf8');
+            const original = code;
+
+            // -------------------------------------------------------
+            // PATCH 1: Fix stream route - transcode WMA via ffmpeg
+            // Find the stream route handler and replace the file-serve logic
+            // -------------------------------------------------------
+
+            // The stream route checks fs.existsSync(track.filepath) and pipes raw bytes.
+            // We need to: (a) fix path resolution, (b) transcode WMA to MP3 via ffmpeg.
+
+            // Find the pattern: "Audio file not found on server" - this is in our stream route
+            // Replace the entire block from existsSync check to the pipe call
+
+            // Pattern to find the raw pipe section (serves raw WMA as audio/mpeg):
+            const oldStream = /if\s*\(!fs\.existsSync\(track\.filepath\)\)\s*\{[^}]*return[^}]*\}\s*const\s+fileStream\s*=\s*fs\.createReadStream\(track\.filepath\)[^;]*;\s*res\.setHeader\("Content-Type"\s*,\s*"audio\/mpeg"\)[^;]*;\s*fileStream\.pipe\(res\)/s;
+
+            const newStream = `(function() {
+              // Resolve the actual file path - try DB path first, then alternate locations
+              let resolvedPath = track.filepath;
+              if (!fs.existsSync(resolvedPath)) {
+                const basename = path.basename(resolvedPath);
+                const alternates = [
+                  '/root/novastream/storage/music/' + basename,
+                  '/root/novastream-admin/storage/music/' + basename,
+                  '/root/novastream/music/' + basename
+                ];
+                for (const alt of alternates) {
+                  if (fs.existsSync(alt)) { resolvedPath = alt; break; }
+                }
+              }
+              if (!fs.existsSync(resolvedPath)) {
+                return res.status(404).json({ error: 'Audio file not found on server' });
+              }
+              const ext = path.extname(resolvedPath).toLowerCase();
+              if (ext === '.wma') {
+                // Transcode WMA to MP3 via ffmpeg
+                res.setHeader('Content-Type', 'audio/mpeg');
+                res.setHeader('Transfer-Encoding', 'chunked');
+                const { spawn } = require('child_process');
+                const ffmpeg = spawn('ffmpeg', [
+                  '-i', resolvedPath,
+                  '-vn', '-ar', '44100', '-ac', '2', '-b:a', '192k',
+                  '-f', 'mp3', 'pipe:1'
+                ], { stdio: ['ignore', 'pipe', 'ignore'] });
+                ffmpeg.stdout.pipe(res);
+                ffmpeg.on('error', (err) => { console.error('ffmpeg error:', err); if (!res.headersSent) res.status(500).end(); });
+                req.on('close', () => ffmpeg.kill());
+                return;
+              }
+              const fileStream = fs.createReadStream(resolvedPath);
+              res.setHeader("Content-Type", "audio/mpeg");
+              fileStream.pipe(res)
+            })()`;
+
+            if (oldStream.test(code)) {
+              code = code.replace(oldStream, newStream);
+              console.log('PATCH 1 applied: stream route WMA transcoding');
+            } else {
+              console.log('PATCH 1 SKIPPED: pattern not found (may already be patched)');
+            }
+
+            // -------------------------------------------------------
+            // PATCH 2: Fix preview route - return /stream URL for WMA files
+            // -------------------------------------------------------
+            // Find: track has filepath, returning /music/ URL
+            // The preview route returns {"url": "/music/filename.wma"} for on-server WMA
+            // We need it to return {"url": "/api/tracks/:id/stream"} instead
+
+            const oldPreview = /(\[PREVIEW\] Track has filepath, returning stream URL[^"]*"[^"]*"[^}]*\})|(\[PREVIEW\] Track has filepath[^}]*\/music\/[^}]*\})/s;
+
+            // More targeted: find the preview return for filepath tracks
+            // Look for: return res.json({ url: `/music/${...}` }) or similar
+            const oldPreviewReturn = /console\.log\([^)]*PREVIEW[^)]*filepath[^)]*\)[^;]*;\s*return\s+res\.json\(\{\s*url\s*:\s*`\/music\/\$\{[^}]+\}`\s*\}\)/s;
+
+            const newPreviewReturn = `(function() {
+              const ext2 = require('path').extname(track.filepath || '').toLowerCase();
+              if (ext2 === '.wma') {
+                console.log('[PREVIEW] WMA file - returning stream URL for transcoding');
+                return res.json({ url: \`/api/tracks/\${track.id}/stream\` });
+              }
+              console.log('[PREVIEW] Track has filepath, returning music URL');
+              return res.json({ url: \`/music/\${require('path').basename(track.filepath)}\` });
+            })()`;
+
+            if (oldPreviewReturn.test(code)) {
+              code = code.replace(oldPreviewReturn, newPreviewReturn);
+              console.log('PATCH 2 applied: preview route WMA redirect');
+            } else {
+              console.log('PATCH 2 SKIPPED: pattern not found');
+            }
+
+            if (code !== original) {
+              // Backup original
+              fs.writeFileSync(distFile + '.bak', original);
+              fs.writeFileSync(distFile, code);
+              console.log('Patched dist/index.js written successfully');
+            } else {
+              console.log('No changes made to dist/index.js');
+            }
+            PATCHEOF
+
+            node /tmp/patch_novastream.js
+            echo "Patch complete. Restarting novastream..."
+            pm2 restart novastream
+            sleep 3
+            curl -sf http://localhost:3001/api/health && echo "novastream OK" || echo "novastream FAILED"
+            echo "=== Test WMA preview ==="
+            curl -s http://localhost:3001/api/tracks/185103/preview
           command_timeout: 5m
 
       - name: Build and deploy novastream-admin
