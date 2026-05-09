@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Inspect DB schema and preview API
+      - name: Inspect preview route and admin DB
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,20 +16,20 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
-            echo "=== DB schema for tracks table ==="
-            sqlite3 /root/novastream-backend/radio.db ".schema tracks"
+            echo "=== Preview route code (lines 540-580) ==="
+            sed -n '540,580p' /root/novastream/dist/index.js
 
-            echo "=== Sample tracks from DB ==="
-            sqlite3 /root/novastream-backend/radio.db "SELECT * FROM tracks LIMIT 3;"
+            echo "=== novastream-admin DB schema ==="
+            sqlite3 /root/novastream-admin/novastream.db ".tables"
 
-            echo "=== Track 1 full row ==="
-            sqlite3 /root/novastream-backend/radio.db "SELECT * FROM tracks WHERE id=1;"
+            echo "=== novastream-admin tracks schema ==="
+            sqlite3 /root/novastream-admin/novastream.db ".schema tracks" 2>/dev/null || echo "no tracks table"
 
-            echo "=== Files in music dir that match track 1 ==="
-            ls /root/novastream/storage/music/ | grep "^27457_" || echo "no match for 27457"
+            echo "=== novastream-admin library schema ==="
+            sqlite3 /root/novastream-admin/novastream.db ".schema library" 2>/dev/null || echo "no library table"
 
-            echo "=== Preview route in novastream dist/index.js ==="
-            grep -n "preview" /root/novastream/dist/index.js | head -20
+            echo "=== novastream-admin all tables ==="
+            sqlite3 /root/novastream-admin/novastream.db ".schema"
 
-            echo "=== Check what file track 1 actually has ==="
-            sqlite3 /root/novastream-backend/radio.db "SELECT id, title, artist FROM tracks WHERE id=1;"
+            echo "=== Sample from novastream-admin DB ==="
+            sqlite3 /root/novastream-admin/novastream.db "SELECT name FROM sqlite_master WHERE type='table';"
