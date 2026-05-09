@@ -1,16 +1,15 @@
 import sys
 import os
+import shutil
 
 dist_file = '/root/novastream/dist/index.js'
 bak_file = dist_file + '.bak'
 
 # Restore from backup
 if os.path.exists(bak_file):
-    import shutil
     shutil.copy2(bak_file, dist_file)
     print('Restored from backup')
 else:
-    import shutil
     shutil.copy2(dist_file, bak_file)
     print('Created backup')
 
@@ -33,6 +32,10 @@ old_block = code[block_start:block_end]
 print('Old block length:', len(old_block))
 print('Old block preview:', repr(old_block[:80]))
 
+# New block handles:
+# 1. File not found + .wma extension -> check for .mp3 version (already converted)
+# 2. File not found + not .wma -> original 404
+# 3. File found + .wma extension -> transcode via ffmpeg, handle DRM gracefully
 new_block = (
     "if (!fs.existsSync(track.filepath)) {\n"
     "        var wmaExt2 = path.extname(track.filepath).toLowerCase() === '.wma';\n"
@@ -52,13 +55,32 @@ new_block = (
     "      }\n"
     "      if (path.extname(track.filepath).toLowerCase() === '.wma') {\n"
     "        var spawnFn = require('child_process').spawn;\n"
-    "        res.setHeader('Content-Type', 'audio/mpeg');\n"
-    "        res.setHeader('Transfer-Encoding', 'chunked');\n"
-    "        res.setHeader('Accept-Ranges', 'none');\n"
-    "        res.setHeader('Access-Control-Allow-Origin', '*');\n"
+    "        var headersSent = false;\n"
+    "        var bytesWritten = 0;\n"
     "        var ffProc = spawnFn('ffmpeg', ['-i', track.filepath, '-vn', '-ar', '44100', '-ac', '2', '-b:a', '192k', '-f', 'mp3', 'pipe:1'], { stdio: ['ignore', 'pipe', 'ignore'] });\n"
-    "        ffProc.stdout.pipe(res);\n"
-    "        ffProc.on('error', function() { try { res.end(); } catch(e) {} });\n"
+    "        ffProc.stdout.on('data', function(chunk) {\n"
+    "          bytesWritten += chunk.length;\n"
+    "          if (!headersSent) {\n"
+    "            headersSent = true;\n"
+    "            res.setHeader('Content-Type', 'audio/mpeg');\n"
+    "            res.setHeader('Transfer-Encoding', 'chunked');\n"
+    "            res.setHeader('Accept-Ranges', 'none');\n"
+    "            res.setHeader('Access-Control-Allow-Origin', '*');\n"
+    "          }\n"
+    "          res.write(chunk);\n"
+    "        });\n"
+    "        ffProc.stdout.on('end', function() {\n"
+    "          if (bytesWritten < 1000) {\n"
+    "            if (!headersSent) {\n"
+    "              res.status(404).json({ error: 'Audio file not available (DRM or unsupported format)' });\n"
+    "            } else {\n"
+    "              res.end();\n"
+    "            }\n"
+    "          } else {\n"
+    "            res.end();\n"
+    "          }\n"
+    "        });\n"
+    "        ffProc.on('error', function() { try { if (!headersSent) { res.status(404).json({ error: 'Audio conversion failed' }); } else { res.end(); } } catch(e) {} });\n"
     "        req.on('close', function() { try { ffProc.kill(); } catch(e) {} });\n"
     "        return;\n"
     "      }"
