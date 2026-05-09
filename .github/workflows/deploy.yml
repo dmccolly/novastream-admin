@@ -8,7 +8,7 @@ jobs:
   patch-novastream:
     runs-on: ubuntu-latest
     steps:
-      - name: Patch novastream dist for WMA transcoding (no build)
+      - name: Patch novastream dist for WMA transcoding with DRM detection
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -18,19 +18,22 @@ jobs:
             node << 'JSEOF'
             const fs = require('fs');
             const path = require('path');
+            const { execSync } = require('child_process');
             const distFile = '/root/novastream/dist/index.js';
 
-            // Restore from backup if it exists
+            // Always restore from backup first to get clean original
             if (fs.existsSync(distFile + '.bak')) {
               fs.copyFileSync(distFile + '.bak', distFile);
-              console.log('Restored from backup first');
+              console.log('Restored from backup');
+            } else {
+              fs.copyFileSync(distFile, distFile + '.bak');
+              console.log('Created backup');
             }
 
             let code = fs.readFileSync(distFile, 'utf8');
             const original = code;
 
             // PATCH 1: Preview route - return /stream URL for WMA files
-            // Find the exact preview filepath block and add WMA check before it
             const previewOld = 'if (track.filepath) {\n        const localUrl = `/music/${path2.basename(track.filepath)}`;\n        console.log("[PREVIEW] Track has filepath, returning local URL:", localUrl);\n        return res.json({ url: localUrl });\n      }';
             const previewNew = 'if (track.filepath) {\n        if (path.extname(track.filepath).toLowerCase() === \'.wma\') {\n          console.log("[PREVIEW] WMA detected, routing to stream for transcoding");\n          return res.json({ url: `/api/tracks/${id}/stream` });\n        }\n        const localUrl = `/music/${path2.basename(track.filepath)}`;\n        console.log("[PREVIEW] Track has filepath, returning local URL:", localUrl);\n        return res.json({ url: localUrl });\n      }';
 
@@ -38,44 +41,92 @@ jobs:
               code = code.replace(previewOld, previewNew);
               console.log('PATCH 1 OK: preview WMA redirect');
             } else {
-              console.log('PATCH 1 SKIP: pattern not found (may already be patched)');
+              console.log('PATCH 1 SKIP: pattern not found');
             }
 
-            // PATCH 2: Stream route - add ffmpeg transcoding for WMA before the range-request logic
-            // Find the exact block after existsSync check
+            // PATCH 2: Stream route - add ffmpeg transcoding for WMA with DRM detection
             const streamOld = 'if (!fs.existsSync(track.filepath)) {\n        return res.status(404).json({ error: "Audio file not found on server" });\n      }\n      const stat = fs.statSync(track.filepath);';
-            const streamNew = 'if (!fs.existsSync(track.filepath)) {\n        return res.status(404).json({ error: "Audio file not found on server" });\n      }\n      if (path.extname(track.filepath).toLowerCase() === \'.wma\') {\n        const { spawn } = require(\'child_process\');\n        res.setHeader(\'Content-Type\', \'audio/mpeg\');\n        res.setHeader(\'Transfer-Encoding\', \'chunked\');\n        res.setHeader(\'Access-Control-Allow-Origin\', \'*\');\n        const ff = spawn(\'ffmpeg\', [\'-i\', track.filepath, \'-vn\', \'-ar\', \'44100\', \'-ac\', \'2\', \'-b:a\', \'192k\', \'-f\', \'mp3\', \'pipe:1\'], { stdio: [\'ignore\', \'pipe\', \'ignore\'] });\n        ff.stdout.pipe(res);\n        ff.on(\'error\', function(e) { console.error(\'ffmpeg error:\', e); if (!res.headersSent) res.status(500).end(); });\n        req.on(\'close\', function() { ff.kill(); });\n        return;\n      }\n      const stat = fs.statSync(track.filepath);';
+            const streamNew = `if (!fs.existsSync(track.filepath)) {
+        return res.status(404).json({ error: "Audio file not found on server" });
+      }
+      if (path.extname(track.filepath).toLowerCase() === '.wma') {
+        // Check for DRM before attempting to stream
+        try {
+          const probe = require('child_process').execSync(
+            'ffprobe -v quiet -print_format json -show_format ' + JSON.stringify(track.filepath),
+            { timeout: 8000 }
+          ).toString();
+          const meta = JSON.parse(probe);
+          const tags = (meta.format && meta.format.tags) || {};
+          const isDRM = Object.keys(tags).some(k => k.toLowerCase().includes('drm') || k.toLowerCase().includes('protection'));
+          if (isDRM) {
+            console.log('[STREAM] WMA file has DRM, skipping:', track.filepath);
+            return res.status(451).json({ error: "Track has rights restrictions and cannot be played" });
+          }
+        } catch(e) { /* probe failed, try anyway */ }
+        const { spawn } = require('child_process');
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.setHeader('Transfer-Encoding', 'chunked');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        const ff = spawn('ffmpeg', ['-i', track.filepath, '-vn', '-ar', '44100', '-ac', '2', '-b:a', '192k', '-f', 'mp3', 'pipe:1'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let started = false;
+        ff.stdout.on('data', function(chunk) {
+          if (!started) { started = true; }
+          res.write(chunk);
+        });
+        ff.stderr.on('data', function(data) {
+          const msg = data.toString();
+          if (msg.includes('DRM') || msg.includes('drm') || msg.includes('protected') || msg.includes('encrypted')) {
+            console.log('[STREAM] ffmpeg DRM error detected, aborting');
+            ff.kill();
+            if (!res.headersSent) res.status(451).json({ error: "Track has rights restrictions" });
+          }
+        });
+        ff.on('close', function(code) {
+          if (!started && !res.headersSent) {
+            res.status(451).json({ error: "Track has rights restrictions and cannot be played" });
+          } else {
+            res.end();
+          }
+        });
+        ff.on('error', function(e) { console.error('ffmpeg error:', e); if (!res.headersSent) res.status(500).end(); });
+        req.on('close', function() { ff.kill(); });
+        return;
+      }
+      const stat = fs.statSync(track.filepath);`;
 
             if (code.includes(streamOld)) {
               code = code.replace(streamOld, streamNew);
-              console.log('PATCH 2 OK: stream WMA transcoding');
+              console.log('PATCH 2 OK: stream WMA transcoding with DRM detection');
             } else {
-              console.log('PATCH 2 SKIP: pattern not found (may already be patched)');
+              console.log('PATCH 2 SKIP: pattern not found');
             }
 
             if (code !== original) {
-              fs.writeFileSync(distFile + '.bak', original);
               fs.writeFileSync(distFile, code);
               console.log('SUCCESS: Patched dist/index.js written');
             } else {
-              console.log('INFO: No changes needed');
+              console.log('INFO: No changes made');
             }
             JSEOF
 
-            echo "Restarting novastream process..."
+            echo "Restarting novastream..."
             pm2 restart novastream
             sleep 4
 
             echo "=== Health check ==="
             curl -sf http://localhost:3001/api/health && echo " HEALTHY" || echo " FAILED"
 
-            echo "=== Preview test for WMA track 185103 ==="
+            echo "=== Preview for WMA track 185103 ==="
             curl -s http://localhost:3001/api/tracks/185103/preview
 
             echo ""
-            echo "=== Stream test for WMA track 185103 (checking content-type) ==="
-            curl -sI http://localhost:3001/api/tracks/185103/stream | grep -i "content-type"
+            echo "=== Stream content-type for 185103 ==="
+            curl -sI http://localhost:3001/api/tracks/185103/stream --max-time 6 | grep -i "content-type\|HTTP/"
 
-            echo "=== Stream byte test (should be MP3 header FF FB or ID3) ==="
-            curl -s http://localhost:3001/api/tracks/185103/stream --max-time 4 | head -c 4 | xxd
+            echo "=== Stream first bytes for 185103 ==="
+            curl -s http://localhost:3001/api/tracks/185103/stream --max-time 6 | head -c 8 | xxd
+
+            echo "=== Check if 185103 is DRM ==="
+            ffprobe -v quiet -print_format json -show_format /root/novastream/storage/music/185103_1777913531071.wma 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); tags=d.get('format',{}).get('tags',{}); drm=[k for k in tags if 'drm' in k.lower() or 'protect' in k.lower()]; print('DRM tags:', drm if drm else 'NONE - file is clean')" 2>/dev/null || echo "ffprobe check failed"
           command_timeout: 3m
