@@ -3,61 +3,43 @@ on:
   push:
     branches: [main]
 jobs:
-  fix-stream:
+  inspect-liquidsoap:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Diagnose and fix stream source
+      - name: Inspect Liquidsoap script and API
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            echo "=== Icecast status ==="
-            systemctl status icecast2 --no-pager 2>&1 | head -20
+            echo "=== /root/novastream.liq ==="
+            cat /root/novastream.liq
 
             echo ""
-            echo "=== Port 8000 ==="
-            ss -tlnp | grep 8000 || echo "NOTHING on 8000"
+            echo "=== Test the API endpoint Liquidsoap calls ==="
+            # Try common endpoints
+            echo "--- /api/stream/next ---"
+            curl -s http://localhost:3001/api/stream/next --max-time 5
+            echo ""
+            echo "--- /api/stream/track ---"
+            curl -s http://localhost:3001/api/stream/track --max-time 5
+            echo ""
+            echo "--- /api/stream/now ---"
+            curl -s http://localhost:3001/api/stream/now --max-time 5
+            echo ""
+            echo "--- /api/tracks/random ---"
+            curl -s http://localhost:3001/api/tracks/random --max-time 5
+            echo ""
 
             echo ""
-            echo "=== Icecast stream mount status ==="
-            curl -s -o /dev/null -w "HTTP %{http_code}" http://localhost:8000/stream --max-time 5
-            echo ""
+            echo "=== novastream server routes (grep stream) ==="
+            grep -n "stream\|next\|track\|liquidsoap\|icecast" /root/novastream/server/index.js 2>/dev/null | head -40
 
             echo ""
-            echo "=== Liquidsoap status ==="
-            systemctl status liquidsoap --no-pager 2>&1 | head -20 || echo "No systemd liquidsoap"
-
-            echo ""
-            echo "=== PM2 list ==="
-            pm2 list
-
-            echo ""
-            echo "=== Find liquidsoap process ==="
-            ps aux | grep -i liquid | grep -v grep || echo "No liquidsoap process"
-
-            echo ""
-            echo "=== Find liquidsoap config files ==="
-            find /root /home -name "*.liq" 2>/dev/null | head -10
-            find /etc -name "*.liq" 2>/dev/null | head -5
-
-            echo ""
-            echo "=== novastream-admin server index.js port ==="
-            grep -r "3006\|stream\|icecast\|liquidsoap" /root/novastream-admin/server/index.js 2>/dev/null | head -20 || echo "No novastream-admin server"
-
-            echo ""
-            echo "=== Check what's on port 3006 ==="
-            ss -tlnp | grep 3006 || echo "NOTHING on 3006"
-
-            echo ""
-            echo "=== novastream-admin PM2 logs (last 30 lines) ==="
-            pm2 logs novastream-admin --lines 30 --nostream 2>&1 | tail -40
-
-            echo ""
-            echo "=== Icecast xml config (source password) ==="
-            grep -E "source-password|mount|<name>" /etc/icecast2/icecast.xml 2>/dev/null | head -20
+            echo "=== Liquidsoap full log (last 50 lines) ==="
+            journalctl -u liquidsoap --no-pager -n 50 2>&1
 
             echo "DONE"
           command_timeout: 60s
