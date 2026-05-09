@@ -5,39 +5,115 @@ on:
     branches: [main]
 
 jobs:
-  diagnose-and-fix:
+  patch-novastream:
     runs-on: ubuntu-latest
     steps:
-      - name: Check file paths and fix WMA stream
+      - name: Patch novastream for WMA path resolution and transcoding
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            echo "=== DB filepath for track 185103 ==="
-            sqlite3 /root/novastream/radio.db "SELECT id, filepath, filename FROM tracks WHERE id=185103;" 2>/dev/null || \
-            sqlite3 /root/novastream/radio.db "SELECT id, filepath FROM tracks WHERE id=185103;" 2>/dev/null || \
-            echo "sqlite3 not available or different db path"
+            node << 'JSEOF'
+            const fs = require('fs');
+            const path = require('path');
+            const distFile = '/root/novastream/dist/index.js';
 
-            echo "=== Find the actual DB file ==="
-            find /root/novastream -name "*.db" -o -name "*.sqlite" 2>/dev/null | head -5
+            // Always restore from clean backup first
+            if (fs.existsSync(distFile + '.bak')) {
+              fs.copyFileSync(distFile + '.bak', distFile);
+              console.log('Restored from backup');
+            } else {
+              fs.copyFileSync(distFile, distFile + '.bak');
+              console.log('Created backup');
+            }
 
-            echo "=== Files in storage/music matching 185103 ==="
-            ls /root/novastream/storage/music/ 2>/dev/null | grep "185103" || echo "No match"
+            let code = fs.readFileSync(distFile, 'utf8');
+            const original = code;
 
-            echo "=== All WMA files in storage ==="
-            find /root/novastream/storage -name "*.wma" 2>/dev/null | head -10
+            // PATCH 1: Preview route - return /stream URL for WMA files
+            const previewOld = 'if (track.filepath) {\n        const localUrl = `/music/${path2.basename(track.filepath)}`;\n        console.log("[PREVIEW] Track has filepath, returning local URL:", localUrl);\n        return res.json({ url: localUrl });\n      }';
+            const previewNew = 'if (track.filepath) {\n        if (path.extname(track.filepath).toLowerCase() === \'.wma\') {\n          return res.json({ url: `/api/tracks/${id}/stream` });\n        }\n        const localUrl = `/music/${path2.basename(track.filepath)}`;\n        console.log("[PREVIEW] Track has filepath, returning local URL:", localUrl);\n        return res.json({ url: localUrl });\n      }';
 
-            echo "=== Check what filepath the API returns for track 185103 ==="
-            curl -s http://localhost:3001/api/tracks/185103 | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8'); const t=JSON.parse(d); console.log('filepath:', t.filepath); console.log('url:', t.url);"
+            if (code.includes(previewOld)) {
+              code = code.replace(previewOld, previewNew);
+              console.log('PATCH 1 OK: preview WMA redirect');
+            } else {
+              console.log('PATCH 1 SKIP: pattern not found');
+            }
 
-            echo "=== Check if the filepath from API actually exists ==="
-            FILEPATH=$(curl -s http://localhost:3001/api/tracks/185103 | node -e "process.stdin.resume(); let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>console.log(JSON.parse(d).filepath));")
-            echo "filepath from API: $FILEPATH"
-            ls -la "$FILEPATH" 2>/dev/null && echo "FILE EXISTS" || echo "FILE NOT FOUND"
+            // PATCH 2: Stream route - resolve WMA path (may have been converted to MP3 already)
+            // and transcode remaining WMA files on the fly
+            const streamOld = 'if (!fs.existsSync(track.filepath)) {\n        return res.status(404).json({ error: "Audio file not found on server" });\n      }\n      const stat = fs.statSync(track.filepath);';
+            const streamNew = `if (!fs.existsSync(track.filepath)) {
+        // WMA file may have already been converted to MP3 - check for that
+        if (path.extname(track.filepath).toLowerCase() === '.wma') {
+          const mp3Path = track.filepath.replace(/\\.wma$/i, '.mp3');
+          if (fs.existsSync(mp3Path)) {
+            // Serve the already-converted MP3 directly
+            const stat2 = fs.statSync(mp3Path);
+            res.setHeader('Content-Type', 'audio/mpeg');
+            res.setHeader('Content-Length', stat2.size);
+            res.setHeader('Accept-Ranges', 'bytes');
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            const stream2 = fs.createReadStream(mp3Path);
+            stream2.pipe(res);
+            return;
+          }
+        }
+        return res.status(404).json({ error: "Audio file not found on server" });
+      }
+      // WMA file exists - transcode it on the fly
+      if (path.extname(track.filepath).toLowerCase() === '.wma') {
+        const { spawn } = require('child_process');
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.setHeader('Transfer-Encoding', 'chunked');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        const ff = spawn('ffmpeg', ['-i', track.filepath, '-vn', '-ar', '44100', '-ac', '2', '-b:a', '192k', '-f', 'mp3', 'pipe:1'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let started = false;
+        ff.stdout.on('data', function(chunk) { started = true; res.write(chunk); });
+        ff.on('close', function() { if (!started && !res.headersSent) { res.status(451).json({ error: "Track has rights restrictions" }); } else { res.end(); } });
+        ff.on('error', function(e) { if (!res.headersSent) res.status(500).end(); });
+        req.on('close', function() { ff.kill(); });
+        return;
+      }
+      const stat = fs.statSync(track.filepath);`;
 
-            echo "=== Check the stream route code in dist/index.js ==="
-            grep -o "Audio file not found.*" /root/novastream/dist/index.js | head -3
-            grep -o "fs\.existsSync[^)]*)" /root/novastream/dist/index.js | head -3
-          command_timeout: 2m
+            if (code.includes(streamOld)) {
+              code = code.replace(streamOld, streamNew);
+              console.log('PATCH 2 OK: stream WMA path resolution + transcoding');
+            } else {
+              console.log('PATCH 2 SKIP: pattern not found');
+            }
+
+            if (code !== original) {
+              fs.writeFileSync(distFile, code);
+              console.log('SUCCESS: Patched dist/index.js written');
+            } else {
+              console.log('INFO: No changes made');
+            }
+            JSEOF
+
+            echo "Restarting novastream..."
+            pm2 restart novastream
+            sleep 4
+
+            echo "=== Health ==="
+            curl -sf http://localhost:3001/api/health && echo " OK" || echo " FAILED"
+
+            echo "=== Preview for 185103 (WMA->MP3 already converted) ==="
+            curl -s http://localhost:3001/api/tracks/185103/preview
+
+            echo ""
+            echo "=== Stream content-type for 185103 ==="
+            curl -sI http://localhost:3001/api/tracks/185103/stream --max-time 5 | grep -i "content-type\|HTTP/"
+
+            echo "=== Stream first bytes for 185103 (should be FF FB or ID3 for MP3) ==="
+            curl -s http://localhost:3001/api/tracks/185103/stream --max-time 5 | head -c 4 | xxd
+
+            echo "=== Test a raw WMA file (212504) ==="
+            curl -s http://localhost:3001/api/tracks/212504/preview
+            echo ""
+            curl -sI http://localhost:3001/api/tracks/212504/stream --max-time 8 | grep -i "content-type\|HTTP/"
+          command_timeout: 3m
