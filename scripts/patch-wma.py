@@ -93,40 +93,38 @@ else:
     print('PATCH 2 SKIP: catch pattern not found (may already be patched)')
 
 # ---- PATCH 3: Fix preview route to return /stream for WMA files ----
-# The preview route returns /music/filename.wma - redirect to /stream instead
-old_preview = 'return res.json({ url: `/music/${path2.basename(track.filepath)}` });'
+# The preview route uses localUrl variable and returns it for on-server tracks.
+# We need to intercept WMA files and redirect to /api/tracks/:id/stream instead.
+# Exact pattern found by inspection of backup bundle:
+old_preview = (
+    "if (track.filepath) {\n"
+    "        const localUrl = `/music/${path2.basename(track.filepath)}`;\n"
+    "        console.log(\"[PREVIEW] Track has filepath, returning local URL:\", localUrl);\n"
+    "        return res.json({ url: localUrl });\n"
+    "      }"
+)
 new_preview = (
-    "var previewWmaExt = path.extname(track.filepath).toLowerCase();\n"
-    "        if (previewWmaExt === '.wma') {\n"
+    "if (track.filepath) {\n"
+    "        if (path2.extname(track.filepath).toLowerCase() === '.wma') {\n"
+    "          console.log(\"[PREVIEW] WMA track, redirecting to stream endpoint\");\n"
     "          return res.json({ url: `/api/tracks/${id}/stream` });\n"
     "        }\n"
-    "        return res.json({ url: `/music/${path2.basename(track.filepath)}` });"
+    "        const localUrl = `/music/${path2.basename(track.filepath)}`;\n"
+    "        console.log(\"[PREVIEW] Track has filepath, returning local URL:\", localUrl);\n"
+    "        return res.json({ url: localUrl });\n"
+    "      }"
 )
 
 if old_preview in code:
     code = code.replace(old_preview, new_preview, 1)
     print('PATCH 3 OK: preview route fixed for WMA')
 else:
-    # Try alternate pattern
-    old_preview2 = "return res.json({ url: `/music/${path.basename(track.filepath)}` });"
-    if old_preview2 in code:
-        new_preview2 = (
-            "var previewWmaExt = path.extname(track.filepath).toLowerCase();\n"
-            "        if (previewWmaExt === '.wma') {\n"
-            "          return res.json({ url: `/api/tracks/${id}/stream` });\n"
-            "        }\n"
-            "        return res.json({ url: `/music/${path.basename(track.filepath)}` });"
-        )
-        code = code.replace(old_preview2, new_preview2, 1)
-        print('PATCH 3 OK (alt pattern): preview route fixed for WMA')
-    else:
-        # Find any /music/ return in preview context
-        music_idx = code.find('return res.json({ url: `/music/')
-        if music_idx >= 0:
-            print('PATCH 3 WARN: found /music/ return at', music_idx)
-            print('Context:', repr(code[music_idx-100:music_idx+100]))
-        else:
-            print('PATCH 3 FAILED: preview pattern not found')
+    print('PATCH 3 FAILED: preview pattern not found')
+    # Debug: find the closest match
+    import re
+    for m in re.finditer(r'if \(track\.filepath\)', code):
+        ctx = code[m.start():m.start()+300]
+        print('DEBUG context:', repr(ctx))
 
 with open(dist_file, 'w') as f:
     f.write(code)
