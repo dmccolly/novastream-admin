@@ -5,24 +5,34 @@ on:
     branches: [main]
 
 jobs:
-  inspect-stream-full:
+  debug-wma-spawn:
     runs-on: ubuntu-latest
     steps:
-      - name: Show full stream route structure in backup
+      - name: Test WMA spawn directly on server
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            echo "=== Full stream route from backup (try block start to catch end) ==="
+            echo "=== Test spawn directly ==="
             node -e "
+            var spawn = require('child_process').spawn;
+            var path = require('path');
             var fs = require('fs');
-            var code = fs.readFileSync('/root/novastream/dist/index.js.bak', 'utf8');
-            var idx = code.indexOf('Failed to stream track');
-            var tryStart = code.lastIndexOf('try {', idx);
-            var catchEnd = code.indexOf('});', idx) + 3;
-            console.log('try starts at:', tryStart, 'catch ends at:', catchEnd);
-            console.log(JSON.stringify(code.slice(tryStart - 200, catchEnd + 10)));
+            var filepath = '/root/novastream/storage/music/212504_1777835690625.wma';
+            console.log('File exists:', fs.existsSync(filepath));
+            console.log('Extension:', path.extname(filepath).toLowerCase());
+            try {
+              var proc = spawn('ffmpeg', ['-i', filepath, '-vn', '-ar', '44100', '-ac', '2', '-b:a', '192k', '-f', 'mp3', 'pipe:1'], { stdio: ['ignore', 'pipe', 'ignore'] });
+              console.log('spawn OK, pid:', proc.pid);
+              var bytes = 0;
+              proc.stdout.on('data', function(c) { bytes += c.length; });
+              proc.stdout.on('end', function() { console.log('bytes:', bytes); process.exit(0); });
+              proc.on('error', function(e) { console.log('spawn error:', e.message); process.exit(1); });
+              setTimeout(function() { console.log('timeout, bytes so far:', bytes); proc.kill(); process.exit(0); }, 8000);
+            } catch(e) {
+              console.log('SYNC THROW:', e.message);
+            }
             "
           command_timeout: 30s
