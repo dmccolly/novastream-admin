@@ -8,18 +8,67 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get exact context around require line and stream routes
+      - name: Copy patch script to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          source: "scripts/patch-nowplaying-fix.py"
+          target: "/tmp/"
+          strip_components: 1
+
+      - name: Apply patch, restart, verify
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 30s
+          command_timeout: 60s
           script: |
+            set -e
             BUNDLE="/root/novastream-admin/dist/index.js"
-            echo "=== LINES 1360-1400 ==="
-            sed -n '1360,1400p' "$BUNDLE"
-            echo "=== STREAM ROUTES (grep) ==="
-            grep -n "stream/now\|stream/next\|now_playing\|recently_played\|play_history" "$BUNDLE" | head -30
-            echo "=== LINES 1-25 (imports/setup) ==="
-            sed -n '1,25p' "$BUNDLE"
+            
+            echo "=== BACKUP ==="
+            cp "$BUNDLE" "${BUNDLE}.bak_nowplaying"
+            echo "Backup created: ${BUNDLE}.bak_nowplaying"
+            
+            echo "=== APPLYING PATCH ==="
+            python3 /tmp/patch-nowplaying-fix.py
+            
+            echo "=== RESTARTING SERVER ==="
+            pm2 restart novastream-admin
+            sleep 5
+            
+            echo "=== VERIFY SERVER UP ==="
+            pm2 status novastream-admin | grep -E "online|status"
+            
+            echo "=== VERIFY NOW-PLAYING ENDPOINT ==="
+            RESP=$(curl -s -X POST -H "Content-Type: application/json" \
+              -d '{"filepath":"/root/novastream/storage/music/test.mp3","title":"Test Track","artist":"Test Artist"}' \
+              http://localhost:3006/api/stream/now-playing 2>/dev/null)
+            echo "now-playing POST response: $RESP"
+            
+            echo "=== VERIFY NEXT-TRACK ENDPOINT ==="
+            NEXT=$(curl -s http://localhost:3006/api/stream/next-track 2>/dev/null)
+            echo "next-track response: $NEXT"
+            
+            echo "=== VERIFY NOW API ==="
+            NOW=$(curl -s http://localhost:3006/api/stream/now 2>/dev/null)
+            echo "stream/now response: $NOW"
+            
+            echo "=== CHECK FOR REQUIRE ERRORS ==="
+            sleep 3
+            pm2 logs novastream-admin --nostream --lines 10 2>/dev/null | grep -i "require\|error\|Error" | head -10 || echo "No require errors found"
+            
+            echo "=== DONE ==="
+
+      - name: Deploy player
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          source: "player/index.html"
+          target: "/var/www/html/"
+          strip_components: 1
