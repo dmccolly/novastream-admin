@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Find now-playing POST route and fix it
+      - name: Check Liquidsoap logs and next-track
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,20 +16,41 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
-            echo "=== Find now-playing POST route in novastream dist ==="
-            grep -n "now-playing\|now_playing\|POST.*stream\|stream.*POST" /root/novastream/dist/index.js | head -20
+            echo "=== Liquidsoap stdout (last 50 lines) ==="
+            journalctl -u liquidsoap -n 50 2>/dev/null || \
+            cat /tmp/liquidsoap.log 2>/dev/null | tail -50 || \
+            ps aux | grep liquidsoap | grep -v grep | awk '{print $1}' | xargs -I{} cat /proc/{}/fd/1 2>/dev/null | tail -50 || \
+            echo "No liquidsoap log found"
 
-            echo "=== Check lines 1360-1390 in novastream dist ==="
-            sed -n '1360,1390p' /root/novastream/dist/index.js
+            echo "=== Check liquidsoap watchdog ==="
+            cat /root/liquidsoap_watchdog.sh 2>/dev/null | head -30
 
-            echo "=== Check what port novastream app listens on ==="
-            grep -n "listen\|PORT\|port" /root/novastream/dist/index.js | tail -10
+            echo "=== Check next-track endpoint ==="
+            curl -s --max-time 5 http://localhost:3001/api/stream/next-track | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    t=d.get('track',{})
+    print('track:', t.get('title','?'), '-', t.get('artist','?'))
+    print('filepath:', t.get('filepath','?'))
+    print('cue_in:', t.get('cue_in','?'), 'cue_out:', t.get('cue_out','?'))
+    print('segue:', t.get('segue_duration','?'))
+except Exception as e:
+    print('Error:', e)
+    import sys; print(sys.stdin.read()[:200])
+" 2>&1
 
-            echo "=== Check all POST routes in novastream dist ==="
-            grep -n "app.*post\|app2.*post\|\.post(" /root/novastream/dist/index.js | head -20
+            echo "=== Recent play_history ==="
+            sqlite3 /root/novastream/radio.db "SELECT id, title, artist, played_at FROM play_history ORDER BY played_at DESC LIMIT 5;"
 
-            echo "=== Check novastream backend routes.ts for now-playing ==="
-            grep -n "now-playing\|now_playing" /root/novastream-backend/server/routes.ts | head -10
-
-            echo "=== Check what port novastream-backend runs on ==="
-            grep -n "listen\|PORT\|port" /root/novastream-backend/server/index.ts | head -10
+            echo "=== Icecast currently playing ==="
+            curl -s --max-time 5 http://localhost:8000/status-json.xsl | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    src = d.get('icestats',{}).get('source',{})
+    if isinstance(src, list): src = src[0]
+    print('song:', src.get('title','?'), '-', src.get('artist','?'))
+except Exception as e:
+    print('Error:', e)
+" 2>&1
