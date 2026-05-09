@@ -20,13 +20,13 @@ jobs:
           script: mkdir -p /root/novastream-admin/scripts
           command_timeout: 30s
 
-      - name: Upload patch script
+      - name: Upload Python patch script
         uses: appleboy/scp-action@v0.1.7
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          source: "scripts/patch-wma.js"
+          source: "scripts/patch-wma.py"
           target: "/root/novastream-admin/"
 
       - name: Run patch and verify
@@ -36,8 +36,8 @@ jobs:
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            echo "=== Running patch ==="
-            node /root/novastream-admin/scripts/patch-wma.js
+            echo "=== Running Python patch ==="
+            python3 /root/novastream-admin/scripts/patch-wma.py
 
             echo "=== Restarting novastream ==="
             pm2 restart novastream
@@ -47,8 +47,7 @@ jobs:
             curl -sf http://localhost:3001/api/health && echo " OK" || echo " FAIL"
 
             echo "=== Stream test 185103 (WMA path, MP3 on disk) ==="
-            RESP=$(curl -s http://localhost:3001/api/tracks/185103/stream --max-time 5 | head -c 4 | xxd)
-            echo "$RESP"
+            curl -s http://localhost:3001/api/tracks/185103/stream --max-time 5 | head -c 4 | xxd
 
             echo "=== Stream test 212504 (raw WMA on disk) ==="
             curl -sI http://localhost:3001/api/tracks/212504/stream --max-time 8 | grep -i "HTTP\|content-type"
