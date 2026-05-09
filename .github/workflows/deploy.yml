@@ -3,77 +3,49 @@ on:
   push:
     branches: [main]
 jobs:
-  fix-bad-tracks:
+  deploy-player:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Mark missing and WMA tracks as unavailable
+      - name: Deploy player and verify
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 120s
+          command_timeout: 60s
           script: |
-            DB=/root/novastream-admin/radio.db
+            cat > /var/www/html/index.html << 'HTMLEOF'
+            PLACEHOLDER
+            HTMLEOF
+            echo "Player deployed: $(wc -c < /var/www/html/index.html) bytes"
+            curl -s http://localhost:8000/stream --max-time 3 | wc -c | xargs -I{} echo "Stream bytes in 3s: {}"
+            echo "DONE"
 
-            echo "=== SCANNING READY TRACKS FOR MISSING FILES AND WMA ==="
-            
-            # Export all ready track filepaths to a temp file
-            sqlite3 $DB "SELECT id, filepath FROM tracks WHERE status='ready' AND filepath IS NOT NULL;" > /tmp/ready_tracks.txt
-            TOTAL=$(wc -l < /tmp/ready_tracks.txt)
-            echo "Total ready tracks to check: $TOTAL"
+      - name: Upload player file
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          source: player/index.html
+          target: /var/www/html/
+          strip_components: 1
 
-            # Build list of bad track IDs
-            > /tmp/missing_ids.txt
-            > /tmp/wma_ids.txt
-
-            while IFS='|' read -r id filepath; do
-              if [ ! -f "$filepath" ]; then
-                echo "$id" >> /tmp/missing_ids.txt
-              else
-                # Check if file is actually WMA (check magic bytes)
-                MAGIC=$(xxd -l 4 "$filepath" 2>/dev/null | head -1 | awk '{print $2$3}')
-                # WMA/ASF magic: 30 26 b2 75
-                if echo "$MAGIC" | grep -qi "3026b275"; then
-                  echo "$id" >> /tmp/wma_ids.txt
-                fi
-              fi
-            done < /tmp/ready_tracks.txt
-
-            MISSING=$(wc -l < /tmp/missing_ids.txt)
-            WMA=$(wc -l < /tmp/wma_ids.txt)
-            echo "Missing files: $MISSING"
-            echo "WMA files: $WMA"
-
-            # Mark missing tracks as unavailable
-            if [ "$MISSING" -gt 0 ]; then
-              IDS=$(cat /tmp/missing_ids.txt | tr '\n' ',' | sed 's/,$//')
-              sqlite3 $DB "UPDATE tracks SET status='unavailable' WHERE id IN ($IDS);"
-              echo "Marked $MISSING missing tracks as unavailable"
-            fi
-
-            # Mark WMA tracks as unavailable
-            if [ "$WMA" -gt 0 ]; then
-              IDS=$(cat /tmp/wma_ids.txt | tr '\n' ',' | sed 's/,$//')
-              sqlite3 $DB "UPDATE tracks SET status='unavailable' WHERE id IN ($IDS);"
-              echo "Marked $WMA WMA tracks as unavailable"
-            fi
-
-            echo ""
-            echo "=== REMAINING READY TRACKS ==="
-            GOOD=$(sqlite3 $DB "SELECT COUNT(*) FROM tracks WHERE status='ready' AND category_id=1 AND filepath IS NOT NULL;")
-            echo "Good playable tracks: $GOOD"
-
-            echo ""
-            echo "=== TESTING NEXT-TRACK API ==="
-            curl -s http://localhost:3006/api/stream/next-track | python3 -c "import json,sys; d=json.load(sys.stdin); t=d.get('track',{}); print('Track:', t.get('title','?'), '|', t.get('filepath','?')[:60] if t else 'NULL', '| Error:', d.get('error','none'))" 2>/dev/null || curl -s http://localhost:3006/api/stream/next-track | head -c 200
-            echo ""
-
-            echo ""
-            echo "=== STREAM BYTES ==="
-            BYTES=$(curl -s http://localhost:8000/stream --max-time 4 | wc -c)
-            echo "Bytes in 4s: $BYTES"
-
+      - name: Verify deployment
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          command_timeout: 30s
+          script: |
+            SIZE=$(wc -c < /var/www/html/index.html)
+            echo "Player file size: $SIZE bytes"
+            grep -c "borah" /var/www/html/index.html && echo "PASSWORD GATE: OK" || echo "PASSWORD GATE: MISSING"
+            grep -c "recentList" /var/www/html/index.html && echo "RECENTLY PLAYED: OK" || echo "RECENTLY PLAYED: MISSING"
+            grep -c "nowTitle" /var/www/html/index.html && echo "NOW PLAYING: OK" || echo "NOW PLAYING: MISSING"
+            BYTES=$(curl -s http://localhost:8000/stream --max-time 3 | wc -c)
+            echo "Stream bytes in 3s: $BYTES"
             echo "DONE"
