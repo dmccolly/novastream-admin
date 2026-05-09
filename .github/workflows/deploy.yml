@@ -15,11 +15,11 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           source: "scripts/patch-wma.py,scripts/inspect-preview.py,scripts/inspect-nowplaying.py"
           target: /tmp/
-      - name: Inspect Now Playing patterns
+      - name: Inspect Now Playing exact block
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          script: python3 /tmp/scripts/inspect-nowplaying.py 2>&1 | head -200
+          script: python3 /tmp/scripts/inspect-nowplaying.py 2>&1
           command_timeout: 30s
