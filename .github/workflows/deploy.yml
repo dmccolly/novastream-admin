@@ -5,32 +5,31 @@ on:
     branches: [main]
 
 jobs:
-  verify-patch:
+  check-require:
     runs-on: ubuntu-latest
     steps:
-      - name: Verify live patch and test stream
+      - name: Check child_process import and WMA block in live dist
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            echo "=== Check if WMA patch is in live dist/index.js ==="
+            echo "=== Check child_process in bundle ==="
             node -e "
             var fs = require('fs');
             var code = fs.readFileSync('/root/novastream/dist/index.js', 'utf8');
-            console.log('wmaExt2 present:', code.includes('wmaExt2'));
-            console.log('ffProc present:', code.includes('ffProc'));
-            console.log('wmaBytesWritten present:', code.includes('wmaBytesWritten'));
-            var idx = code.indexOf('Audio file not found on server');
-            console.log('404 marker at:', idx);
-            console.log('Context around 404 marker:');
-            console.log(JSON.stringify(code.slice(idx-200, idx+50)));
+            // Find how child_process is referenced
+            var cpIdx = code.indexOf('child_process');
+            console.log('child_process at:', cpIdx);
+            if (cpIdx >= 0) console.log('Context:', JSON.stringify(code.slice(cpIdx-50, cpIdx+80)));
+            // Find require in the bundle
+            var reqIdx = code.indexOf('require(');
+            console.log('require( at:', reqIdx);
+            if (reqIdx >= 0) console.log('Context:', JSON.stringify(code.slice(reqIdx-20, reqIdx+60)));
+            // Find our WMA block
+            var wmaIdx = code.indexOf('wmaExt2');
+            console.log('wmaExt2 at:', wmaIdx);
+            console.log('WMA block (200 chars):', JSON.stringify(code.slice(wmaIdx-50, wmaIdx+300)));
             "
-
-            echo "=== Test stream 212504 directly ==="
-            curl -s http://localhost:3001/api/tracks/212504/stream --max-time 10
-
-            echo "=== Test stream 185103 directly ==="
-            curl -s http://localhost:3001/api/tracks/185103/stream --max-time 5 | head -c 4 | xxd
           command_timeout: 30s
