@@ -8,17 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Copy fix script to server
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          source: "scripts/fix-all-require.py"
-          target: "/tmp/"
-          strip_components: 1
-
-      - name: Apply fix and verify
+      - name: Get Liquidsoap script and logs
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -26,21 +16,19 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
-            python3 /tmp/fix-all-require.py
-            pm2 restart novastream-admin
-            sleep 5
-            echo "=== NEXT-TRACK TEST ==="
-            curl -s http://localhost:3006/api/stream/next-track | head -c 300
+            echo "=== LIQUIDSOAP SCRIPT ==="
+            find /root /etc /opt -name "*.liq" 2>/dev/null | head -5
+            LIQ=$(find /root /etc /opt -name "*.liq" 2>/dev/null | head -1)
+            if [ -n "$LIQ" ]; then
+              echo "FILE: $LIQ"
+              cat "$LIQ"
+            fi
+            echo "=== LIQUIDSOAP LOGS (last 30) ==="
+            pm2 logs liquidsoap --nostream --lines 30 2>/dev/null || journalctl -u liquidsoap -n 30 2>/dev/null || cat /var/log/liquidsoap*.log 2>/dev/null | tail -30 || echo "No liquidsoap logs found"
+            echo "=== NOW-PLAYING ENDPOINT TEST ==="
+            TRACK=$(curl -s http://localhost:3006/api/stream/next-track | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['track']['filepath'])" 2>/dev/null)
+            echo "Track filepath: $TRACK"
+            curl -s -X POST http://localhost:3006/api/stream/now-playing -H "Content-Type: application/json" -d "{\"filepath\":\"$TRACK\"}"
             echo ""
-            echo "=== PM2 ERROR LOG ==="
-            pm2 logs novastream-admin --nostream --lines 5 2>/dev/null | grep -i "error\|require" | head -5 || echo "No errors"
-
-      - name: Deploy player
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          source: "player/index.html"
-          target: "/var/www/html/"
-          strip_components: 1
+            echo "=== NOW API AFTER POST ==="
+            curl -s http://localhost:3006/api/stream/now | python3 -c "import json,sys; d=json.load(sys.stdin); print('current:', d.get('current',{}).get('title','?'))" 2>/dev/null
