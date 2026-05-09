@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read nginx config
+      - name: Read nginx config files
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,11 +16,9 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 30s
           script: |
-            echo "=== ALL NGINX CONFIGS ==="
-            ls /etc/nginx/sites-enabled/
-            echo "--- default ---"
-            cat /etc/nginx/sites-enabled/default
-            echo "--- streamofdan ---"
-            cat /etc/nginx/sites-enabled/streamofdan.com 2>/dev/null || echo "no streamofdan config"
-            echo "--- api ---"
-            cat /etc/nginx/sites-enabled/api.danielmccolly.com 2>/dev/null || echo "no api config"
+            echo "=== danielmccolly config ==="
+            cat /etc/nginx/sites-enabled/danielmccolly
+            echo "=== streamofdan config ==="
+            cat /etc/nginx/sites-enabled/streamofdan
+            echo "=== novastream config ==="
+            cat /etc/nginx/sites-enabled/novastream
