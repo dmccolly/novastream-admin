@@ -5,34 +5,32 @@ on:
     branches: [main]
 
 jobs:
-  debug-wma-spawn:
+  verify-patch:
     runs-on: ubuntu-latest
     steps:
-      - name: Test WMA spawn directly on server
+      - name: Verify live patch and test stream
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            echo "=== Test spawn directly ==="
+            echo "=== Check if WMA patch is in live dist/index.js ==="
             node -e "
-            var spawn = require('child_process').spawn;
-            var path = require('path');
             var fs = require('fs');
-            var filepath = '/root/novastream/storage/music/212504_1777835690625.wma';
-            console.log('File exists:', fs.existsSync(filepath));
-            console.log('Extension:', path.extname(filepath).toLowerCase());
-            try {
-              var proc = spawn('ffmpeg', ['-i', filepath, '-vn', '-ar', '44100', '-ac', '2', '-b:a', '192k', '-f', 'mp3', 'pipe:1'], { stdio: ['ignore', 'pipe', 'ignore'] });
-              console.log('spawn OK, pid:', proc.pid);
-              var bytes = 0;
-              proc.stdout.on('data', function(c) { bytes += c.length; });
-              proc.stdout.on('end', function() { console.log('bytes:', bytes); process.exit(0); });
-              proc.on('error', function(e) { console.log('spawn error:', e.message); process.exit(1); });
-              setTimeout(function() { console.log('timeout, bytes so far:', bytes); proc.kill(); process.exit(0); }, 8000);
-            } catch(e) {
-              console.log('SYNC THROW:', e.message);
-            }
+            var code = fs.readFileSync('/root/novastream/dist/index.js', 'utf8');
+            console.log('wmaExt2 present:', code.includes('wmaExt2'));
+            console.log('ffProc present:', code.includes('ffProc'));
+            console.log('wmaBytesWritten present:', code.includes('wmaBytesWritten'));
+            var idx = code.indexOf('Audio file not found on server');
+            console.log('404 marker at:', idx);
+            console.log('Context around 404 marker:');
+            console.log(JSON.stringify(code.slice(idx-200, idx+50)));
             "
+
+            echo "=== Test stream 212504 directly ==="
+            curl -s http://localhost:3001/api/tracks/212504/stream --max-time 10
+
+            echo "=== Test stream 185103 directly ==="
+            curl -s http://localhost:3001/api/tracks/185103/stream --max-time 5 | head -c 4 | xxd
           command_timeout: 30s
