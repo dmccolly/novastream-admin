@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Inspect now-playing POST and play_history
+      - name: Find novastream DB and add now-playing route
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,25 +16,27 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
-            echo "=== Check play_history table in backend DB ==="
-            sqlite3 /root/novastream-backend/radio.db ".tables"
+            echo "=== Find what DB novastream app uses ==="
+            grep -n "database\|\.db\|sqlite" /root/novastream/dist/index.js | head -20
 
-            echo "=== Check play_history schema ==="
-            sqlite3 /root/novastream-backend/radio.db ".schema play_history" 2>&1 || echo "no play_history table"
+            echo "=== Find DB path in novastream ==="
+            grep -n "radio\.db\|novastream\.db\|\.db" /root/novastream/dist/index.js | head -10
 
-            echo "=== Recent play_history entries ==="
-            sqlite3 /root/novastream-backend/radio.db "SELECT * FROM play_history ORDER BY played_at DESC LIMIT 5;" 2>&1 || echo "no play_history table"
+            echo "=== Find all DB files on server ==="
+            find /root -name "*.db" 2>/dev/null
 
-            echo "=== now-playing route in novastream dist ==="
-            grep -n "now-playing\|now_playing\|play_history" /root/novastream/dist/index.js | head -20
+            echo "=== Check tables in novastream app DB ==="
+            DB=$(grep -o '[^ ]*\.db' /root/novastream/dist/index.js | head -1)
+            echo "DB path from code: $DB"
 
-            echo "=== Test now-playing POST ==="
-            curl -s -X POST -H "Content-Type: application/json" \
-              -d '{"filepath":"/root/novastream/storage/music/250553_1778099320620.mp3"}' \
-              http://localhost:3001/api/stream/now-playing 2>&1
+            echo "=== Check now-playing route in novastream dist ==="
+            grep -n "now-playing\|now_playing" /root/novastream/dist/index.js | head -10
 
-            echo "=== Check now after POST ==="
-            curl -s http://localhost:3001/api/stream/now 2>&1
+            echo "=== Check novastream ecosystem config ==="
+            cat /root/novastream/ecosystem.config.cjs 2>/dev/null || cat /root/novastream/ecosystem.config.js 2>/dev/null || echo "no ecosystem config"
 
-            echo "=== novastream backend recent logs ==="
-            pm2 logs novastream --lines 20 --nostream 2>&1 | tail -30
+            echo "=== Check novastream env ==="
+            cat /root/novastream/.env 2>/dev/null || echo "no .env"
+
+            echo "=== Check novastream package.json ==="
+            cat /root/novastream/package.json | head -20
