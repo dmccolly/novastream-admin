@@ -57,7 +57,7 @@
         .volume-display { font-size: 1.5rem; min-width: 60px; font-weight: bold; }
 
         /* Now Playing strip */
-        .strip { margin-top: 24px; background: rgba(255,255,255,0.06); border-radius: 16px; padding: 20px; text-align: left; display: none; }
+        .strip { margin-top: 24px; background: rgba(255,255,255,0.06); border-radius: 16px; padding: 20px; text-align: left; display: block; }
         .strip.visible { display: block; }
         .strip-section { margin-bottom: 16px; }
         .strip-section:last-child { margin-bottom: 0; }
@@ -203,7 +203,7 @@
         }
 
         // --- Now Playing strip ---
-        var NOW_PLAYING_URL = '/api/stream/now';
+        var NOW_PLAYING_URL = 'https://api.danielmccolly.com/api/stream/now';
         var POLL_INTERVAL_MS = 12000;
         var lastPayload = '';
         var pollTimer = null;
