@@ -3,61 +3,115 @@ on:
   push:
     branches: [main]
 jobs:
-  fix-db:
+  fix-stream:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Fix SQLite schema and restart novastream-admin
+      - name: Patch next-track fallback and restart stream
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            echo "=== Find the SQLite database ==="
-            find /root/novastream-admin -name "*.db" -o -name "*.sqlite" 2>/dev/null | head -10
+            set -e
+
+            echo "=== Step 1: Check what next-track returns now ==="
+            curl -s http://localhost:3006/api/stream/next-track
 
             echo ""
-            echo "=== Check clock_items table schema ==="
-            DB=$(find /root/novastream-admin -name "*.db" -o -name "*.sqlite" 2>/dev/null | head -1)
-            echo "DB path: $DB"
-            sqlite3 "$DB" ".schema clock_items" 2>/dev/null || echo "No clock_items table or no DB"
+            echo "=== Step 2: Check what tracks exist in DB ==="
+            DB=/root/novastream-admin/radio.db
+            sqlite3 "$DB" "SELECT COUNT(*) FROM tracks;" 2>/dev/null || echo "No tracks table"
+            sqlite3 "$DB" "SELECT id, title, filepath FROM tracks LIMIT 3;" 2>/dev/null || echo "No rows"
 
             echo ""
-            echo "=== Check what the code expects (slot_type in initDb) ==="
-            grep -n "slot_type\|clock_items" /root/novastream-admin/dist/index.js 2>/dev/null | head -30
+            echo "=== Step 3: Check what the next-track route looks like in dist/index.js ==="
+            grep -n "next-track\|No clock configured\|current_clock\|getNextTrack" /root/novastream-admin/dist/index.js | head -20
 
             echo ""
-            echo "=== Add missing slot_type column if needed ==="
-            if sqlite3 "$DB" "SELECT slot_type FROM clock_items LIMIT 1;" 2>&1 | grep -q "no such column"; then
-              echo "Adding slot_type column..."
-              sqlite3 "$DB" "ALTER TABLE clock_items ADD COLUMN slot_type TEXT DEFAULT 'track';" && echo "Column added OK" || echo "Failed to add column"
-            else
-              echo "slot_type column already exists or different error"
-              sqlite3 "$DB" "SELECT slot_type FROM clock_items LIMIT 1;" 2>&1
-            fi
+            echo "=== Step 4: Patch next-track to fall back to random track ==="
+            # Find the exact error string and patch it
+            node << 'NODEOF'
+            const fs = require('fs');
+            const path = '/root/novastream-admin/dist/index.js';
+            let code = fs.readFileSync(path, 'utf8');
+
+            // Find the "No clock configured" response and add a fallback
+            // The pattern is: res.json({ track: null, error: "No clock configured" })
+            // We replace it with a fallback that picks a random track from the DB
+
+            const oldPattern = `res.json({ track: null, error: "No clock configured" })`;
+            const newPattern = `(function() {
+              const Database2 = require('better-sqlite3');
+              try {
+                const fallbackDb = new Database2('/root/novastream-admin/radio.db', { readonly: true });
+                const track = fallbackDb.prepare("SELECT id, title, artist, filepath, duration FROM tracks WHERE filepath IS NOT NULL AND filepath != '' ORDER BY RANDOM() LIMIT 1").get();
+                fallbackDb.close();
+                if (track) {
+                  console.log('[fallback] No clock - playing random track:', track.title);
+                  return res.json({ track: { filepath: track.filepath, title: track.title, artist: track.artist, duration: track.duration, cue_in: 0, cue_out: null, segue_duration: 3 } });
+                }
+              } catch(e) { console.log('[fallback] error:', e.message); }
+              res.json({ track: null, error: "No clock configured" });
+            })()`;
+
+            if (code.includes(oldPattern)) {
+              code = code.replace(oldPattern, newPattern);
+              fs.writeFileSync(path, code);
+              console.log('PATCH APPLIED');
+            } else {
+              // Try alternate pattern
+              const alt1 = `res.json({track:null,error:"No clock configured"})`;
+              const alt2 = `res.json({ track: null, error: 'No clock configured' })`;
+              const alt3 = `res.json({track:null,error:'No clock configured'})`;
+              if (code.includes(alt1)) {
+                code = code.replace(alt1, newPattern);
+                fs.writeFileSync(path, code);
+                console.log('PATCH APPLIED (alt1)');
+              } else if (code.includes(alt2)) {
+                code = code.replace(alt2, newPattern);
+                fs.writeFileSync(path, code);
+                console.log('PATCH APPLIED (alt2)');
+              } else if (code.includes(alt3)) {
+                code = code.replace(alt3, newPattern);
+                fs.writeFileSync(path, code);
+                console.log('PATCH APPLIED (alt3)');
+              } else {
+                // Show what's near "No clock"
+                const idx = code.indexOf('No clock');
+                if (idx >= 0) {
+                  console.log('FOUND "No clock" at index', idx);
+                  console.log('CONTEXT:', JSON.stringify(code.substring(idx-100, idx+150)));
+                } else {
+                  console.log('ERROR: Could not find "No clock configured" in bundle');
+                }
+              }
+            }
+            NODEOF
 
             echo ""
-            echo "=== Restart novastream-admin ==="
+            echo "=== Step 5: Restart novastream-admin ==="
             pm2 restart novastream-admin
+            sleep 4
+
+            echo ""
+            echo "=== Step 6: Test next-track after patch ==="
+            curl -s http://localhost:3006/api/stream/next-track
+
+            echo ""
+            echo "=== Step 7: Restart Liquidsoap ==="
+            systemctl restart liquidsoap
             sleep 5
 
             echo ""
-            echo "=== Check if port 3006 is now listening ==="
-            ss -tlnp | grep 3006 || echo "STILL not on 3006"
-
-            echo ""
-            echo "=== Test /api/stream/next-track ==="
-            curl -s http://localhost:3006/api/stream/next-track --max-time 5
+            echo "=== Step 8: Test stream ==="
+            curl -s -o /dev/null -w "HTTP %{http_code}" http://localhost:8000/stream --max-time 8
             echo ""
 
             echo ""
-            echo "=== PM2 status ==="
-            pm2 list
-
-            echo ""
-            echo "=== PM2 error log (last 20) ==="
-            pm2 logs novastream-admin --lines 20 --nostream 2>&1 | tail -25
+            echo "=== Step 9: Liquidsoap log (last 10 lines) ==="
+            journalctl -u liquidsoap --no-pager -n 10 2>&1
 
             echo "DONE"
-          command_timeout: 60s
+          command_timeout: 90s
