@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Find novastream DB and add now-playing route
+      - name: Check novastream backend source and add now-playing route
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,27 +16,23 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
-            echo "=== Find what DB novastream app uses ==="
-            grep -n "database\|\.db\|sqlite" /root/novastream/dist/index.js | head -20
+            echo "=== Check novastream backend source ==="
+            ls /root/novastream-backend/
 
-            echo "=== Find DB path in novastream ==="
-            grep -n "radio\.db\|novastream\.db\|\.db" /root/novastream/dist/index.js | head -10
+            echo "=== Check novastream backend routes ==="
+            find /root/novastream-backend -name "*.ts" -o -name "*.js" | grep -v node_modules | grep -v dist | head -10
 
-            echo "=== Find all DB files on server ==="
-            find /root -name "*.db" 2>/dev/null
+            echo "=== Check novastream radio.db tables ==="
+            sqlite3 /root/novastream/radio.db ".tables"
 
-            echo "=== Check tables in novastream app DB ==="
-            DB=$(grep -o '[^ ]*\.db' /root/novastream/dist/index.js | head -1)
-            echo "DB path from code: $DB"
+            echo "=== Check play_history in novastream radio.db ==="
+            sqlite3 /root/novastream/radio.db ".schema play_history" 2>&1 || echo "no play_history"
 
-            echo "=== Check now-playing route in novastream dist ==="
-            grep -n "now-playing\|now_playing" /root/novastream/dist/index.js | head -10
+            echo "=== Recent play_history in novastream radio.db ==="
+            sqlite3 /root/novastream/radio.db "SELECT * FROM play_history ORDER BY played_at DESC LIMIT 5;" 2>&1
 
-            echo "=== Check novastream ecosystem config ==="
-            cat /root/novastream/ecosystem.config.cjs 2>/dev/null || cat /root/novastream/ecosystem.config.js 2>/dev/null || echo "no ecosystem config"
+            echo "=== Check novastream dist/index.js stream/now route ==="
+            grep -n "stream/now\|play_history" /root/novastream/dist/index.js | head -20
 
-            echo "=== Check novastream env ==="
-            cat /root/novastream/.env 2>/dev/null || echo "no .env"
-
-            echo "=== Check novastream package.json ==="
-            cat /root/novastream/package.json | head -20
+            echo "=== Check novastream backend source files ==="
+            ls /root/novastream-backend/src/ 2>/dev/null || ls /root/novastream-backend/ | head -20
