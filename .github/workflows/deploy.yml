@@ -3,23 +3,40 @@ on:
   push:
     branches: [main]
 jobs:
-  patch-wma:
+  deploy-player:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Upload scripts to server
+      - name: Upload player HTML to server
         uses: appleboy/scp-action@v0.1.7
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          source: "scripts/inspect-server.py"
+          source: "player/index.html"
           target: /tmp/
-      - name: Inspect server config
+      - name: Install player and verify
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          script: python3 /tmp/scripts/inspect-server.py 2>&1
+          script: |
+            echo "=== Backing up old player ==="
+            cp /var/www/html/index.html /var/www/html/index.html.bak4 2>/dev/null || true
+            echo "=== Installing new player ==="
+            cp /tmp/player/index.html /var/www/html/index.html
+            echo "=== Verify password gate present ==="
+            grep -c "borah" /var/www/html/index.html && echo "PASSWORD GATE OK" || echo "PASSWORD GATE MISSING"
+            echo "=== Verify audio player present ==="
+            grep -c "audio.src = STREAM_URL" /var/www/html/index.html && echo "AUDIO PLAYER OK" || echo "AUDIO PLAYER MISSING"
+            echo "=== File size ==="
+            wc -c /var/www/html/index.html
+            echo "=== Stream URL test ==="
+            curl -s -o /dev/null -w '%{http_code}' https://streamofdan.com/stream --max-time 5
+            echo ""
+            echo "=== Now playing API test ==="
+            curl -s http://localhost:3006/api/stream/now --max-time 5
+            echo ""
+            echo "DONE"
           command_timeout: 30s

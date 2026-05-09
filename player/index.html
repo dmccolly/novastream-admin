@@ -20,10 +20,32 @@
         .container { text-align: center; max-width: 400px; width: 100%; }
         h1 { font-size: 2.5rem; margin-bottom: 10px; }
         .subtitle { color: #aaa; margin-bottom: 40px; font-size: 1.1rem; }
+
+        /* --- Password gate --- */
+        #gate { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+        #gate h2 { font-size: 1.4rem; color: #e5e7eb; }
+        #gate input {
+            width: 100%; max-width: 280px; padding: 14px 18px;
+            font-size: 1.1rem; border: 2px solid rgba(255,255,255,0.2);
+            border-radius: 10px; background: rgba(255,255,255,0.08);
+            color: white; text-align: center; outline: none;
+        }
+        #gate input:focus { border-color: #3b82f6; }
+        #gate button {
+            width: 100%; max-width: 280px; padding: 14px;
+            font-size: 1.1rem; font-weight: bold; border: none;
+            border-radius: 10px; cursor: pointer; background: #3b82f6; color: white;
+        }
+        #gate button:hover { background: #2563eb; }
+        #gate .err { color: #f87171; font-size: 0.95rem; min-height: 20px; }
+
+        /* --- Player --- */
+        #player { display: none; width: 100%; }
         .player-box { background: rgba(255,255,255,0.1); border-radius: 20px; padding: 30px; }
         .status { font-size: 1.2rem; margin-bottom: 20px; min-height: 30px; }
         .status.playing { color: #4ade80; }
         .status.stopped { color: #f87171; }
+        .status.connecting { color: #facc15; }
         .buttons { display: flex; gap: 15px; justify-content: center; margin-bottom: 30px; }
         button { padding: 15px 40px; font-size: 1.2rem; font-weight: bold; border: none; border-radius: 10px; cursor: pointer; }
         .play-btn { background: #22c55e; color: white; }
@@ -55,61 +77,123 @@
         <h1>Stream of Dan</h1>
         <p class="subtitle">Internet Radio</p>
 
-        <div class="player-box">
-            <div id="status" class="status stopped">Tap PLAY to start</div>
-            <div class="buttons">
-                <button id="playBtn" class="play-btn" onclick="playStream()">PLAY</button>
-                <button id="stopBtn" class="stop-btn" onclick="stopStream()">STOP</button>
-            </div>
-            <div class="volume-section">
-                <div class="volume-label">VOLUME</div>
-                <div class="volume-controls">
-                    <button class="vol-btn" onclick="changeVolume(-10)">-</button>
-                    <span id="volumeDisplay" class="volume-display">100%</span>
-                    <button class="vol-btn" onclick="changeVolume(10)">+</button>
-                </div>
-            </div>
+        <!-- Password gate -->
+        <div id="gate">
+            <h2>Enter Password</h2>
+            <input type="password" id="pwInput" placeholder="Password" autocomplete="off"
+                   onkeydown="if(event.key==='Enter') checkPw()">
+            <button onclick="checkPw()">ENTER</button>
+            <div class="err" id="pwErr"></div>
         </div>
 
-        <div id="strip" class="strip">
-            <div class="strip-section strip-now">
-                <div class="strip-label">Now Playing</div>
-                <div id="nowTitle" class="strip-title">—</div>
-                <div id="nowArtist" class="strip-artist"></div>
+        <!-- Player (hidden until password correct) -->
+        <div id="player">
+            <div class="player-box">
+                <div id="status" class="status stopped">Tap PLAY to start</div>
+                <div class="buttons">
+                    <button class="play-btn" onclick="playStream()">PLAY</button>
+                    <button class="stop-btn" onclick="stopStream()">STOP</button>
+                </div>
+                <div class="volume-section">
+                    <div class="volume-label">VOLUME</div>
+                    <div class="volume-controls">
+                        <button class="vol-btn" onclick="changeVolume(-10)">-</button>
+                        <span id="volumeDisplay" class="volume-display">100%</span>
+                        <button class="vol-btn" onclick="changeVolume(10)">+</button>
+                    </div>
+                </div>
             </div>
-            <div class="strip-section strip-next" id="nextSection">
-                <div class="strip-label">Up Next</div>
-                <div id="nextTitle" class="strip-title">—</div>
-                <div id="nextArtist" class="strip-artist"></div>
-            </div>
-            <div class="strip-section strip-recent" id="recentSection">
-                <div class="strip-label">Recently Played</div>
-                <ul id="recentList"></ul>
+
+            <div id="strip" class="strip">
+                <div class="strip-section strip-now">
+                    <div class="strip-label">Now Playing</div>
+                    <div id="nowTitle" class="strip-title">—</div>
+                    <div id="nowArtist" class="strip-artist"></div>
+                </div>
+                <div class="strip-section strip-next" id="nextSection">
+                    <div class="strip-label">Up Next</div>
+                    <div id="nextTitle" class="strip-title">—</div>
+                    <div id="nextArtist" class="strip-artist"></div>
+                </div>
+                <div class="strip-section strip-recent" id="recentSection">
+                    <div class="strip-label">Recently Played</div>
+                    <ul id="recentList"></ul>
+                </div>
             </div>
         </div>
     </div>
 
     <script>
+        // --- Password gate ---
+        var CORRECT = 'borah';
+
+        function checkPw() {
+            var val = document.getElementById('pwInput').value.trim().toLowerCase();
+            if (val === CORRECT) {
+                document.getElementById('gate').style.display = 'none';
+                document.getElementById('player').style.display = 'block';
+                sessionStorage.setItem('sod_auth', '1');
+                pollNowPlaying();
+                setInterval(pollNowPlaying, POLL_INTERVAL_MS);
+            } else {
+                document.getElementById('pwErr').textContent = 'Incorrect password.';
+                document.getElementById('pwInput').value = '';
+                document.getElementById('pwInput').focus();
+            }
+        }
+
+        // Auto-unlock if already authenticated this session
+        if (sessionStorage.getItem('sod_auth') === '1') {
+            document.getElementById('gate').style.display = 'none';
+            document.getElementById('player').style.display = 'block';
+        }
+
+        // --- Audio player ---
         var audio = null;
         var volume = 100;
+        var STREAM_URL = 'https://streamofdan.com/stream';
+
+        function setStatus(text, cls) {
+            var el = document.getElementById('status');
+            el.textContent = text;
+            el.className = 'status ' + cls;
+        }
 
         function playStream() {
+            // Tear down any existing instance
             if (audio) { audio.pause(); audio.src = ''; audio = null; }
-            audio = new Audio('https://streamofdan.com/stream');
+
+            setStatus('Connecting…', 'connecting');
+
+            audio = new Audio();
             audio.volume = volume / 100;
-            audio.play().then(function() {
-                document.getElementById('status').textContent = 'Now Playing';
-                document.getElementById('status').className = 'status playing';
-            }).catch(function(e) {
-                document.getElementById('status').textContent = 'Error: ' + e.message;
-                document.getElementById('status').className = 'status stopped';
+            audio.preload = 'none';
+
+            audio.onplaying = function() {
+                setStatus('Now Playing', 'playing');
+            };
+            audio.onwaiting = function() {
+                setStatus('Buffering…', 'connecting');
+            };
+            audio.onerror = function() {
+                var codes = ['', 'ABORTED', 'NETWORK', 'DECODE', 'SRC_NOT_SUPPORTED'];
+                var code = audio && audio.error ? (codes[audio.error.code] || audio.error.code) : 'unknown';
+                setStatus('Error: ' + code, 'stopped');
+            };
+            audio.onended = function() {
+                setStatus('Stopped', 'stopped');
+            };
+
+            // Set src AFTER attaching event handlers, then play
+            audio.src = STREAM_URL;
+            audio.play().catch(function(e) {
+                setStatus('Error: ' + e.message, 'stopped');
             });
         }
 
         function stopStream() {
             if (audio) { audio.pause(); audio.src = ''; audio = null; }
-            document.getElementById('status').textContent = 'Stopped';
-            document.getElementById('status').className = 'status stopped';
+            setStatus('Stopped', 'stopped');
         }
 
         function changeVolume(delta) {
@@ -118,10 +202,11 @@
             if (audio) audio.volume = volume / 100;
         }
 
-        // Relative URL — nginx proxies /api/stream/now to the admin app on localhost
+        // --- Now Playing strip ---
         var NOW_PLAYING_URL = '/api/stream/now';
         var POLL_INTERVAL_MS = 12000;
         var lastPayload = '';
+        var pollTimer = null;
 
         function fmt(track) {
             if (!track) return { title: '—', artist: '' };
@@ -134,12 +219,11 @@
         }
 
         function escapeHtml(s) {
-            return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
         }
 
         function renderStrip(data) {
             document.getElementById('strip').classList.add('visible');
-
             var now = fmt(data.current);
             setText('nowTitle', now.title);
             setText('nowArtist', now.artist);
@@ -181,11 +265,14 @@
                     lastPayload = key;
                     renderStrip(data);
                 })
-                .catch(function() { /* silent — strip stays hidden */ });
+                .catch(function() { /* silent */ });
         }
 
-        pollNowPlaying();
-        setInterval(pollNowPlaying, POLL_INTERVAL_MS);
+        // Start polling only if already unlocked on page load
+        if (sessionStorage.getItem('sod_auth') === '1') {
+            pollNowPlaying();
+            pollTimer = setInterval(pollNowPlaying, POLL_INTERVAL_MS);
+        }
     </script>
 </body>
 </html>
