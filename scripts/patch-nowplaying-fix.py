@@ -50,9 +50,9 @@ NOW_PLAYING_ROUTE = '''  app2.post("/api/stream/now-playing", (req, res) => {
         );
         res.json({ ok: true, track: { title: trackData.title, artist: trackData.artist } });
       } else if (title) {
-        db.prepare("INSERT INTO play_history (track_id, title, artist, category_id, played_at) VALUES (?, ?, ?, ?, ?)").run(
-          null, title, artist || "Unknown Artist", null, new Date().toISOString()
-        );
+        const stmt = db.prepare("INSERT INTO play_history (track_id, title, artist, category_id, played_at) VALUES (?, ?, ?, ?, ?)");
+        const tid = db.prepare("SELECT id FROM tracks WHERE title = ? LIMIT 1").get(title);
+        stmt.run(tid ? tid.id : (db.prepare("SELECT id FROM tracks ORDER BY RANDOM() LIMIT 1").get() || {id:1}).id, title, artist || "Unknown Artist", null, new Date().toISOString());
         res.json({ ok: true, track: { title, artist } });
       } else {
         res.status(400).json({ error: "No track identifier provided" });
