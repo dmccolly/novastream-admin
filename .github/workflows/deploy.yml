@@ -3,12 +3,12 @@ on:
   push:
     branches: [main]
 jobs:
-  fix-clock:
+  fix-tracks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up default clock and verify stream
+      - name: Check track statuses and fix clock
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -18,52 +18,39 @@ jobs:
           script: |
             DB=/root/novastream-admin/radio.db
 
-            echo "=== CURRENT DB STATE ==="
-            sqlite3 $DB "SELECT COUNT(*) as tracks FROM tracks WHERE status='ready' AND filepath IS NOT NULL;"
-            sqlite3 $DB "SELECT COUNT(*) as categories FROM categories;"
-            sqlite3 $DB "SELECT id, name, type FROM categories LIMIT 10;"
-            sqlite3 $DB "SELECT COUNT(*) as clocks FROM clocks;"
-            sqlite3 $DB "SELECT COUNT(*) as clock_items FROM clock_items;"
+            echo "=== TRACK STATUS BREAKDOWN ==="
+            sqlite3 $DB "SELECT status, COUNT(*) as count FROM tracks GROUP BY status ORDER BY count DESC;"
 
             echo ""
-            echo "=== CHECKING IF CLOCK EXISTS ==="
-            CLOCK_COUNT=$(sqlite3 $DB "SELECT COUNT(*) FROM clocks;")
-            echo "Clock count: $CLOCK_COUNT"
-
-            if [ "$CLOCK_COUNT" -eq "0" ]; then
-              echo "No clock found - creating default clock..."
-
-              # Get the first music category
-              MUSIC_CAT=$(sqlite3 $DB "SELECT id FROM categories WHERE type='music' LIMIT 1;")
-              if [ -z "$MUSIC_CAT" ]; then
-                MUSIC_CAT=$(sqlite3 $DB "SELECT id FROM categories LIMIT 1;")
-              fi
-              echo "Using category ID: $MUSIC_CAT"
-
-              # Create a default clock
-              sqlite3 $DB "INSERT INTO clocks (name, mode) VALUES ('Default', 'sequential');"
-              CLOCK_ID=$(sqlite3 $DB "SELECT id FROM clocks ORDER BY id DESC LIMIT 1;")
-              echo "Created clock ID: $CLOCK_ID"
-
-              # Add the music category to the clock (repeat 10 times for variety)
-              for i in 1 2 3 4 5 6 7 8 9 10; do
-                sqlite3 $DB "INSERT INTO clock_items (clock_id, category_id, position) VALUES ($CLOCK_ID, $MUSIC_CAT, $i);"
-              done
-              echo "Added 10 clock items"
-            else
-              echo "Clock already exists - checking items..."
-              sqlite3 $DB "SELECT ci.id, ci.position, c.name FROM clock_items ci JOIN categories c ON ci.category_id = c.id LIMIT 5;"
-            fi
+            echo "=== TRACK CATEGORY BREAKDOWN ==="
+            sqlite3 $DB "SELECT category_id, COUNT(*) as count FROM tracks GROUP BY category_id ORDER BY count DESC LIMIT 10;"
 
             echo ""
-            echo "=== TESTING NEXT-TRACK API ==="
-            sleep 2
-            RESPONSE=$(curl -s http://localhost:3006/api/stream/next-track)
-            echo "Response: $RESPONSE"
+            echo "=== SAMPLE TRACKS WITH FILEPATH ==="
+            sqlite3 $DB "SELECT id, title, artist, status, category_id, filepath FROM tracks WHERE filepath IS NOT NULL LIMIT 5;"
 
             echo ""
-            echo "=== STREAM BYTES TEST ==="
-            BYTES=$(curl -s http://localhost:8000/stream --max-time 4 | wc -c)
-            echo "Bytes from Icecast in 4s: $BYTES"
+            echo "=== TRACKS WITH FILEPATH (any status) ==="
+            sqlite3 $DB "SELECT COUNT(*) FROM tracks WHERE filepath IS NOT NULL;"
+
+            echo ""
+            echo "=== FIX: Update clock_items to use correct category and fix status check ==="
+            # Get the most populated category
+            TOP_CAT=$(sqlite3 $DB "SELECT category_id FROM tracks WHERE filepath IS NOT NULL GROUP BY category_id ORDER BY COUNT(*) DESC LIMIT 1;")
+            echo "Top category by track count: $TOP_CAT"
+            TOP_CAT_NAME=$(sqlite3 $DB "SELECT name FROM categories WHERE id=$TOP_CAT;")
+            echo "Category name: $TOP_CAT_NAME"
+            TOP_STATUS=$(sqlite3 $DB "SELECT status FROM tracks WHERE filepath IS NOT NULL AND category_id=$TOP_CAT GROUP BY status ORDER BY COUNT(*) DESC LIMIT 1;")
+            echo "Most common status for that category: $TOP_STATUS"
+
+            # Update clock items to use the top category
+            sqlite3 $DB "UPDATE clock_items SET category_id=$TOP_CAT;"
+            echo "Updated clock items to category $TOP_CAT"
+
+            echo ""
+            echo "=== TESTING NEXT-TRACK API AFTER FIX ==="
+            sleep 1
+            curl -s http://localhost:3006/api/stream/next-track | head -c 500
+            echo ""
 
             echo "DONE"
