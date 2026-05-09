@@ -5,50 +5,37 @@ on:
     branches: [main]
 
 jobs:
-  patch-novastream:
+  check-wma-500:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Create scripts dir on server
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          script: mkdir -p /root/novastream-admin/scripts
-          command_timeout: 30s
-
-      - name: Upload Python patch script
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          source: "scripts/patch-wma.py"
-          target: "/root/novastream-admin/"
-
-      - name: Run patch and verify
+      - name: Check 212504 error and verify WMA file
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            echo "=== Running Python patch ==="
-            python3 /root/novastream-admin/scripts/patch-wma.py
+            echo "=== Track 212504 stream error ==="
+            curl -s http://localhost:3001/api/tracks/212504/stream --max-time 5
 
-            echo "=== Restarting novastream ==="
-            pm2 restart novastream
-            sleep 4
+            echo ""
+            echo "=== Track 212504 filepath from DB ==="
+            sqlite3 /root/novastream/radio.db "SELECT id, title, filepath FROM tracks WHERE id=212504;" 2>/dev/null || \
+            sqlite3 /root/novastream-admin/radio.db "SELECT id, title, filepath FROM tracks WHERE id=212504;" 2>/dev/null || \
+            echo "DB query failed"
 
-            echo "=== Health ==="
-            curl -sf http://localhost:3001/api/health && echo " OK" || echo " FAIL"
+            echo "=== WMA file check ==="
+            FILEPATH=$(sqlite3 /root/novastream/radio.db "SELECT filepath FROM tracks WHERE id=212504;" 2>/dev/null || \
+                       sqlite3 /root/novastream-admin/radio.db "SELECT filepath FROM tracks WHERE id=212504;" 2>/dev/null)
+            echo "Filepath: $FILEPATH"
+            ls -la "$FILEPATH" 2>/dev/null || echo "File not found at that path"
 
-            echo "=== Stream test 185103 (WMA path, MP3 on disk) ==="
-            curl -s http://localhost:3001/api/tracks/185103/stream --max-time 5 | head -c 4 | xxd
+            echo "=== ffmpeg test on WMA file ==="
+            if [ -n "$FILEPATH" ] && [ -f "$FILEPATH" ]; then
+              ffmpeg -i "$FILEPATH" -vn -ar 44100 -ac 2 -b:a 192k -f mp3 /tmp/test_212504.mp3 -y 2>&1 | tail -5
+              ls -la /tmp/test_212504.mp3 2>/dev/null && echo "ffmpeg conversion OK" || echo "ffmpeg FAILED"
+            fi
 
-            echo "=== Stream test 212504 (raw WMA on disk) ==="
-            curl -sI http://localhost:3001/api/tracks/212504/stream --max-time 8 | grep -i "HTTP\|content-type"
+            echo "=== Test stream for 185103 via public URL ==="
+            curl -s https://api.danielmccolly.com/api/tracks/185103/stream --max-time 5 | head -c 4 | xxd
           command_timeout: 2m
