@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Inspect now-playing route and fix
+      - name: Inspect now-playing route source code
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,20 +16,8 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
-            echo "=== Test now-playing with short timeout ==="
-            curl -s --max-time 5 http://localhost:3006/api/stream/now || echo "TIMEOUT or ERROR"
-
-            echo "=== Test now-playing on port 3001 (novastream) ==="
-            curl -s --max-time 5 http://localhost:3001/api/stream/now || echo "TIMEOUT or ERROR"
-
-            echo "=== Check now-playing route in admin dist ==="
-            grep -n "stream/now\|now-playing\|now_playing" /root/novastream-admin/dist/index.js | head -20
-
-            echo "=== Check now-playing route code ==="
-            grep -n "stream/now" /root/novastream-admin/dist/index.js | head -5
-
-            echo "=== novastream-admin DB tables ==="
-            sqlite3 /root/novastream-admin/novastream.db ".tables"
+            echo "=== Find stream/now route in admin dist ==="
+            grep -n "stream/now\|/api/stream" /root/novastream-admin/dist/index.js | head -20
 
             echo "=== Check Icecast JSON stats ==="
             curl -s --max-time 5 http://localhost:8000/status-json.xsl | python3 -c "
@@ -43,4 +31,13 @@ try:
     print('song:', src.get('song','?'))
 except Exception as e:
     print('Error:', e)
-"
+" 2>&1
+
+            echo "=== novastream-admin DB tables ==="
+            sqlite3 /root/novastream-admin/novastream.db ".tables" 2>&1
+
+            echo "=== novastream app now-playing endpoint ==="
+            curl -s --max-time 5 http://localhost:3001/api/stream/now 2>&1
+
+            echo "=== Check what port the admin panel uses for now-playing ==="
+            grep -n "now\|stream" /root/novastream-admin/dist/index.js | grep -i "api\|route\|get\|post" | head -30
