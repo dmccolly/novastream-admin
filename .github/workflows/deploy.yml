@@ -3,12 +3,12 @@ on:
   push:
     branches: [main]
 jobs:
-  check-error:
+  fix-bad-tracks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check why stream stopped
+      - name: Mark missing and WMA tracks as unavailable
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,25 +16,64 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 120s
           script: |
-            echo "=== LIQUIDSOAP LOGS (last 50 lines) ==="
-            journalctl -u liquidsoap --no-pager -n 50 2>/dev/null || true
+            DB=/root/novastream-admin/radio.db
+
+            echo "=== SCANNING READY TRACKS FOR MISSING FILES AND WMA ==="
+            
+            # Export all ready track filepaths to a temp file
+            sqlite3 $DB "SELECT id, filepath FROM tracks WHERE status='ready' AND filepath IS NOT NULL;" > /tmp/ready_tracks.txt
+            TOTAL=$(wc -l < /tmp/ready_tracks.txt)
+            echo "Total ready tracks to check: $TOTAL"
+
+            # Build list of bad track IDs
+            > /tmp/missing_ids.txt
+            > /tmp/wma_ids.txt
+
+            while IFS='|' read -r id filepath; do
+              if [ ! -f "$filepath" ]; then
+                echo "$id" >> /tmp/missing_ids.txt
+              else
+                # Check if file is actually WMA (check magic bytes)
+                MAGIC=$(xxd -l 4 "$filepath" 2>/dev/null | head -1 | awk '{print $2$3}')
+                # WMA/ASF magic: 30 26 b2 75
+                if echo "$MAGIC" | grep -qi "3026b275"; then
+                  echo "$id" >> /tmp/wma_ids.txt
+                fi
+              fi
+            done < /tmp/ready_tracks.txt
+
+            MISSING=$(wc -l < /tmp/missing_ids.txt)
+            WMA=$(wc -l < /tmp/wma_ids.txt)
+            echo "Missing files: $MISSING"
+            echo "WMA files: $WMA"
+
+            # Mark missing tracks as unavailable
+            if [ "$MISSING" -gt 0 ]; then
+              IDS=$(cat /tmp/missing_ids.txt | tr '\n' ',' | sed 's/,$//')
+              sqlite3 $DB "UPDATE tracks SET status='unavailable' WHERE id IN ($IDS);"
+              echo "Marked $MISSING missing tracks as unavailable"
+            fi
+
+            # Mark WMA tracks as unavailable
+            if [ "$WMA" -gt 0 ]; then
+              IDS=$(cat /tmp/wma_ids.txt | tr '\n' ',' | sed 's/,$//')
+              sqlite3 $DB "UPDATE tracks SET status='unavailable' WHERE id IN ($IDS);"
+              echo "Marked $WMA WMA tracks as unavailable"
+            fi
 
             echo ""
-            echo "=== LIQUIDSOAP SCRIPT ==="
-            cat /root/novastream.liq 2>/dev/null || find /root -name "*.liq" -exec cat {} \; 2>/dev/null | head -80
+            echo "=== REMAINING READY TRACKS ==="
+            GOOD=$(sqlite3 $DB "SELECT COUNT(*) FROM tracks WHERE status='ready' AND category_id=1 AND filepath IS NOT NULL;")
+            echo "Good playable tracks: $GOOD"
 
             echo ""
-            echo "=== NEXT-TRACK API NOW ==="
-            curl -s http://localhost:3006/api/stream/next-track | head -c 300
+            echo "=== TESTING NEXT-TRACK API ==="
+            curl -s http://localhost:3006/api/stream/next-track | python3 -c "import json,sys; d=json.load(sys.stdin); t=d.get('track',{}); print('Track:', t.get('title','?'), '|', t.get('filepath','?')[:60] if t else 'NULL', '| Error:', d.get('error','none'))" 2>/dev/null || curl -s http://localhost:3006/api/stream/next-track | head -c 200
             echo ""
 
             echo ""
-            echo "=== STREAM STATUS ==="
-            curl -s http://localhost:8000/stream --max-time 3 | wc -c
-            echo "bytes in 3s"
-
-            echo ""
-            echo "=== NOVASTREAM-ADMIN ERRORS (last 20) ==="
-            pm2 logs novastream-admin --lines 20 --nostream 2>/dev/null | tail -25
+            echo "=== STREAM BYTES ==="
+            BYTES=$(curl -s http://localhost:8000/stream --max-time 4 | wc -c)
+            echo "Bytes in 4s: $BYTES"
 
             echo "DONE"
