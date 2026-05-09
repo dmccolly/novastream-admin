@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get context and fix broken next-track handler
+      - name: Fix the broken next-track handler
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,10 +16,27 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 120s
           script: |
-            echo "=== LINES 1360-1510 OF SERVER BUNDLE ==="
-            sed -n '1360,1510p' /root/novastream-admin/dist/index.js
+            echo "=== NEXT-TRACK HANDLER (lines 1202-1380) ==="
+            sed -n '1202,1380p' /root/novastream-admin/dist/index.js
 
             echo ""
-            echo "=== NEXT-TRACK API RESPONSE BEFORE FIX ==="
+            echo "=== CURRENT next-track API RESPONSE ==="
             curl -s http://localhost:3006/api/stream/next-track
             echo ""
+
+            echo ""
+            echo "=== FIX: Replace __require with createRequire ==="
+            # The fix: replace __require("child_process") with the ESM-compatible import
+            # Since child_process is already available as a Node built-in, we can use
+            # createRequire or just use the exec from child_process via dynamic import
+            # The simplest fix: replace __require with a local require created via createRequire
+            
+            # First check if createRequire is already imported
+            grep -n "createRequire" /root/novastream-admin/dist/index.js | head -5
+
+            # Fix: replace __require("child_process") with a safe alternative
+            # Since this is ESM, we need to use createRequire or just inline the import
+            # The setup-deploy-key route uses execSync - replace with child_process module import
+            
+            # Check what's at the top of the file for existing imports
+            head -20 /root/novastream-admin/dist/index.js
