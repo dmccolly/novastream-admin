@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Inspect now-playing route source code
+      - name: Inspect now-playing POST and play_history
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,28 +16,25 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
-            echo "=== Find stream/now route in admin dist ==="
-            grep -n "stream/now\|/api/stream" /root/novastream-admin/dist/index.js | head -20
+            echo "=== Check play_history table in backend DB ==="
+            sqlite3 /root/novastream-backend/radio.db ".tables"
 
-            echo "=== Check Icecast JSON stats ==="
-            curl -s --max-time 5 http://localhost:8000/status-json.xsl | python3 -c "
-import json,sys
-try:
-    d=json.load(sys.stdin)
-    src = d.get('icestats',{}).get('source',{})
-    if isinstance(src, list): src = src[0]
-    print('title:', src.get('title','?'))
-    print('artist:', src.get('artist','?'))
-    print('song:', src.get('song','?'))
-except Exception as e:
-    print('Error:', e)
-" 2>&1
+            echo "=== Check play_history schema ==="
+            sqlite3 /root/novastream-backend/radio.db ".schema play_history" 2>&1 || echo "no play_history table"
 
-            echo "=== novastream-admin DB tables ==="
-            sqlite3 /root/novastream-admin/novastream.db ".tables" 2>&1
+            echo "=== Recent play_history entries ==="
+            sqlite3 /root/novastream-backend/radio.db "SELECT * FROM play_history ORDER BY played_at DESC LIMIT 5;" 2>&1 || echo "no play_history table"
 
-            echo "=== novastream app now-playing endpoint ==="
-            curl -s --max-time 5 http://localhost:3001/api/stream/now 2>&1
+            echo "=== now-playing route in novastream dist ==="
+            grep -n "now-playing\|now_playing\|play_history" /root/novastream/dist/index.js | head -20
 
-            echo "=== Check what port the admin panel uses for now-playing ==="
-            grep -n "now\|stream" /root/novastream-admin/dist/index.js | grep -i "api\|route\|get\|post" | head -30
+            echo "=== Test now-playing POST ==="
+            curl -s -X POST -H "Content-Type: application/json" \
+              -d '{"filepath":"/root/novastream/storage/music/250553_1778099320620.mp3"}' \
+              http://localhost:3001/api/stream/now-playing 2>&1
+
+            echo "=== Check now after POST ==="
+            curl -s http://localhost:3001/api/stream/now 2>&1
+
+            echo "=== novastream backend recent logs ==="
+            pm2 logs novastream --lines 20 --nostream 2>&1 | tail -30
