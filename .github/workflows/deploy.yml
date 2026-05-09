@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check novastream backend source and add now-playing route
+      - name: Find now-playing POST route and fix it
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,23 +16,20 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
-            echo "=== Check novastream backend source ==="
-            ls /root/novastream-backend/
+            echo "=== Find now-playing POST route in novastream dist ==="
+            grep -n "now-playing\|now_playing\|POST.*stream\|stream.*POST" /root/novastream/dist/index.js | head -20
 
-            echo "=== Check novastream backend routes ==="
-            find /root/novastream-backend -name "*.ts" -o -name "*.js" | grep -v node_modules | grep -v dist | head -10
+            echo "=== Check lines 1360-1390 in novastream dist ==="
+            sed -n '1360,1390p' /root/novastream/dist/index.js
 
-            echo "=== Check novastream radio.db tables ==="
-            sqlite3 /root/novastream/radio.db ".tables"
+            echo "=== Check what port novastream app listens on ==="
+            grep -n "listen\|PORT\|port" /root/novastream/dist/index.js | tail -10
 
-            echo "=== Check play_history in novastream radio.db ==="
-            sqlite3 /root/novastream/radio.db ".schema play_history" 2>&1 || echo "no play_history"
+            echo "=== Check all POST routes in novastream dist ==="
+            grep -n "app.*post\|app2.*post\|\.post(" /root/novastream/dist/index.js | head -20
 
-            echo "=== Recent play_history in novastream radio.db ==="
-            sqlite3 /root/novastream/radio.db "SELECT * FROM play_history ORDER BY played_at DESC LIMIT 5;" 2>&1
+            echo "=== Check novastream backend routes.ts for now-playing ==="
+            grep -n "now-playing\|now_playing" /root/novastream-backend/server/routes.ts | head -10
 
-            echo "=== Check novastream dist/index.js stream/now route ==="
-            grep -n "stream/now\|play_history" /root/novastream/dist/index.js | head -20
-
-            echo "=== Check novastream backend source files ==="
-            ls /root/novastream-backend/src/ 2>/dev/null || ls /root/novastream-backend/ | head -20
+            echo "=== Check what port novastream-backend runs on ==="
+            grep -n "listen\|PORT\|port" /root/novastream-backend/server/index.ts | head -10
