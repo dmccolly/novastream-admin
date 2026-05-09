@@ -3,41 +3,61 @@ on:
   push:
     branches: [main]
 jobs:
-  inspect-api:
+  fix-db:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect novastream-admin API on port 3006
+      - name: Fix SQLite schema and restart novastream-admin
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
+            echo "=== Find the SQLite database ==="
+            find /root/novastream-admin -name "*.db" -o -name "*.sqlite" 2>/dev/null | head -10
+
+            echo ""
+            echo "=== Check clock_items table schema ==="
+            DB=$(find /root/novastream-admin -name "*.db" -o -name "*.sqlite" 2>/dev/null | head -1)
+            echo "DB path: $DB"
+            sqlite3 "$DB" ".schema clock_items" 2>/dev/null || echo "No clock_items table or no DB"
+
+            echo ""
+            echo "=== Check what the code expects (slot_type in initDb) ==="
+            grep -n "slot_type\|clock_items" /root/novastream-admin/dist/index.js 2>/dev/null | head -30
+
+            echo ""
+            echo "=== Add missing slot_type column if needed ==="
+            if sqlite3 "$DB" "SELECT slot_type FROM clock_items LIMIT 1;" 2>&1 | grep -q "no such column"; then
+              echo "Adding slot_type column..."
+              sqlite3 "$DB" "ALTER TABLE clock_items ADD COLUMN slot_type TEXT DEFAULT 'track';" && echo "Column added OK" || echo "Failed to add column"
+            else
+              echo "slot_type column already exists or different error"
+              sqlite3 "$DB" "SELECT slot_type FROM clock_items LIMIT 1;" 2>&1
+            fi
+
+            echo ""
+            echo "=== Restart novastream-admin ==="
+            pm2 restart novastream-admin
+            sleep 5
+
+            echo ""
+            echo "=== Check if port 3006 is now listening ==="
+            ss -tlnp | grep 3006 || echo "STILL not on 3006"
+
+            echo ""
             echo "=== Test /api/stream/next-track ==="
-            curl -sv http://localhost:3006/api/stream/next-track --max-time 5 2>&1
+            curl -s http://localhost:3006/api/stream/next-track --max-time 5
+            echo ""
 
             echo ""
-            echo "=== novastream-admin server/index.js (all routes) ==="
-            grep -n "router\.\|app\.\|get\|post\|put\|delete\|'/\|\"/" /root/novastream-admin/server/index.js 2>/dev/null | head -60
+            echo "=== PM2 status ==="
+            pm2 list
 
             echo ""
-            echo "=== novastream-admin server directory ==="
-            ls -la /root/novastream-admin/server/ 2>/dev/null
-
-            echo ""
-            echo "=== novastream-admin server/routes/ ==="
-            ls -la /root/novastream-admin/server/routes/ 2>/dev/null
-
-            echo ""
-            echo "=== stream route file ==="
-            cat /root/novastream-admin/server/routes/stream.js 2>/dev/null || \
-            cat /root/novastream-admin/server/routes/streamRoutes.js 2>/dev/null || \
-            echo "No stream route file found"
-
-            echo ""
-            echo "=== PM2 logs novastream-admin (last 30) ==="
-            pm2 logs novastream-admin --lines 30 --nostream 2>&1 | tail -35
+            echo "=== PM2 error log (last 20) ==="
+            pm2 logs novastream-admin --lines 20 --nostream 2>&1 | tail -25
 
             echo "DONE"
           command_timeout: 60s
