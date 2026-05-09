@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get broken require context and now-playing route
+      - name: Get exact context around require line and stream routes
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -17,14 +17,9 @@ jobs:
           command_timeout: 30s
           script: |
             BUNDLE="/root/novastream-admin/dist/index.js"
-            echo "=== REQUIRE LINE ==="
-            grep -n "__require\|createRequire\|require(" "$BUNDLE" | head -20
-            echo "=== NOW-PLAYING ROUTE (lines around 'now-playing') ==="
-            grep -n "now-playing\|now_playing\|nowPlaying" "$BUNDLE" | head -20
-            echo "=== LINES AROUND REQUIRE ==="
-            LINE=$(grep -n "__require" "$BUNDLE" | head -1 | cut -d: -f1)
-            if [ -n "$LINE" ]; then
-              START=$((LINE - 3))
-              END=$((LINE + 10))
-              sed -n "${START},${END}p" "$BUNDLE"
-            fi
+            echo "=== LINES 1360-1400 ==="
+            sed -n '1360,1400p' "$BUNDLE"
+            echo "=== STREAM ROUTES (grep) ==="
+            grep -n "stream/now\|stream/next\|now_playing\|recently_played\|play_history" "$BUNDLE" | head -30
+            echo "=== LINES 1-25 (imports/setup) ==="
+            sed -n '1,25p' "$BUNDLE"
