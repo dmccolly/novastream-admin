@@ -67,9 +67,18 @@ jobs:
                 exit 1
             fi
 
+            # Fix permissions so nginx (www-data) can read the music files
+            # /root is 700 by default - nginx can't traverse it
+            chmod o+x /root
+            chmod o+x /root/novastream
+            chmod o+x /root/novastream/storage
+            chmod o+x /root/novastream/storage/music
+            chmod -R o+r /root/novastream/storage/music/
+            echo "Permissions fixed"
+
             # Verify the fix
             sleep 2
             echo "=== Testing /music/ route ==="
-            curl -sI http://localhost/music/ -H "Host: api.danielmccolly.com" | head -5
+            curl -sI https://api.danielmccolly.com/music/250553_1778099320620.mp3 2>&1 | head -5
             echo "=== Checking config ==="
             grep -n "music" /etc/nginx/sites-enabled/novastream
