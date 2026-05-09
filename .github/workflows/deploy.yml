@@ -8,22 +8,50 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Fix nginx and restore port 3006
+      - name: Check file locations and fix stream route
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            echo "=== All listening ports ==="
-            ss -tlnp
-            echo "=== Nginx status ==="
-            systemctl status nginx 2>/dev/null | head -10 || echo "nginx not found"
-            echo "=== Nginx config ==="
-            cat /etc/nginx/sites-enabled/* 2>/dev/null || cat /etc/nginx/nginx.conf 2>/dev/null | grep -A5 "3006\|3001\|proxy_pass" | head -30
-            echo "=== Restart nginx ==="
-            systemctl restart nginx 2>/dev/null && echo "nginx restarted OK" || echo "nginx restart failed"
-            sleep 2
-            echo "=== Port 3006 check ==="
-            curl -sf http://localhost:3006/api/health && echo "3006 OK" || echo "3006 FAILED"
+            echo "=== Find WMA files on disk ==="
+            find /root/novastream /root/novastream-admin -name "*.wma" 2>/dev/null | head -10
+            echo "=== DB filepath for track 185103 ==="
+            sqlite3 /root/novastream/radio.db "SELECT filepath FROM tracks WHERE id=185103;" 2>/dev/null
+            echo "=== Storage dirs ==="
+            ls /root/novastream/storage/music/ 2>/dev/null | head -5 || echo "no storage/music"
+            ls /root/novastream/music/ 2>/dev/null | head -5 || echo "no music dir"
+            ls /root/novastream-admin/storage/music/ 2>/dev/null | head -5 || echo "no admin storage/music"
+          command_timeout: 5m
+
+      - name: Build and deploy novastream-admin
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          script: |
+            cd /root/novastream-admin
+            git fetch origin main
+            git reset --hard origin/main
+            NODE_OPTIONS=--max-old-space-size=512 npm run build:all
+            pm2 restart novastream-admin
+            echo "novastream-admin restarted"
+          command_timeout: 10m
+
+      - name: Update player HTML
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          script: |
+            for WEBROOT in /var/www/html /var/www/streamofdan.com/html /var/www/streamofdan/html /usr/share/nginx/html; do
+              if [ -f "$WEBROOT/index.html" ]; then
+                cp /root/novastream-admin/player/index.html "$WEBROOT/index.html"
+                echo "Updated player at $WEBROOT/index.html"
+                break
+              fi
+            done
           command_timeout: 5m
