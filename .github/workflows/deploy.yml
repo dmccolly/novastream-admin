@@ -3,75 +3,42 @@ on:
   push:
     branches: [main]
 jobs:
-  audit:
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Audit APIs and DB
+      - name: Deploy player
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 90s
+          command_timeout: 30s
           script: |
-            DB=$(find /root -name "*.db" 2>/dev/null | head -1)
-            echo "DB: $DB"
+            cat > /var/www/html/index.html << 'HTMLEOF'
+            PLACEHOLDER
+            HTMLEOF
+            echo "step1 done"
 
-            echo "=== TABLE COUNTS ==="
-            for t in tracks clocks clock_slots categories rules schedule recently_played play_history; do
-              COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM $t" 2>/dev/null || echo "N/A")
-              echo "$t: $COUNT"
-            done
+      - name: Copy player file
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          source: "player/index.html"
+          target: "/var/www/html/"
+          strip_components: 1
 
-            echo "=== TRACKS STATUS ==="
-            sqlite3 "$DB" "SELECT status, COUNT(*) FROM tracks GROUP BY status" 2>/dev/null
-
-            echo "=== CLOCKS ==="
-            sqlite3 "$DB" "SELECT id, name, is_default FROM clocks" 2>/dev/null
-
-            echo "=== CLOCK SLOTS ==="
-            sqlite3 "$DB" "SELECT * FROM clock_slots LIMIT 10" 2>/dev/null
-
-            echo "=== CATEGORIES ==="
-            sqlite3 "$DB" "SELECT * FROM categories LIMIT 10" 2>/dev/null
-
-            echo "=== RULES ==="
-            sqlite3 "$DB" "SELECT * FROM rules LIMIT 10" 2>/dev/null
-
-            echo "=== RECENTLY PLAYED ==="
-            sqlite3 "$DB" "SELECT id, title, artist, played_at FROM recently_played ORDER BY played_at DESC LIMIT 5" 2>/dev/null
-
-            echo "=== API: stream/now ==="
-            curl -s http://localhost:3006/api/stream/now 2>/dev/null
-
-            echo ""
-            echo "=== API: next-track ==="
-            curl -s http://localhost:3006/api/stream/next-track 2>/dev/null
-
-            echo ""
-            echo "=== API: tracks (3) ==="
-            curl -s "http://localhost:3006/api/tracks?limit=3" 2>/dev/null | head -c 400
-
-            echo ""
-            echo "=== API: clocks ==="
-            curl -s http://localhost:3006/api/clocks 2>/dev/null | head -c 400
-
-            echo ""
-            echo "=== API: categories ==="
-            curl -s http://localhost:3006/api/categories 2>/dev/null | head -c 400
-
-            echo ""
-            echo "=== API: rules ==="
-            curl -s http://localhost:3006/api/rules 2>/dev/null | head -c 400
-
-            echo ""
-            echo "=== LIQUIDSOAP LOGS (last 10) ==="
-            pm2 logs liquidsoap --lines 10 --nostream 2>/dev/null | tail -10 || echo "no liq pm2"
-            cat /var/log/liquidsoap*.log 2>/dev/null | tail -10 || echo "no liq log"
-
-            echo "=== ICECAST SOURCES ==="
-            curl -s http://localhost:8000/status.xsl 2>/dev/null | grep -E "mount|listeners|title|artist" | head -10
-
-            echo "=== DONE ==="
+      - name: Verify
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          command_timeout: 15s
+          script: |
+            SIZE=$(wc -c < /var/www/html/index.html)
+            echo "File size: $SIZE bytes"
+            grep -c "flex-start" /var/www/html/index.html && echo "CSS FIX: OK" || echo "CSS FIX: MISSING"
