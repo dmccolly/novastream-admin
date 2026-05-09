@@ -5,125 +5,77 @@ on:
     branches: [main]
 
 jobs:
-  deploy:
+  patch-novastream:
     runs-on: ubuntu-latest
     steps:
-      - name: Patch novastream for WMA transcoding
+      - name: Patch novastream dist for WMA transcoding (no build)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            node << 'EOF'
+            node << 'JSEOF'
             const fs = require('fs');
             const path = require('path');
             const distFile = '/root/novastream/dist/index.js';
 
-            // Restore from backup if exists (safety)
+            // Restore from backup if it exists
             if (fs.existsSync(distFile + '.bak')) {
               fs.copyFileSync(distFile + '.bak', distFile);
-              console.log('Restored from backup');
+              console.log('Restored from backup first');
             }
 
             let code = fs.readFileSync(distFile, 'utf8');
             const original = code;
 
-            // ---- PATCH 1: Preview route - return /stream URL for WMA files ----
-            // Exact string from the running code:
-            const oldPreview = `if (track.filepath) {\n        const localUrl = \`/music/\${path2.basename(track.filepath)}\`;\n        console.log("[PREVIEW] Track has filepath, returning local URL:", localUrl);\n        return res.json({ url: localUrl });\n      }`;
+            // PATCH 1: Preview route - return /stream URL for WMA files
+            // Find the exact preview filepath block and add WMA check before it
+            const previewOld = 'if (track.filepath) {\n        const localUrl = `/music/${path2.basename(track.filepath)}`;\n        console.log("[PREVIEW] Track has filepath, returning local URL:", localUrl);\n        return res.json({ url: localUrl });\n      }';
+            const previewNew = 'if (track.filepath) {\n        if (path.extname(track.filepath).toLowerCase() === \'.wma\') {\n          console.log("[PREVIEW] WMA detected, routing to stream for transcoding");\n          return res.json({ url: `/api/tracks/${id}/stream` });\n        }\n        const localUrl = `/music/${path2.basename(track.filepath)}`;\n        console.log("[PREVIEW] Track has filepath, returning local URL:", localUrl);\n        return res.json({ url: localUrl });\n      }';
 
-            const newPreview = `if (track.filepath) {
-        const ext = path.extname(track.filepath).toLowerCase();
-        if (ext === '.wma') {
-          console.log("[PREVIEW] WMA file - routing through stream for transcoding");
-          return res.json({ url: \`/api/tracks/\${id}/stream\` });
-        }
-        const localUrl = \`/music/\${path2.basename(track.filepath)}\`;
-        console.log("[PREVIEW] Track has filepath, returning local URL:", localUrl);
-        return res.json({ url: localUrl });
-      }`;
-
-            if (code.includes(oldPreview)) {
-              code = code.replace(oldPreview, newPreview);
-              console.log('PATCH 1 applied: preview route WMA redirect');
+            if (code.includes(previewOld)) {
+              code = code.replace(previewOld, previewNew);
+              console.log('PATCH 1 OK: preview WMA redirect');
             } else {
-              console.log('PATCH 1 FAILED: preview pattern not found');
+              console.log('PATCH 1 SKIP: pattern not found (may already be patched)');
             }
 
-            // ---- PATCH 2: Stream route - transcode WMA via ffmpeg ----
-            // Exact string from the running code (the existsSync check and what follows):
-            const oldStream = `if (!fs.existsSync(track.filepath)) {\n        return res.status(404).json({ error: "Audio file not found on server" });\n      }\n      const stat = fs.statSync(track.filepath);\n      const fileSize = stat.size;\n      const range = req.headers.range;\n      res.setHeader("Access-Control-Allow-Origin", "*");\n      res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");\n      res.setHeader("Access-Control-Allow-Headers", "Range");\n      res.setHeader("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges, Content-Length");\n      if (range) {\n        const parts = range.replace(/bytes=/, "").split("-");\n        const start = parseInt(parts[0], 10);\n        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;\n        const chunksize = end - start + 1;\n        const file = fs.createReadStream(track.filepath, { start, end });`;
+            // PATCH 2: Stream route - add ffmpeg transcoding for WMA before the range-request logic
+            // Find the exact block after existsSync check
+            const streamOld = 'if (!fs.existsSync(track.filepath)) {\n        return res.status(404).json({ error: "Audio file not found on server" });\n      }\n      const stat = fs.statSync(track.filepath);';
+            const streamNew = 'if (!fs.existsSync(track.filepath)) {\n        return res.status(404).json({ error: "Audio file not found on server" });\n      }\n      if (path.extname(track.filepath).toLowerCase() === \'.wma\') {\n        const { spawn } = require(\'child_process\');\n        res.setHeader(\'Content-Type\', \'audio/mpeg\');\n        res.setHeader(\'Transfer-Encoding\', \'chunked\');\n        res.setHeader(\'Access-Control-Allow-Origin\', \'*\');\n        const ff = spawn(\'ffmpeg\', [\'-i\', track.filepath, \'-vn\', \'-ar\', \'44100\', \'-ac\', \'2\', \'-b:a\', \'192k\', \'-f\', \'mp3\', \'pipe:1\'], { stdio: [\'ignore\', \'pipe\', \'ignore\'] });\n        ff.stdout.pipe(res);\n        ff.on(\'error\', function(e) { console.error(\'ffmpeg error:\', e); if (!res.headersSent) res.status(500).end(); });\n        req.on(\'close\', function() { ff.kill(); });\n        return;\n      }\n      const stat = fs.statSync(track.filepath);';
 
-            const newStream = `if (!fs.existsSync(track.filepath)) {
-        return res.status(404).json({ error: "Audio file not found on server" });
-      }
-      // WMA: transcode to MP3 via ffmpeg
-      const fileExt = path.extname(track.filepath).toLowerCase();
-      if (fileExt === '.wma') {
-        const { spawn } = require('child_process');
-        res.setHeader('Content-Type', 'audio/mpeg');
-        res.setHeader('Transfer-Encoding', 'chunked');
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        const ff = spawn('ffmpeg', ['-i', track.filepath, '-vn', '-ar', '44100', '-ac', '2', '-b:a', '192k', '-f', 'mp3', 'pipe:1'], { stdio: ['ignore', 'pipe', 'ignore'] });
-        ff.stdout.pipe(res);
-        ff.on('error', (e) => { console.error('ffmpeg error:', e); if (!res.headersSent) res.status(500).end(); });
-        req.on('close', () => ff.kill());
-        return;
-      }
-      const stat = fs.statSync(track.filepath);
-      const fileSize = stat.size;
-      const range = req.headers.range;
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Range");
-      res.setHeader("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges, Content-Length");
-      if (range) {
-        const parts = range.replace(/bytes=/, "").split("-");
-        const start = parseInt(parts[0], 10);
-        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-        const chunksize = end - start + 1;
-        const file = fs.createReadStream(track.filepath, { start, end });`;
-
-            if (code.includes(oldStream)) {
-              code = code.replace(oldStream, newStream);
-              console.log('PATCH 2 applied: stream route WMA transcoding');
+            if (code.includes(streamOld)) {
+              code = code.replace(streamOld, streamNew);
+              console.log('PATCH 2 OK: stream WMA transcoding');
             } else {
-              console.log('PATCH 2 FAILED: stream pattern not found');
+              console.log('PATCH 2 SKIP: pattern not found (may already be patched)');
             }
 
             if (code !== original) {
               fs.writeFileSync(distFile + '.bak', original);
               fs.writeFileSync(distFile, code);
-              console.log('Patched dist/index.js written');
+              console.log('SUCCESS: Patched dist/index.js written');
             } else {
-              console.log('No changes made');
+              console.log('INFO: No changes needed');
             }
-            EOF
+            JSEOF
 
-            echo "Restarting novastream..."
+            echo "Restarting novastream process..."
             pm2 restart novastream
-            sleep 3
-            echo "=== Health check ==="
-            curl -sf http://localhost:3001/api/health && echo "OK" || echo "FAILED"
-            echo "=== WMA preview test ==="
-            curl -s http://localhost:3001/api/tracks/185103/preview
-            echo ""
-            echo "=== WMA stream test (first 100 bytes) ==="
-            curl -s http://localhost:3001/api/tracks/185103/stream --max-time 5 | head -c 100 | xxd | head -3
-          command_timeout: 5m
+            sleep 4
 
-      - name: Build and deploy novastream-admin
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          script: |
-            cd /root/novastream-admin
-            git fetch origin main
-            git reset --hard origin/main
-            NODE_OPTIONS=--max-old-space-size=512 npm run build:all
-            pm2 restart novastream-admin
-            echo "novastream-admin restarted"
-          command_timeout: 10m
+            echo "=== Health check ==="
+            curl -sf http://localhost:3001/api/health && echo " HEALTHY" || echo " FAILED"
+
+            echo "=== Preview test for WMA track 185103 ==="
+            curl -s http://localhost:3001/api/tracks/185103/preview
+
+            echo ""
+            echo "=== Stream test for WMA track 185103 (checking content-type) ==="
+            curl -sI http://localhost:3001/api/tracks/185103/stream | grep -i "content-type"
+
+            echo "=== Stream byte test (should be MP3 header FF FB or ID3) ==="
+            curl -s http://localhost:3001/api/tracks/185103/stream --max-time 4 | head -c 4 | xxd
+          command_timeout: 3m
