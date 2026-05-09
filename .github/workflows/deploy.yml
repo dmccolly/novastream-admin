@@ -8,7 +8,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get line 1490 context and fix all require issues
+      - name: Copy fix script to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          source: "scripts/fix-all-require.py"
+          target: "/tmp/"
+          strip_components: 1
+
+      - name: Apply fix and verify
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,45 +26,21 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
-            BUNDLE="/root/novastream-admin/dist/index.js"
-
-            echo "=== LINE 1490 CONTEXT ==="
-            sed -n '1480,1510p' "$BUNDLE"
-
-            echo "=== ALL __require OCCURRENCES ==="
-            grep -n "__require" "$BUNDLE"
-
-            echo "=== FIX: Replace ALL __require with require2 ==="
-            python3 << 'PYEOF'
-import sys
-BUNDLE = "/root/novastream-admin/dist/index.js"
-with open(BUNDLE, 'r') as f:
-    content = f.read()
-
-# Count and replace ALL __require( calls (except the definition itself)
-import re
-# Replace __require( but NOT the definition line (which starts with "var __require")
-old = content
-# Replace all __require( that are function calls (not the var definition)
-content = re.sub(r'(?<!var )__require\(', 'require2(', content)
-count = old.count('__require(') - content.count('__require(')
-print(f"Replaced {count} __require( calls with require2(")
-
-with open(BUNDLE, 'w') as f:
-    f.write(content)
-print("Done")
-PYEOF
-
-            echo "=== VERIFY NO MORE __require CALLS ==="
-            grep -n "__require(" "$BUNDLE" | grep -v "var __require" | head -5 || echo "No __require calls remaining"
-
-            echo "=== RESTART SERVER ==="
+            python3 /tmp/fix-all-require.py
             pm2 restart novastream-admin
             sleep 5
-
-            echo "=== TEST NEXT-TRACK ==="
-            curl -s http://localhost:3006/api/stream/next-track 2>/dev/null | head -c 200
-
+            echo "=== NEXT-TRACK TEST ==="
+            curl -s http://localhost:3006/api/stream/next-track | head -c 300
             echo ""
-            echo "=== PM2 ERROR LOG (last 5) ==="
-            pm2 logs novastream-admin --nostream --lines 5 2>/dev/null | grep -i "error\|Error\|require" | head -5 || echo "No errors"
+            echo "=== PM2 ERROR LOG ==="
+            pm2 logs novastream-admin --nostream --lines 5 2>/dev/null | grep -i "error\|require" | head -5 || echo "No errors"
+
+      - name: Deploy player
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          source: "player/index.html"
+          target: "/var/www/html/"
+          strip_components: 1
