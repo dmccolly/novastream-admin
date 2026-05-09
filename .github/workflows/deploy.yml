@@ -5,24 +5,53 @@ on:
     branches: [main]
 
 jobs:
-  inspect-stream-wrapper:
+  patch-novastream:
     runs-on: ubuntu-latest
     steps:
-      - name: Show stream route try/catch wrapper in backup
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create scripts dir on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          script: mkdir -p /root/novastream-admin/scripts
+          command_timeout: 30s
+
+      - name: Upload Python patch script
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          source: "scripts/patch-wma.py"
+          target: "/root/novastream-admin/"
+
+      - name: Run patch and verify
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            echo "=== Find Failed to stream track in backup ==="
-            node -e "
-            var fs = require('fs');
-            var code = fs.readFileSync('/root/novastream/dist/index.js.bak', 'utf8');
-            var idx = code.indexOf('Failed to stream track');
-            if (idx < 0) { console.log('Not found'); process.exit(1); }
-            console.log('Found at:', idx);
-            console.log('Context (400 before, 200 after):');
-            console.log(JSON.stringify(code.slice(idx-400, idx+200)));
-            "
-          command_timeout: 30s
+            echo "=== Running Python patch ==="
+            python3 /root/novastream-admin/scripts/patch-wma.py
+
+            echo "=== Restarting novastream ==="
+            pm2 restart novastream
+            sleep 4
+
+            echo "=== Health ==="
+            curl -sf http://localhost:3001/api/health && echo " OK" || echo " FAIL"
+
+            echo "=== Stream test 185103 (WMA path, MP3 on disk) ==="
+            curl -s http://localhost:3001/api/tracks/185103/stream --max-time 5 | head -c 4 | xxd
+
+            echo "=== Stream test 212504 (DRM WMA - should be 404) ==="
+            curl -s http://localhost:3001/api/tracks/212504/stream --max-time 10
+
+            echo "=== Public URL stream test 185103 ==="
+            curl -s https://api.danielmccolly.com/api/tracks/185103/stream --max-time 5 | head -c 4 | xxd
+          command_timeout: 3m

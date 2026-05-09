@@ -16,10 +16,11 @@ else:
 with open(dist_file, 'r') as f:
     code = f.read()
 
+# ---- PATCH 1: Fix the stream 404 block to handle WMA ----
 marker = 'Audio file not found on server'
 idx = code.find(marker)
 if idx < 0:
-    print('ERROR: marker not found in', dist_file)
+    print('ERROR: marker not found')
     sys.exit(1)
 
 block_start = code.rfind('if (!fs.existsSync(track.filepath))', 0, idx)
@@ -29,13 +30,8 @@ if block_start < 0:
 
 block_end = code.find('\n      }', idx) + len('\n      }')
 old_block = code[block_start:block_end]
-print('Old block length:', len(old_block))
-print('Old block preview:', repr(old_block[:80]))
+print('PATCH 1 old block length:', len(old_block))
 
-# New block handles:
-# 1. File not found + .wma extension -> check for .mp3 version (already converted)
-# 2. File not found + not .wma -> original 404
-# 3. File found + .wma extension -> transcode via ffmpeg, handle DRM gracefully
 new_block = (
     "if (!fs.existsSync(track.filepath)) {\n"
     "        var wmaExt2 = path.extname(track.filepath).toLowerCase() === '.wma';\n"
@@ -55,13 +51,13 @@ new_block = (
     "      }\n"
     "      if (path.extname(track.filepath).toLowerCase() === '.wma') {\n"
     "        var spawnFn = require('child_process').spawn;\n"
-    "        var headersSent = false;\n"
-    "        var bytesWritten = 0;\n"
+    "        var wmaHeadersSent = false;\n"
+    "        var wmaBytesWritten = 0;\n"
     "        var ffProc = spawnFn('ffmpeg', ['-i', track.filepath, '-vn', '-ar', '44100', '-ac', '2', '-b:a', '192k', '-f', 'mp3', 'pipe:1'], { stdio: ['ignore', 'pipe', 'ignore'] });\n"
     "        ffProc.stdout.on('data', function(chunk) {\n"
-    "          bytesWritten += chunk.length;\n"
-    "          if (!headersSent) {\n"
-    "            headersSent = true;\n"
+    "          wmaBytesWritten += chunk.length;\n"
+    "          if (!wmaHeadersSent) {\n"
+    "            wmaHeadersSent = true;\n"
     "            res.setHeader('Content-Type', 'audio/mpeg');\n"
     "            res.setHeader('Transfer-Encoding', 'chunked');\n"
     "            res.setHeader('Accept-Ranges', 'none');\n"
@@ -70,23 +66,32 @@ new_block = (
     "          res.write(chunk);\n"
     "        });\n"
     "        ffProc.stdout.on('end', function() {\n"
-    "          if (bytesWritten < 1000) {\n"
-    "            if (!headersSent) {\n"
-    "              res.status(404).json({ error: 'Audio file not available (DRM or unsupported format)' });\n"
-    "            } else {\n"
-    "              res.end();\n"
-    "            }\n"
-    "          } else {\n"
-    "            res.end();\n"
-    "          }\n"
+    "          if (wmaBytesWritten < 1000) {\n"
+    "            if (!wmaHeadersSent) {\n"
+    "              try { res.status(404).json({ error: 'Audio not available (DRM or unsupported)' }); } catch(e) {}\n"
+    "            } else { try { res.end(); } catch(e) {} }\n"
+    "          } else { try { res.end(); } catch(e) {} }\n"
     "        });\n"
-    "        ffProc.on('error', function() { try { if (!headersSent) { res.status(404).json({ error: 'Audio conversion failed' }); } else { res.end(); } } catch(e) {} });\n"
+    "        ffProc.on('error', function() { try { if (!wmaHeadersSent) { res.status(404).json({ error: 'Audio conversion failed' }); } else { res.end(); } } catch(e) {} });\n"
     "        req.on('close', function() { try { ffProc.kill(); } catch(e) {} });\n"
     "        return;\n"
     "      }"
 )
 
-new_code = code[:block_start] + new_block + code[block_end:]
+code = code[:block_start] + new_block + code[block_end:]
+print('PATCH 1 OK')
+
+# ---- PATCH 2: Fix the outer try/catch to not intercept WMA async errors ----
+# The catch block is: } catch (error) {\n      console.error("Error streaming track:", error);\n      res.status(500).json({ error: "Failed to stream track" });\n    }
+old_catch = '} catch (error) {\n      console.error("Error streaming track:", error);\n      res.status(500).json({ error: "Failed to stream track" });\n    }'
+new_catch = '} catch (error) {\n      console.error("Error streaming track:", error);\n      if (!res.headersSent) { res.status(500).json({ error: "Failed to stream track" }); }\n    }'
+
+if old_catch in code:
+    code = code.replace(old_catch, new_catch)
+    print('PATCH 2 OK: try/catch fixed')
+else:
+    print('PATCH 2 SKIP: catch pattern not found (may already be patched)')
+
 with open(dist_file, 'w') as f:
-    f.write(new_code)
-print('SUCCESS: patch applied, new size:', len(new_code))
+    f.write(code)
+print('SUCCESS: patch applied, new size:', len(code))
