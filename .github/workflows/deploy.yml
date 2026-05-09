@@ -8,29 +8,37 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Restore and deploy
+      - name: Diagnose and fix port 3006
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            # RESTORE: bring novastream back on port 3006
-            cd /root/novastream
-            git checkout dist/index.js 2>/dev/null || true
-            pm2 start dist/index.js --name novastream 2>/dev/null || pm2 restart novastream
-            sleep 3
-            curl -sf http://localhost:3006/api/health && echo "port 3006 OK" || echo "port 3006 FAILED"
+            echo "=== Ports in use ==="
+            ss -tlnp | grep -E "3006|3001|3000|3005"
+            echo "=== PM2 env for novastream ==="
+            pm2 env 7 2>/dev/null | grep -E "PORT|port|NODE_ENV|script" | head -10
+            echo "=== novastream process info ==="
+            pm2 show novastream 2>/dev/null | grep -E "port|PORT|script|status|path" | head -20
+            echo "=== novastream logs (last 20 lines) ==="
+            pm2 logs novastream --lines 20 --nostream 2>/dev/null | tail -25
+          command_timeout: 5m
 
-            # BUILD: update novastream-admin (port 3001, internal)
+      - name: Build and restart novastream-admin
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          script: |
             cd /root/novastream-admin
             git fetch origin main
             git reset --hard origin/main
             NODE_OPTIONS=--max-old-space-size=512 npm run build:all
-            pm2 restart novastream-admin 2>/dev/null || pm2 start dist/index.js --name novastream-admin
-
+            pm2 restart novastream-admin
             pm2 save --force
-            echo "=== PM2 ==="
+            echo "=== Final PM2 ==="
             pm2 list
           command_timeout: 10m
 
