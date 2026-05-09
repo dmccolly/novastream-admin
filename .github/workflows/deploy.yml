@@ -5,31 +5,47 @@ on:
     branches: [main]
 
 jobs:
-  check-require:
+  patch-wma:
     runs-on: ubuntu-latest
     steps:
-      - name: Check child_process import and WMA block in live dist
+      - uses: actions/checkout@v4
+
+      - name: Upload patch script to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          source: scripts/patch-wma.py
+          target: /tmp/
+
+      - name: Run WMA patch and restart novastream
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            echo "=== Check child_process in bundle ==="
-            node -e "
-            var fs = require('fs');
-            var code = fs.readFileSync('/root/novastream/dist/index.js', 'utf8');
-            // Find how child_process is referenced
-            var cpIdx = code.indexOf('child_process');
-            console.log('child_process at:', cpIdx);
-            if (cpIdx >= 0) console.log('Context:', JSON.stringify(code.slice(cpIdx-50, cpIdx+80)));
-            // Find require in the bundle
-            var reqIdx = code.indexOf('require(');
-            console.log('require( at:', reqIdx);
-            if (reqIdx >= 0) console.log('Context:', JSON.stringify(code.slice(reqIdx-20, reqIdx+60)));
-            // Find our WMA block
-            var wmaIdx = code.indexOf('wmaExt2');
-            console.log('wmaExt2 at:', wmaIdx);
-            console.log('WMA block (200 chars):', JSON.stringify(code.slice(wmaIdx-50, wmaIdx+300)));
-            "
-          command_timeout: 30s
+            echo "=== Running WMA patch ==="
+            python3 /tmp/scripts/patch-wma.py
+
+            echo "=== Restarting novastream ==="
+            pm2 restart novastream
+            sleep 3
+            pm2 list
+
+            echo "=== Health ==="
+            curl -s http://localhost:3001/api/health && echo " OK" || echo " FAIL"
+
+            echo "=== Stream test 185103 (WMA path, MP3 on disk) ==="
+            curl -s http://localhost:3001/api/tracks/185103/stream --max-time 5 | head -c 4 | xxd
+
+            echo "=== Stream test 212504 (DRM WMA - should be 404) ==="
+            curl -s http://localhost:3001/api/tracks/212504/stream --max-time 12
+
+            echo "=== Preview test 185103 ==="
+            curl -s http://localhost:3001/api/tracks/185103/preview
+
+            echo "=== Public URL stream test 185103 ==="
+            curl -s https://api.danielmccolly.com/api/tracks/185103/stream --max-time 5 | head -c 4 | xxd
+          command_timeout: 60s

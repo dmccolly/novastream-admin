@@ -17,6 +17,7 @@ with open(dist_file, 'r') as f:
     code = f.read()
 
 # ---- PATCH 1: Fix the stream 404 block to handle WMA ----
+# NOTE: Uses 'spawn' (already imported at top of bundle), NOT require('child_process')
 marker = 'Audio file not found on server'
 idx = code.find(marker)
 if idx < 0:
@@ -50,10 +51,9 @@ new_block = (
     "        return res.status(404).json({ error: 'Audio file not found on server' });\n"
     "      }\n"
     "      if (path.extname(track.filepath).toLowerCase() === '.wma') {\n"
-    "        var spawnFn = require('child_process').spawn;\n"
     "        var wmaHeadersSent = false;\n"
     "        var wmaBytesWritten = 0;\n"
-    "        var ffProc = spawnFn('ffmpeg', ['-i', track.filepath, '-vn', '-ar', '44100', '-ac', '2', '-b:a', '192k', '-f', 'mp3', 'pipe:1'], { stdio: ['ignore', 'pipe', 'ignore'] });\n"
+    "        var ffProc = spawn('ffmpeg', ['-i', track.filepath, '-vn', '-ar', '44100', '-ac', '2', '-b:a', '192k', '-f', 'mp3', 'pipe:1'], { stdio: ['ignore', 'pipe', 'ignore'] });\n"
     "        ffProc.stdout.on('data', function(chunk) {\n"
     "          wmaBytesWritten += chunk.length;\n"
     "          if (!wmaHeadersSent) {\n"
@@ -82,7 +82,6 @@ code = code[:block_start] + new_block + code[block_end:]
 print('PATCH 1 OK')
 
 # ---- PATCH 2: Fix the outer try/catch to not intercept WMA async errors ----
-# The catch block is: } catch (error) {\n      console.error("Error streaming track:", error);\n      res.status(500).json({ error: "Failed to stream track" });\n    }
 old_catch = '} catch (error) {\n      console.error("Error streaming track:", error);\n      res.status(500).json({ error: "Failed to stream track" });\n    }'
 new_catch = '} catch (error) {\n      console.error("Error streaming track:", error);\n      if (!res.headersSent) { res.status(500).json({ error: "Failed to stream track" }); }\n    }'
 
