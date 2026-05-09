@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fix nginx music route
+      - name: Verify music files and preview API
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,69 +16,22 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
-            # Write the complete corrected nginx config for api.danielmccolly.com
-            cat > /etc/nginx/sites-enabled/novastream << 'NGINXEOF'
-            server {
-                listen 80;
-                server_name api.danielmccolly.com;
-                return 301 https://$host$request_uri;
-            }
-            server {
-                listen 443 ssl;
-                server_name api.danielmccolly.com;
-                ssl_certificate /etc/letsencrypt/live/api.danielmccolly.com/fullchain.pem;
-                ssl_certificate_key /etc/letsencrypt/live/api.danielmccolly.com/privkey.pem;
-                root /var/www/novastream;
-                index index.html;
+            echo "=== Music directory contents (first 10 files) ==="
+            ls /root/novastream/storage/music/ | head -10
+            echo "Total files:"
+            ls /root/novastream/storage/music/ | wc -l
 
-                # Serve music files for preview player
-                location /music/ {
-                    alias /root/novastream/storage/music/;
-                    add_header Access-Control-Allow-Origin "*" always;
-                    add_header Cache-Control "public, max-age=3600";
-                }
+            echo "=== Track 1 in DB ==="
+            sqlite3 /root/novastream-backend/radio.db "SELECT id, title, artist, file_path, status FROM tracks WHERE id=1 LIMIT 1;"
 
-                # API requests go to Node.js
-                location /api {
-                    proxy_pass http://127.0.0.1:3001;
-                    proxy_http_version 1.1;
-                    proxy_set_header Upgrade $http_upgrade;
-                    proxy_set_header Connection 'upgrade';
-                    proxy_set_header Host $host;
-                    proxy_cache_bypass $http_upgrade;
-                }
+            echo "=== Find some ready tracks with existing files ==="
+            sqlite3 /root/novastream-backend/radio.db "SELECT id, title, file_path FROM tracks WHERE status='ready' LIMIT 5;"
 
-                # All other requests go to Frontend (SPA support)
-                location / {
-                    try_files $uri $uri/ /index.html;
-                }
-            }
-            NGINXEOF
+            echo "=== Test preview API for track 1 ==="
+            curl -s http://localhost:3001/api/tracks/1/preview
 
-            # Test nginx config
-            nginx -t
+            echo "=== Check novastream PM2 status ==="
+            pm2 list | grep novastream
 
-            # Reload nginx if config is valid
-            if [ $? -eq 0 ]; then
-                systemctl reload nginx
-                echo "nginx reloaded successfully"
-            else
-                echo "ERROR: nginx config test failed"
-                exit 1
-            fi
-
-            # Fix permissions so nginx (www-data) can read the music files
-            # /root is 700 by default - nginx can't traverse it
-            chmod o+x /root
-            chmod o+x /root/novastream
-            chmod o+x /root/novastream/storage
-            chmod o+x /root/novastream/storage/music
-            chmod -R o+r /root/novastream/storage/music/
-            echo "Permissions fixed"
-
-            # Verify the fix
-            sleep 2
-            echo "=== Testing /music/ route ==="
-            curl -sI https://api.danielmccolly.com/music/250553_1778099320620.mp3 2>&1 | head -5
-            echo "=== Checking config ==="
-            grep -n "music" /etc/nginx/sites-enabled/novastream
+            echo "=== Check nginx music location ==="
+            grep -A3 "location /music" /etc/nginx/sites-enabled/novastream
