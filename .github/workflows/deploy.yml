@@ -3,43 +3,41 @@ on:
   push:
     branches: [main]
 jobs:
-  inspect-liquidsoap:
+  inspect-api:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect Liquidsoap script and API
+      - name: Inspect novastream-admin API on port 3006
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            echo "=== /root/novastream.liq ==="
-            cat /root/novastream.liq
+            echo "=== Test /api/stream/next-track ==="
+            curl -sv http://localhost:3006/api/stream/next-track --max-time 5 2>&1
 
             echo ""
-            echo "=== Test the API endpoint Liquidsoap calls ==="
-            # Try common endpoints
-            echo "--- /api/stream/next ---"
-            curl -s http://localhost:3001/api/stream/next --max-time 5
-            echo ""
-            echo "--- /api/stream/track ---"
-            curl -s http://localhost:3001/api/stream/track --max-time 5
-            echo ""
-            echo "--- /api/stream/now ---"
-            curl -s http://localhost:3001/api/stream/now --max-time 5
-            echo ""
-            echo "--- /api/tracks/random ---"
-            curl -s http://localhost:3001/api/tracks/random --max-time 5
-            echo ""
+            echo "=== novastream-admin server/index.js (all routes) ==="
+            grep -n "router\.\|app\.\|get\|post\|put\|delete\|'/\|\"/" /root/novastream-admin/server/index.js 2>/dev/null | head -60
 
             echo ""
-            echo "=== novastream server routes (grep stream) ==="
-            grep -n "stream\|next\|track\|liquidsoap\|icecast" /root/novastream/server/index.js 2>/dev/null | head -40
+            echo "=== novastream-admin server directory ==="
+            ls -la /root/novastream-admin/server/ 2>/dev/null
 
             echo ""
-            echo "=== Liquidsoap full log (last 50 lines) ==="
-            journalctl -u liquidsoap --no-pager -n 50 2>&1
+            echo "=== novastream-admin server/routes/ ==="
+            ls -la /root/novastream-admin/server/routes/ 2>/dev/null
+
+            echo ""
+            echo "=== stream route file ==="
+            cat /root/novastream-admin/server/routes/stream.js 2>/dev/null || \
+            cat /root/novastream-admin/server/routes/streamRoutes.js 2>/dev/null || \
+            echo "No stream route file found"
+
+            echo ""
+            echo "=== PM2 logs novastream-admin (last 30) ==="
+            pm2 logs novastream-admin --lines 30 --nostream 2>&1 | tail -35
 
             echo "DONE"
           command_timeout: 60s
