@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify music files and preview API
+      - name: Inspect DB schema and preview API
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,22 +16,20 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
-            echo "=== Music directory contents (first 10 files) ==="
-            ls /root/novastream/storage/music/ | head -10
-            echo "Total files:"
-            ls /root/novastream/storage/music/ | wc -l
+            echo "=== DB schema for tracks table ==="
+            sqlite3 /root/novastream-backend/radio.db ".schema tracks"
 
-            echo "=== Track 1 in DB ==="
-            sqlite3 /root/novastream-backend/radio.db "SELECT id, title, artist, file_path, status FROM tracks WHERE id=1 LIMIT 1;"
+            echo "=== Sample tracks from DB ==="
+            sqlite3 /root/novastream-backend/radio.db "SELECT * FROM tracks LIMIT 3;"
 
-            echo "=== Find some ready tracks with existing files ==="
-            sqlite3 /root/novastream-backend/radio.db "SELECT id, title, file_path FROM tracks WHERE status='ready' LIMIT 5;"
+            echo "=== Track 1 full row ==="
+            sqlite3 /root/novastream-backend/radio.db "SELECT * FROM tracks WHERE id=1;"
 
-            echo "=== Test preview API for track 1 ==="
-            curl -s http://localhost:3001/api/tracks/1/preview
+            echo "=== Files in music dir that match track 1 ==="
+            ls /root/novastream/storage/music/ | grep "^27457_" || echo "no match for 27457"
 
-            echo "=== Check novastream PM2 status ==="
-            pm2 list | grep novastream
+            echo "=== Preview route in novastream dist/index.js ==="
+            grep -n "preview" /root/novastream/dist/index.js | head -20
 
-            echo "=== Check nginx music location ==="
-            grep -A3 "location /music" /etc/nginx/sites-enabled/novastream
+            echo "=== Check what file track 1 actually has ==="
+            sqlite3 /root/novastream-backend/radio.db "SELECT id, title, artist FROM tracks WHERE id=1;"
