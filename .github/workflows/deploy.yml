@@ -5,45 +5,52 @@ on:
     branches: [main]
 
 jobs:
-  inspect-stream-route:
+  patch-novastream:
     runs-on: ubuntu-latest
     steps:
-      - name: Show exact stream route code in novastream dist
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create scripts dir on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          script: mkdir -p /root/novastream-admin/scripts
+          command_timeout: 30s
+
+      - name: Upload patch script
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          source: "scripts/patch-wma.js"
+          target: "/root/novastream-admin/"
+
+      - name: Run patch and verify
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            echo "=== Backup exists? ==="
-            ls -la /root/novastream/dist/index.js.bak 2>/dev/null && echo "YES" || echo "NO"
+            echo "=== Running patch ==="
+            node /root/novastream-admin/scripts/patch-wma.js
 
-            echo "=== Current dist/index.js size ==="
-            ls -la /root/novastream/dist/index.js
+            echo "=== Restarting novastream ==="
+            pm2 restart novastream
+            sleep 4
 
-            echo "=== Extract stream route: 200 chars around 'Audio file not found' ==="
-            node -e "
-              var fs = require('fs');
-              var code = fs.readFileSync('/root/novastream/dist/index.js', 'utf8');
-              var idx = code.indexOf('Audio file not found on server');
-              if (idx < 0) { console.log('NOT FOUND'); process.exit(0); }
-              console.log('FOUND at index:', idx);
-              console.log('--- 400 chars before ---');
-              console.log(JSON.stringify(code.slice(idx-400, idx)));
-              console.log('--- 200 chars after ---');
-              console.log(JSON.stringify(code.slice(idx, idx+200)));
-            "
+            echo "=== Health ==="
+            curl -sf http://localhost:3001/api/health && echo " OK" || echo " FAIL"
 
-            echo "=== Extract preview route: 200 chars around 'returning local URL' ==="
-            node -e "
-              var fs = require('fs');
-              var code = fs.readFileSync('/root/novastream/dist/index.js', 'utf8');
-              var idx = code.indexOf('returning local URL');
-              if (idx < 0) { console.log('NOT FOUND'); process.exit(0); }
-              console.log('FOUND at index:', idx);
-              console.log('--- 300 chars before ---');
-              console.log(JSON.stringify(code.slice(idx-300, idx)));
-              console.log('--- 100 chars after ---');
-              console.log(JSON.stringify(code.slice(idx, idx+100)));
-            "
-          command_timeout: 1m
+            echo "=== Stream test for 185103 (WMA path, MP3 on disk) ==="
+            curl -sI http://localhost:3001/api/tracks/185103/stream --max-time 5 | grep -i "HTTP\|content-type"
+            curl -s http://localhost:3001/api/tracks/185103/stream --max-time 5 | head -c 4 | xxd
+
+            echo "=== Stream test for 212504 (raw WMA on disk) ==="
+            curl -sI http://localhost:3001/api/tracks/212504/stream --max-time 8 | grep -i "HTTP\|content-type"
+            curl -s http://localhost:3001/api/tracks/212504/stream --max-time 8 | head -c 4 | xxd
+          command_timeout: 2m

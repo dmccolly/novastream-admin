@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Patch /root/novastream/dist/index.js to handle WMA files:
-// 1. Preview route: redirect WMA to /stream endpoint
-// 2. Stream route: serve pre-converted MP3 if exists, else transcode WMA via ffmpeg
+// Patch /root/novastream/dist/index.js to fix WMA stream 404:
+// When DB filepath is .wma but file was already converted to .mp3 on disk,
+// serve the .mp3 directly instead of returning 404.
 
 const fs = require('fs');
 const path = require('path');
@@ -19,65 +19,37 @@ if (fs.existsSync(distFile + '.bak')) {
 let code = fs.readFileSync(distFile, 'utf8');
 const original = code;
 
-// PATCH 1: Preview route - return /stream URL for WMA files
-const previewOld = 'if (track.filepath) {\n        const localUrl = `/music/${path2.basename(track.filepath)}`;\n        console.log("[PREVIEW] Track has filepath, returning local URL:", localUrl);\n        return res.json({ url: localUrl });\n      }';
-const previewNew = 'if (track.filepath) {\n        if (path.extname(track.filepath).toLowerCase() === \'.wma\') {\n          return res.json({ url: `/api/tracks/${id}/stream` });\n        }\n        const localUrl = `/music/${path2.basename(track.filepath)}`;\n        console.log("[PREVIEW] Track has filepath, returning local URL:", localUrl);\n        return res.json({ url: localUrl });\n      }';
+// The current stream route has:
+//   if (!fs.existsSync(track.filepath)) {
+//     return res.status(404).json({ error: "Audio file not found on server" });
+//   }
+//   if (path.extname(track.filepath).toLowerCase() === '.wma') { ... transcode ... }
+//
+// The problem: when DB has .wma path but file was converted to .mp3,
+// existsSync fails and we hit 404 before reaching the .wma transcode block.
+// Fix: add MP3 fallback check inside the !existsSync block.
 
-if (code.includes(previewOld)) {
-  code = code.replace(previewOld, previewNew);
-  console.log('PATCH 1 OK: preview WMA redirect');
+const oldPattern = 'if (!fs.existsSync(track.filepath)) {\n        return res.status(404).json({ error: "Audio file not found on server" });\n      }';
+const newPattern = 'if (!fs.existsSync(track.filepath)) {\n        if (path.extname(track.filepath).toLowerCase() === \'.wma\') {\n          const mp3Alt = track.filepath.replace(/\\.wma$/i, \'.mp3\');\n          if (fs.existsSync(mp3Alt)) {\n            const s3 = fs.statSync(mp3Alt);\n            res.setHeader(\'Content-Type\', \'audio/mpeg\');\n            res.setHeader(\'Content-Length\', s3.size);\n            res.setHeader(\'Accept-Ranges\', \'bytes\');\n            res.setHeader(\'Access-Control-Allow-Origin\', \'*\');\n            fs.createReadStream(mp3Alt).pipe(res);\n            return;\n          }\n        }\n        return res.status(404).json({ error: "Audio file not found on server" });\n      }';
+
+if (code.includes(oldPattern)) {
+  code = code.replace(oldPattern, newPattern);
+  console.log('PATCH OK: added MP3 fallback for WMA-path-but-MP3-on-disk');
 } else {
-  console.log('PATCH 1 SKIP: pattern not found');
-}
-
-// PATCH 2: Stream route - resolve WMA path (may have been converted to MP3 already)
-// and transcode remaining WMA files on the fly
-const streamOld = 'if (!fs.existsSync(track.filepath)) {\n        return res.status(404).json({ error: "Audio file not found on server" });\n      }\n      const stat = fs.statSync(track.filepath);';
-
-const streamNew = [
-  'if (!fs.existsSync(track.filepath)) {',
-  '        // WMA file may have already been converted to MP3 on disk',
-  '        if (path.extname(track.filepath).toLowerCase() === \'.wma\') {',
-  '          const mp3Path = track.filepath.replace(/\\.wma$/i, \'.mp3\');',
-  '          if (fs.existsSync(mp3Path)) {',
-  '            const stat2 = fs.statSync(mp3Path);',
-  '            res.setHeader(\'Content-Type\', \'audio/mpeg\');',
-  '            res.setHeader(\'Content-Length\', stat2.size);',
-  '            res.setHeader(\'Accept-Ranges\', \'bytes\');',
-  '            res.setHeader(\'Access-Control-Allow-Origin\', \'*\');',
-  '            fs.createReadStream(mp3Path).pipe(res);',
-  '            return;',
-  '          }',
-  '        }',
-  '        return res.status(404).json({ error: "Audio file not found on server" });',
-  '      }',
-  '      // WMA file exists on disk - transcode it on the fly via ffmpeg',
-  '      if (path.extname(track.filepath).toLowerCase() === \'.wma\') {',
-  '        var spawn2 = require(\'child_process\').spawn;',
-  '        res.setHeader(\'Content-Type\', \'audio/mpeg\');',
-  '        res.setHeader(\'Transfer-Encoding\', \'chunked\');',
-  '        res.setHeader(\'Access-Control-Allow-Origin\', \'*\');',
-  '        var ff = spawn2(\'ffmpeg\', [\'-i\', track.filepath, \'-vn\', \'-ar\', \'44100\', \'-ac\', \'2\', \'-b:a\', \'192k\', \'-f\', \'mp3\', \'pipe:1\'], { stdio: [\'ignore\', \'pipe\', \'pipe\'] });',
-  '        var started = false;',
-  '        ff.stdout.on(\'data\', function(chunk) { started = true; res.write(chunk); });',
-  '        ff.on(\'close\', function() { if (!started && !res.headersSent) { res.status(451).json({ error: "Track has rights restrictions" }); } else { res.end(); } });',
-  '        ff.on(\'error\', function(e) { if (!res.headersSent) res.status(500).end(); });',
-  '        req.on(\'close\', function() { ff.kill(); });',
-  '        return;',
-  '      }',
-  '      const stat = fs.statSync(track.filepath);'
-].join('\n');
-
-if (code.includes(streamOld)) {
-  code = code.replace(streamOld, streamNew);
-  console.log('PATCH 2 OK: stream WMA path resolution + transcoding');
-} else {
-  console.log('PATCH 2 SKIP: pattern not found');
+  // Try to find what's actually there
+  const idx = code.indexOf('Audio file not found on server');
+  if (idx >= 0) {
+    console.log('Pattern not found. Actual code around error:');
+    console.log(JSON.stringify(code.slice(idx - 200, idx + 100)));
+  } else {
+    console.log('ERROR: "Audio file not found on server" not found in dist/index.js');
+  }
+  process.exit(1);
 }
 
 if (code !== original) {
   fs.writeFileSync(distFile, code);
-  console.log('SUCCESS: Patched dist/index.js written');
+  console.log('SUCCESS: dist/index.js updated');
 } else {
   console.log('INFO: No changes made');
 }
