@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get Liquidsoap script
+      - name: Get broken require context and now-playing route
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,18 +16,15 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 30s
           script: |
-            echo "=== LIQUIDSOAP SCRIPT ==="
-            find /root /etc /home -name "*.liq" 2>/dev/null | head -5
-            LIQ=$(find /root /etc /home -name "*.liq" 2>/dev/null | head -1)
-            if [ -n "$LIQ" ]; then
-              echo "FILE: $LIQ"
-              cat "$LIQ"
+            BUNDLE="/root/novastream-admin/dist/index.js"
+            echo "=== REQUIRE LINE ==="
+            grep -n "__require\|createRequire\|require(" "$BUNDLE" | head -20
+            echo "=== NOW-PLAYING ROUTE (lines around 'now-playing') ==="
+            grep -n "now-playing\|now_playing\|nowPlaying" "$BUNDLE" | head -20
+            echo "=== LINES AROUND REQUIRE ==="
+            LINE=$(grep -n "__require" "$BUNDLE" | head -1 | cut -d: -f1)
+            if [ -n "$LINE" ]; then
+              START=$((LINE - 3))
+              END=$((LINE + 10))
+              sed -n "${START},${END}p" "$BUNDLE"
             fi
-            echo "=== PM2 LIQUIDSOAP LOGS (last 50) ==="
-            pm2 logs --nostream --lines 50 2>/dev/null | grep -i "liq\|liquid\|now.play\|segue\|cue\|callback\|track" | tail -30
-            echo "=== NOW PLAYING API ==="
-            curl -s http://localhost:3006/api/stream/now 2>/dev/null
-            echo ""
-            echo "=== NEXT TRACK API ==="
-            curl -s http://localhost:3006/api/stream/next-track 2>/dev/null
-            echo ""
