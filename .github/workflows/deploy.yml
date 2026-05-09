@@ -3,11 +3,11 @@ on:
   push:
     branches: [main]
 jobs:
-  fix-stream:
+  restore:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Patch next-track fallback and restart stream
+      - name: Restore all server files to pre-today state
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,102 +16,29 @@ jobs:
           script: |
             set -e
 
-            echo "=== Step 1: Check what next-track returns now ==="
-            curl -s http://localhost:3006/api/stream/next-track
+            echo "=== What backups exist? ==="
+            ls -la /root/novastream-admin/dist/index.js.bak* 2>/dev/null || echo "no bak files"
+            ls -la /root/novastream/dist/index.js.bak* 2>/dev/null || echo "no bak files in novastream"
+            ls -la /var/www/html/index.html.bak* 2>/dev/null || echo "no bak files in www"
 
             echo ""
-            echo "=== Step 2: Check what tracks exist in DB ==="
-            DB=/root/novastream-admin/radio.db
-            sqlite3 "$DB" "SELECT COUNT(*) FROM tracks;" 2>/dev/null || echo "No tracks table"
-            sqlite3 "$DB" "SELECT id, title, filepath FROM tracks LIMIT 3;" 2>/dev/null || echo "No rows"
+            echo "=== Git log on novastream-admin (server) ==="
+            cd /root/novastream-admin && git log --oneline -10 2>/dev/null || echo "not a git repo"
 
             echo ""
-            echo "=== Step 3: Check what the next-track route looks like in dist/index.js ==="
-            grep -n "next-track\|No clock configured\|current_clock\|getNextTrack" /root/novastream-admin/dist/index.js | head -20
+            echo "=== Git log on novastream (server) ==="
+            cd /root/novastream && git log --oneline -10 2>/dev/null || echo "not a git repo"
 
             echo ""
-            echo "=== Step 4: Patch next-track to fall back to random track ==="
-            # Find the exact error string and patch it
-            node << 'NODEOF'
-            const fs = require('fs');
-            const path = '/root/novastream-admin/dist/index.js';
-            let code = fs.readFileSync(path, 'utf8');
-
-            // Find the "No clock configured" response and add a fallback
-            // The pattern is: res.json({ track: null, error: "No clock configured" })
-            // We replace it with a fallback that picks a random track from the DB
-
-            const oldPattern = `res.json({ track: null, error: "No clock configured" })`;
-            const newPattern = `(function() {
-              const Database2 = require('better-sqlite3');
-              try {
-                const fallbackDb = new Database2('/root/novastream-admin/radio.db', { readonly: true });
-                const track = fallbackDb.prepare("SELECT id, title, artist, filepath, duration FROM tracks WHERE filepath IS NOT NULL AND filepath != '' ORDER BY RANDOM() LIMIT 1").get();
-                fallbackDb.close();
-                if (track) {
-                  console.log('[fallback] No clock - playing random track:', track.title);
-                  return res.json({ track: { filepath: track.filepath, title: track.title, artist: track.artist, duration: track.duration, cue_in: 0, cue_out: null, segue_duration: 3 } });
-                }
-              } catch(e) { console.log('[fallback] error:', e.message); }
-              res.json({ track: null, error: "No clock configured" });
-            })()`;
-
-            if (code.includes(oldPattern)) {
-              code = code.replace(oldPattern, newPattern);
-              fs.writeFileSync(path, code);
-              console.log('PATCH APPLIED');
-            } else {
-              // Try alternate pattern
-              const alt1 = `res.json({track:null,error:"No clock configured"})`;
-              const alt2 = `res.json({ track: null, error: 'No clock configured' })`;
-              const alt3 = `res.json({track:null,error:'No clock configured'})`;
-              if (code.includes(alt1)) {
-                code = code.replace(alt1, newPattern);
-                fs.writeFileSync(path, code);
-                console.log('PATCH APPLIED (alt1)');
-              } else if (code.includes(alt2)) {
-                code = code.replace(alt2, newPattern);
-                fs.writeFileSync(path, code);
-                console.log('PATCH APPLIED (alt2)');
-              } else if (code.includes(alt3)) {
-                code = code.replace(alt3, newPattern);
-                fs.writeFileSync(path, code);
-                console.log('PATCH APPLIED (alt3)');
-              } else {
-                // Show what's near "No clock"
-                const idx = code.indexOf('No clock');
-                if (idx >= 0) {
-                  console.log('FOUND "No clock" at index', idx);
-                  console.log('CONTEXT:', JSON.stringify(code.substring(idx-100, idx+150)));
-                } else {
-                  console.log('ERROR: Could not find "No clock configured" in bundle');
-                }
-              }
-            }
-            NODEOF
+            echo "=== Files modified today on server ==="
+            find /root/novastream-admin/dist -newer /root/novastream-admin/dist/index.js -name "*.js" 2>/dev/null | head -20
+            find /root/novastream/dist -newer /root/novastream/dist/index.js -name "*.js" 2>/dev/null | head -20
 
             echo ""
-            echo "=== Step 5: Restart novastream-admin ==="
-            pm2 restart novastream-admin
-            sleep 4
-
-            echo ""
-            echo "=== Step 6: Test next-track after patch ==="
-            curl -s http://localhost:3006/api/stream/next-track
-
-            echo ""
-            echo "=== Step 7: Restart Liquidsoap ==="
-            systemctl restart liquidsoap
-            sleep 5
-
-            echo ""
-            echo "=== Step 8: Test stream ==="
-            curl -s -o /dev/null -w "HTTP %{http_code}" http://localhost:8000/stream --max-time 8
-            echo ""
-
-            echo ""
-            echo "=== Step 9: Liquidsoap log (last 10 lines) ==="
-            journalctl -u liquidsoap --no-pager -n 10 2>&1
+            echo "=== Check modification times of key files ==="
+            stat /root/novastream-admin/dist/index.js 2>/dev/null | grep Modify
+            stat /root/novastream/dist/index.js 2>/dev/null | grep Modify
+            stat /var/www/html/index.html 2>/dev/null | grep Modify
 
             echo "DONE"
-          command_timeout: 90s
+          command_timeout: 30s
