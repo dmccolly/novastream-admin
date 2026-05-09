@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Inspect preview route and admin DB
+      - name: Deep inspect preview and file mapping
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,20 +16,24 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
-            echo "=== Preview route code (lines 540-580) ==="
-            sed -n '540,580p' /root/novastream/dist/index.js
+            echo "=== What does the admin panel library show? ==="
+            echo "Calling /api/tracks (first 5 tracks from admin panel perspective)"
+            curl -s http://localhost:3001/api/tracks?limit=5 2>&1 | head -500
 
-            echo "=== novastream-admin DB schema ==="
-            sqlite3 /root/novastream-admin/novastream.db ".tables"
+            echo "=== Track 27457 in backend DB ==="
+            sqlite3 /root/novastream-backend/radio.db "SELECT id, title, artist, filepath, status FROM tracks WHERE id=27457;"
 
-            echo "=== novastream-admin tracks schema ==="
-            sqlite3 /root/novastream-admin/novastream.db ".schema tracks" 2>/dev/null || echo "no tracks table"
+            echo "=== Files in music dir matching 27457 ==="
+            ls /root/novastream/storage/music/ | grep "27457" || echo "no files matching 27457"
 
-            echo "=== novastream-admin library schema ==="
-            sqlite3 /root/novastream-admin/novastream.db ".schema library" 2>/dev/null || echo "no library table"
+            echo "=== What does the music dir contain? (sample) ==="
+            ls /root/novastream/storage/music/ | head -5
 
-            echo "=== novastream-admin all tables ==="
-            sqlite3 /root/novastream-admin/novastream.db ".schema"
+            echo "=== Check how files are stored - what is the filepath format? ==="
+            sqlite3 /root/novastream-backend/radio.db "SELECT id, title, filepath FROM tracks WHERE filepath IS NOT NULL AND filepath != '' LIMIT 5;"
 
-            echo "=== Sample from novastream-admin DB ==="
-            sqlite3 /root/novastream-admin/novastream.db "SELECT name FROM sqlite_master WHERE type='table';"
+            echo "=== Check how many tracks have filepaths ==="
+            sqlite3 /root/novastream-backend/radio.db "SELECT COUNT(*) FROM tracks WHERE filepath IS NOT NULL AND filepath != '';"
+
+            echo "=== Sample of tracks with filepaths ==="
+            sqlite3 /root/novastream-backend/radio.db "SELECT id, title, filepath FROM tracks WHERE filepath LIKE '%mp3%' LIMIT 5;"
