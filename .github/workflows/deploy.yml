@@ -8,35 +8,33 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Show stream and preview route code in novastream dist
+      - name: Patch novastream for WMA transcoding
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            node -e "
+            node << 'EOF'
             const fs = require('fs');
-            const code = fs.readFileSync('/root/novastream/dist/index.js', 'utf8');
-            // Find 'Audio file not found' context
-            const idx1 = code.indexOf('Audio file not found');
-            if (idx1 >= 0) {
-              console.log('=== STREAM ROUTE (around Audio file not found) ===');
-              console.log(code.substring(Math.max(0, idx1-300), idx1+300));
+            const path = require('path');
+            const distFile = '/root/novastream/dist/index.js';
+            let code = fs.readFileSync(distFile, 'utf8');
+
+            // Show the full stream route section
+            const idx = code.indexOf('Audio file not found on server');
+            if (idx >= 0) {
+              console.log('=== FULL STREAM SECTION ===');
+              console.log(JSON.stringify(code.substring(Math.max(0, idx-400), idx+800)));
             }
-            // Find preview route context
-            const idx2 = code.indexOf('/music/');
+
+            // Show preview route section
+            const idx2 = code.indexOf('[PREVIEW] Request received');
             if (idx2 >= 0) {
-              console.log('=== PREVIEW ROUTE (around /music/) ===');
-              console.log(code.substring(Math.max(0, idx2-200), idx2+400));
+              console.log('=== FULL PREVIEW SECTION ===');
+              console.log(JSON.stringify(code.substring(idx2, idx2+1200)));
             }
-            // Find PREVIEW log
-            const idx3 = code.indexOf('PREVIEW');
-            if (idx3 >= 0) {
-              console.log('=== PREVIEW LOG ===');
-              console.log(code.substring(Math.max(0, idx3-100), idx3+500));
-            }
-            "
+            EOF
           command_timeout: 2m
 
       - name: Build and deploy novastream-admin
