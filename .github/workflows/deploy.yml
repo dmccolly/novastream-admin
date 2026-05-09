@@ -8,42 +8,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fix nginx music route
+      - name: Read nginx config
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 60s
+          command_timeout: 30s
           script: |
-            NGINX_CONF="/etc/nginx/sites-enabled/default"
-            echo "=== CURRENT /music/ CONFIG ==="
-            grep -n "music" "$NGINX_CONF" || echo "No music location found"
-
-            echo "=== MUSIC FILES LOCATION ==="
-            ls /root/novastream/storage/music/ | head -3
-
-            echo "=== ADD /music/ LOCATION IF MISSING ==="
-            if grep -q "location /music/" "$NGINX_CONF"; then
-              echo "Already exists - checking alias"
-              grep -A3 "location /music/" "$NGINX_CONF"
-            else
-              sed -i 's|location / {|location /music/ {\n        alias /root/novastream/storage/music/;\n        add_header Access-Control-Allow-Origin *;\n    }\n\n    location / {|' "$NGINX_CONF"
-              echo "Added /music/ location"
-            fi
-
-            echo "=== TEST NGINX ==="
-            nginx -t 2>&1
-
-            echo "=== RELOAD NGINX ==="
-            nginx -s reload && echo "OK"
-
-            echo "=== TEST MUSIC URL ==="
-            sleep 1
-            HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost/music/250553_1778099320620.mp3")
-            CTYPE=$(curl -sI --max-time 5 "http://localhost/music/250553_1778099320620.mp3" | grep -i "content-type")
-            echo "HTTP: $HTTP"
-            echo "Content-Type: $CTYPE"
-
-            echo "=== TEST PREVIEW API ==="
-            curl -s --max-time 5 "http://localhost:3001/api/tracks/250553/preview" || echo "3001 failed"
+            echo "=== ALL NGINX CONFIGS ==="
+            ls /etc/nginx/sites-enabled/
+            echo "--- default ---"
+            cat /etc/nginx/sites-enabled/default
+            echo "--- streamofdan ---"
+            cat /etc/nginx/sites-enabled/streamofdan.com 2>/dev/null || echo "no streamofdan config"
+            echo "--- api ---"
+            cat /etc/nginx/sites-enabled/api.danielmccolly.com 2>/dev/null || echo "no api config"
