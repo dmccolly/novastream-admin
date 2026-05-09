@@ -8,52 +8,22 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Diagnose and fix port 3006
+      - name: Fix nginx and restore port 3006
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            echo "=== Ports in use ==="
-            ss -tlnp | grep -E "3006|3001|3000|3005"
-            echo "=== PM2 env for novastream ==="
-            pm2 env 7 2>/dev/null | grep -E "PORT|port|NODE_ENV|script" | head -10
-            echo "=== novastream process info ==="
-            pm2 show novastream 2>/dev/null | grep -E "port|PORT|script|status|path" | head -20
-            echo "=== novastream logs (last 20 lines) ==="
-            pm2 logs novastream --lines 20 --nostream 2>/dev/null | tail -25
-          command_timeout: 5m
-
-      - name: Build and restart novastream-admin
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          script: |
-            cd /root/novastream-admin
-            git fetch origin main
-            git reset --hard origin/main
-            NODE_OPTIONS=--max-old-space-size=512 npm run build:all
-            pm2 restart novastream-admin
-            pm2 save --force
-            echo "=== Final PM2 ==="
-            pm2 list
-          command_timeout: 10m
-
-      - name: Update player HTML
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          script: |
-            for WEBROOT in /var/www/html /var/www/streamofdan.com/html /var/www/streamofdan/html /usr/share/nginx/html; do
-              if [ -f "$WEBROOT/index.html" ]; then
-                cp /root/novastream-admin/player/index.html "$WEBROOT/index.html"
-                echo "Updated player at $WEBROOT/index.html"
-                break
-              fi
-            done
+            echo "=== All listening ports ==="
+            ss -tlnp
+            echo "=== Nginx status ==="
+            systemctl status nginx 2>/dev/null | head -10 || echo "nginx not found"
+            echo "=== Nginx config ==="
+            cat /etc/nginx/sites-enabled/* 2>/dev/null || cat /etc/nginx/nginx.conf 2>/dev/null | grep -A5 "3006\|3001\|proxy_pass" | head -30
+            echo "=== Restart nginx ==="
+            systemctl restart nginx 2>/dev/null && echo "nginx restarted OK" || echo "nginx restart failed"
+            sleep 2
+            echo "=== Port 3006 check ==="
+            curl -sf http://localhost:3006/api/health && echo "3006 OK" || echo "3006 FAILED"
           command_timeout: 5m
