@@ -5,25 +5,51 @@ on:
     branches: [main]
 
 jobs:
-  inspect-backup:
+  patch-novastream:
     runs-on: ubuntu-latest
     steps:
-      - name: Show exact backup stream route code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create scripts dir on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          script: mkdir -p /root/novastream-admin/scripts
+          command_timeout: 30s
+
+      - name: Upload patch script
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          source: "scripts/patch-wma.js"
+          target: "/root/novastream-admin/"
+
+      - name: Run patch and verify
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            node << 'NODEEOF'
-            var fs = require('fs');
-            var code = fs.readFileSync('/root/novastream/dist/index.js.bak', 'utf8');
-            var idx = code.indexOf('Audio file not found on server');
-            if (idx < 0) { console.log('NOT FOUND in backup'); process.exit(0); }
-            console.log('FOUND at index:', idx);
-            console.log('=== 500 chars before ===');
-            console.log(JSON.stringify(code.slice(idx-500, idx)));
-            console.log('=== 300 chars after ===');
-            console.log(JSON.stringify(code.slice(idx, idx+300)));
-            NODEEOF
-          command_timeout: 1m
+            echo "=== Running patch ==="
+            node /root/novastream-admin/scripts/patch-wma.js
+
+            echo "=== Restarting novastream ==="
+            pm2 restart novastream
+            sleep 4
+
+            echo "=== Health ==="
+            curl -sf http://localhost:3001/api/health && echo " OK" || echo " FAIL"
+
+            echo "=== Stream test 185103 (WMA path, MP3 on disk) ==="
+            RESP=$(curl -s http://localhost:3001/api/tracks/185103/stream --max-time 5 | head -c 4 | xxd)
+            echo "$RESP"
+
+            echo "=== Stream test 212504 (raw WMA on disk) ==="
+            curl -sI http://localhost:3001/api/tracks/212504/stream --max-time 8 | grep -i "HTTP\|content-type"
+          command_timeout: 2m
