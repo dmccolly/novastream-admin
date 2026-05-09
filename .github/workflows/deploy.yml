@@ -3,12 +3,12 @@ on:
   push:
     branches: [main]
 jobs:
-  fix-stream:
+  fix-next-track:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Diagnose and fix stream
+      - name: Get broken code and fix it
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,34 +16,10 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 120s
           script: |
-            echo "=== ICECAST STATUS ==="
-            curl -s http://localhost:8000/status.xsl 2>/dev/null | grep -E "mount|listeners|Connected|bitrate" | head -20 || true
-            curl -s http://localhost:8000/admin/stats.xml -u admin:hackme 2>/dev/null | head -30 || true
+            echo "=== FIND THE BROKEN require() IN next-track HANDLER ==="
+            # Get the lines around line 1490 where the error occurs
+            sed -n '1480,1510p' /root/novastream-admin/dist/index.js
 
             echo ""
-            echo "=== ICECAST SOURCES (are any connected?) ==="
-            curl -s "http://localhost:8000/admin/listclients?mount=/stream" -u admin:hackme 2>/dev/null || true
-            # Check if stream mount has a source
-            STREAM_BYTES=$(curl -s http://localhost:8000/stream --max-time 3 | wc -c)
-            echo "Bytes received from stream in 3s: $STREAM_BYTES"
-
-            echo ""
-            echo "=== LIQUIDSOAP STATUS ==="
-            systemctl status liquidsoap --no-pager -n 20 2>/dev/null || true
-            journalctl -u liquidsoap --no-pager -n 30 2>/dev/null || true
-
-            echo ""
-            echo "=== LIQUIDSOAP SCRIPT ==="
-            find /root /home -name "*.liq" 2>/dev/null | head -5
-            cat /root/novastream-admin/novastream.liq 2>/dev/null || cat /root/novastream.liq 2>/dev/null || find / -name "*.liq" -exec cat {} \; 2>/dev/null | head -60
-
-            echo ""
-            echo "=== NEXT-TRACK API ==="
-            curl -s http://localhost:3006/api/stream/next-track 2>/dev/null
-            echo ""
-
-            echo ""
-            echo "=== NOVASTREAM-ADMIN PM2 LOGS (last 20) ==="
-            pm2 logs novastream-admin --lines 20 --nostream 2>/dev/null || true
-
-            echo "DIAG COMPLETE"
+            echo "=== FULL next-track HANDLER CONTEXT ==="
+            grep -n "next-track\|next_track\|nextTrack\|require(" /root/novastream-admin/dist/index.js | head -30
