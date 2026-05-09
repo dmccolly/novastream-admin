@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check Liquidsoap and now-playing status
+      - name: Inspect now-playing route and fix
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,29 +16,31 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
-            echo "=== PM2 process status ==="
-            pm2 list
+            echo "=== Test now-playing with short timeout ==="
+            curl -s --max-time 5 http://localhost:3006/api/stream/now || echo "TIMEOUT or ERROR"
 
-            echo "=== Liquidsoap process ==="
-            ps aux | grep liquidsoap | grep -v grep
+            echo "=== Test now-playing on port 3001 (novastream) ==="
+            curl -s --max-time 5 http://localhost:3001/api/stream/now || echo "TIMEOUT or ERROR"
 
-            echo "=== Icecast status ==="
-            curl -s http://localhost:8000/status.xsl | head -50
+            echo "=== Check now-playing route in admin dist ==="
+            grep -n "stream/now\|now-playing\|now_playing" /root/novastream-admin/dist/index.js | head -20
 
-            echo "=== novastream-admin recent logs ==="
-            pm2 logs novastream-admin --lines 20 --nostream 2>&1 | tail -30
+            echo "=== Check now-playing route code ==="
+            grep -n "stream/now" /root/novastream-admin/dist/index.js | head -5
 
-            echo "=== Test now-playing endpoint ==="
-            curl -s http://localhost:3006/api/stream/now
+            echo "=== novastream-admin DB tables ==="
+            sqlite3 /root/novastream-admin/novastream.db ".tables"
 
-            echo "=== Test next-track endpoint ==="
-            curl -s http://localhost:3006/api/stream/next-track | head -200
-
-            echo "=== Check play_history in admin DB ==="
-            sqlite3 /root/novastream-admin/novastream.db "SELECT * FROM play_history ORDER BY played_at DESC LIMIT 5;" 2>/dev/null || echo "no play_history table or empty"
-
-            echo "=== Check now_playing in admin DB ==="
-            sqlite3 /root/novastream-admin/novastream.db ".tables" 2>/dev/null
-
-            echo "=== Liquidsoap log ==="
-            tail -20 /var/log/liquidsoap.log 2>/dev/null || find /var/log -name "*liquid*" 2>/dev/null | head -5
+            echo "=== Check Icecast JSON stats ==="
+            curl -s --max-time 5 http://localhost:8000/status-json.xsl | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    src = d.get('icestats',{}).get('source',{})
+    if isinstance(src, list): src = src[0]
+    print('title:', src.get('title','?'))
+    print('artist:', src.get('artist','?'))
+    print('song:', src.get('song','?'))
+except Exception as e:
+    print('Error:', e)
+"
