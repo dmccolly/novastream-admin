@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deep inspect preview and file mapping
+      - name: Check Liquidsoap and now-playing status
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,24 +16,29 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
-            echo "=== What does the admin panel library show? ==="
-            echo "Calling /api/tracks (first 5 tracks from admin panel perspective)"
-            curl -s http://localhost:3001/api/tracks?limit=5 2>&1 | head -500
+            echo "=== PM2 process status ==="
+            pm2 list
 
-            echo "=== Track 27457 in backend DB ==="
-            sqlite3 /root/novastream-backend/radio.db "SELECT id, title, artist, filepath, status FROM tracks WHERE id=27457;"
+            echo "=== Liquidsoap process ==="
+            ps aux | grep liquidsoap | grep -v grep
 
-            echo "=== Files in music dir matching 27457 ==="
-            ls /root/novastream/storage/music/ | grep "27457" || echo "no files matching 27457"
+            echo "=== Icecast status ==="
+            curl -s http://localhost:8000/status.xsl | head -50
 
-            echo "=== What does the music dir contain? (sample) ==="
-            ls /root/novastream/storage/music/ | head -5
+            echo "=== novastream-admin recent logs ==="
+            pm2 logs novastream-admin --lines 20 --nostream 2>&1 | tail -30
 
-            echo "=== Check how files are stored - what is the filepath format? ==="
-            sqlite3 /root/novastream-backend/radio.db "SELECT id, title, filepath FROM tracks WHERE filepath IS NOT NULL AND filepath != '' LIMIT 5;"
+            echo "=== Test now-playing endpoint ==="
+            curl -s http://localhost:3006/api/stream/now
 
-            echo "=== Check how many tracks have filepaths ==="
-            sqlite3 /root/novastream-backend/radio.db "SELECT COUNT(*) FROM tracks WHERE filepath IS NOT NULL AND filepath != '';"
+            echo "=== Test next-track endpoint ==="
+            curl -s http://localhost:3006/api/stream/next-track | head -200
 
-            echo "=== Sample of tracks with filepaths ==="
-            sqlite3 /root/novastream-backend/radio.db "SELECT id, title, filepath FROM tracks WHERE filepath LIKE '%mp3%' LIMIT 5;"
+            echo "=== Check play_history in admin DB ==="
+            sqlite3 /root/novastream-admin/novastream.db "SELECT * FROM play_history ORDER BY played_at DESC LIMIT 5;" 2>/dev/null || echo "no play_history table or empty"
+
+            echo "=== Check now_playing in admin DB ==="
+            sqlite3 /root/novastream-admin/novastream.db ".tables" 2>/dev/null
+
+            echo "=== Liquidsoap log ==="
+            tail -20 /var/log/liquidsoap.log 2>/dev/null || find /var/log -name "*liquid*" 2>/dev/null | head -5
