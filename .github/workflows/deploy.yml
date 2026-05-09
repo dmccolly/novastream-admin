@@ -5,26 +5,24 @@ on:
     branches: [main]
 
 jobs:
-  inspect-catch:
+  inspect-stream-full:
     runs-on: ubuntu-latest
     steps:
-      - name: Show current catch block in live dist/index.js
+      - name: Show full stream route structure in backup
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
-            echo "=== Find Failed to stream track in LIVE dist/index.js ==="
+            echo "=== Full stream route from backup (try block start to catch end) ==="
             node -e "
             var fs = require('fs');
-            var code = fs.readFileSync('/root/novastream/dist/index.js', 'utf8');
+            var code = fs.readFileSync('/root/novastream/dist/index.js.bak', 'utf8');
             var idx = code.indexOf('Failed to stream track');
-            if (idx < 0) { console.log('Not found in live file'); process.exit(0); }
-            console.log('Found at:', idx);
-            console.log('Context 300 before, 100 after:');
-            console.log(JSON.stringify(code.slice(idx-300, idx+100)));
-            var idx2 = code.indexOf('Failed to stream track', idx+1);
-            if (idx2 >= 0) { console.log('SECOND occurrence at:', idx2); console.log(JSON.stringify(code.slice(idx2-300, idx2+100))); }
+            var tryStart = code.lastIndexOf('try {', idx);
+            var catchEnd = code.indexOf('});', idx) + 3;
+            console.log('try starts at:', tryStart, 'catch ends at:', catchEnd);
+            console.log(JSON.stringify(code.slice(tryStart - 200, catchEnd + 10)));
             "
           command_timeout: 30s
