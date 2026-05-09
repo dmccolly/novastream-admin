@@ -8,89 +8,70 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Full system audit
+      - name: Audit APIs and DB
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 120s
+          command_timeout: 90s
           script: |
-            echo "=== SERVICES ==="
-            pm2 list --no-color 2>/dev/null | grep -E "name|online|stopped|error" | head -20
-
-            echo "=== PORT 3006 (novastream-admin) ==="
-            curl -s http://localhost:3006/api/health 2>/dev/null || echo "NO /api/health"
-            curl -s http://localhost:3006/ 2>/dev/null | head -5 || echo "NO ROOT"
-
-            echo "=== ADMIN API ENDPOINTS ==="
-            echo "--- /api/stream/now ---"
-            curl -s http://localhost:3006/api/stream/now 2>/dev/null | head -c 300
-            echo ""
-            echo "--- /api/stream/next-track ---"
-            curl -s http://localhost:3006/api/stream/next-track 2>/dev/null | head -c 300
-            echo ""
-            echo "--- /api/tracks (first 3) ---"
-            curl -s "http://localhost:3006/api/tracks?limit=3" 2>/dev/null | head -c 500
-            echo ""
-            echo "--- /api/clocks ---"
-            curl -s http://localhost:3006/api/clocks 2>/dev/null | head -c 500
-            echo ""
-            echo "--- /api/categories ---"
-            curl -s http://localhost:3006/api/categories 2>/dev/null | head -c 500
-            echo ""
-            echo "--- /api/rules ---"
-            curl -s http://localhost:3006/api/rules 2>/dev/null | head -c 500
-            echo ""
-            echo "--- /api/schedule ---"
-            curl -s http://localhost:3006/api/schedule 2>/dev/null | head -c 500
-            echo ""
-            echo "--- /api/tracks/search?q=test ---"
-            curl -s "http://localhost:3006/api/tracks/search?q=test" 2>/dev/null | head -c 300
-            echo ""
-
-            echo "=== DB SCHEMA ==="
-            sqlite3 /root/novastream-admin/data/novastream.db ".tables" 2>/dev/null || \
-            sqlite3 /root/novastream-admin/novastream.db ".tables" 2>/dev/null || \
-            find /root -name "*.db" 2>/dev/null | head -5
-
-            echo "=== DB TABLE COUNTS ==="
             DB=$(find /root -name "*.db" 2>/dev/null | head -1)
-            if [ -n "$DB" ]; then
-              for t in tracks clocks clock_slots categories rules schedule recently_played play_history; do
-                COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM $t" 2>/dev/null || echo "N/A")
-                echo "$t: $COUNT"
-              done
-              echo "--- tracks status breakdown ---"
-              sqlite3 "$DB" "SELECT status, COUNT(*) FROM tracks GROUP BY status" 2>/dev/null
-              echo "--- clocks detail ---"
-              sqlite3 "$DB" "SELECT * FROM clocks LIMIT 5" 2>/dev/null
-              echo "--- clock_slots detail ---"
-              sqlite3 "$DB" "SELECT * FROM clock_slots LIMIT 10" 2>/dev/null
-              echo "--- categories detail ---"
-              sqlite3 "$DB" "SELECT * FROM categories LIMIT 10" 2>/dev/null
-              echo "--- rules detail ---"
-              sqlite3 "$DB" "SELECT * FROM rules LIMIT 10" 2>/dev/null
-              echo "--- recently_played ---"
-              sqlite3 "$DB" "SELECT * FROM recently_played ORDER BY played_at DESC LIMIT 5" 2>/dev/null
-            fi
+            echo "DB: $DB"
 
-            echo "=== NOVASTREAM MAIN APP (port 3001) ==="
-            curl -s "http://localhost:3001/api/tracks?limit=2" 2>/dev/null | head -c 300
+            echo "=== TABLE COUNTS ==="
+            for t in tracks clocks clock_slots categories rules schedule recently_played play_history; do
+              COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM $t" 2>/dev/null || echo "N/A")
+              echo "$t: $COUNT"
+            done
+
+            echo "=== TRACKS STATUS ==="
+            sqlite3 "$DB" "SELECT status, COUNT(*) FROM tracks GROUP BY status" 2>/dev/null
+
+            echo "=== CLOCKS ==="
+            sqlite3 "$DB" "SELECT id, name, is_default FROM clocks" 2>/dev/null
+
+            echo "=== CLOCK SLOTS ==="
+            sqlite3 "$DB" "SELECT * FROM clock_slots LIMIT 10" 2>/dev/null
+
+            echo "=== CATEGORIES ==="
+            sqlite3 "$DB" "SELECT * FROM categories LIMIT 10" 2>/dev/null
+
+            echo "=== RULES ==="
+            sqlite3 "$DB" "SELECT * FROM rules LIMIT 10" 2>/dev/null
+
+            echo "=== RECENTLY PLAYED ==="
+            sqlite3 "$DB" "SELECT id, title, artist, played_at FROM recently_played ORDER BY played_at DESC LIMIT 5" 2>/dev/null
+
+            echo "=== API: stream/now ==="
+            curl -s http://localhost:3006/api/stream/now 2>/dev/null
+
             echo ""
-            curl -s "http://localhost:3001/api/stream/now" 2>/dev/null | head -c 300
+            echo "=== API: next-track ==="
+            curl -s http://localhost:3006/api/stream/next-track 2>/dev/null
+
             echo ""
+            echo "=== API: tracks (3) ==="
+            curl -s "http://localhost:3006/api/tracks?limit=3" 2>/dev/null | head -c 400
 
-            echo "=== LIQUIDSOAP STATUS ==="
-            pm2 logs liquidsoap --lines 20 --nostream 2>/dev/null | tail -20 || \
-            journalctl -u liquidsoap -n 20 --no-pager 2>/dev/null | tail -20 || \
-            cat /var/log/liquidsoap.log 2>/dev/null | tail -20 || echo "No liquidsoap logs found"
+            echo ""
+            echo "=== API: clocks ==="
+            curl -s http://localhost:3006/api/clocks 2>/dev/null | head -c 400
 
-            echo "=== NGINX CONFIG (streamofdan.com) ==="
-            cat /etc/nginx/sites-enabled/streamofdan.com 2>/dev/null || \
-            grep -r "streamofdan" /etc/nginx/ 2>/dev/null | head -20
+            echo ""
+            echo "=== API: categories ==="
+            curl -s http://localhost:3006/api/categories 2>/dev/null | head -c 400
 
-            echo "=== ICECAST STATUS ==="
-            curl -s http://localhost:8000/status.xsl 2>/dev/null | grep -E "mount|listeners|title|artist" | head -20
+            echo ""
+            echo "=== API: rules ==="
+            curl -s http://localhost:3006/api/rules 2>/dev/null | head -c 400
 
-            echo "=== AUDIT COMPLETE ==="
+            echo ""
+            echo "=== LIQUIDSOAP LOGS (last 10) ==="
+            pm2 logs liquidsoap --lines 10 --nostream 2>/dev/null | tail -10 || echo "no liq pm2"
+            cat /var/log/liquidsoap*.log 2>/dev/null | tail -10 || echo "no liq log"
+
+            echo "=== ICECAST SOURCES ==="
+            curl -s http://localhost:8000/status.xsl 2>/dev/null | grep -E "mount|listeners|title|artist" | head -10
+
+            echo "=== DONE ==="
