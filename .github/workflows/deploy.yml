@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get the stream/now handler from server bundle
+      - name: Fix nginx music route
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,18 +16,34 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
-            BUNDLE="/root/novastream-admin/dist/index.js"
-            echo "=== STREAM/NOW HANDLER ==="
-            grep -n "stream/now\|now-playing\|play_history\|recently_played\|now_playing" "$BUNDLE" | head -30
-            echo "=== LINE NUMBERS FOR stream/now ==="
-            grep -n '"stream/now"' "$BUNDLE" | head -10
-            echo "=== PLAY_HISTORY TABLE SCHEMA ==="
-            sqlite3 /root/novastream-admin/radio.db ".schema play_history" 2>/dev/null || echo "No play_history table"
-            echo "=== RECENTLY_PLAYED TABLE SCHEMA ==="
-            sqlite3 /root/novastream-admin/radio.db ".schema recently_played" 2>/dev/null || echo "No recently_played table"
-            echo "=== ALL TABLES ==="
-            sqlite3 /root/novastream-admin/radio.db ".tables" 2>/dev/null
-            echo "=== LAST 5 PLAY_HISTORY ROWS ==="
-            sqlite3 /root/novastream-admin/radio.db "SELECT id,track_id,played_at FROM play_history ORDER BY played_at DESC LIMIT 5;" 2>/dev/null || echo "No data"
-            echo "=== CURRENT NOW-PLAYING API RESPONSE ==="
-            curl -s http://localhost:3006/api/stream/now | head -c 500
+            NGINX_CONF="/etc/nginx/sites-enabled/default"
+            echo "=== CURRENT /music/ CONFIG ==="
+            grep -n "music" "$NGINX_CONF" || echo "No music location found"
+
+            echo "=== MUSIC FILES LOCATION ==="
+            ls /root/novastream/storage/music/ | head -3
+
+            echo "=== ADD /music/ LOCATION IF MISSING ==="
+            if grep -q "location /music/" "$NGINX_CONF"; then
+              echo "Already exists - checking alias"
+              grep -A3 "location /music/" "$NGINX_CONF"
+            else
+              sed -i 's|location / {|location /music/ {\n        alias /root/novastream/storage/music/;\n        add_header Access-Control-Allow-Origin *;\n    }\n\n    location / {|' "$NGINX_CONF"
+              echo "Added /music/ location"
+            fi
+
+            echo "=== TEST NGINX ==="
+            nginx -t 2>&1
+
+            echo "=== RELOAD NGINX ==="
+            nginx -s reload && echo "OK"
+
+            echo "=== TEST MUSIC URL ==="
+            sleep 1
+            HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost/music/250553_1778099320620.mp3")
+            CTYPE=$(curl -sI --max-time 5 "http://localhost/music/250553_1778099320620.mp3" | grep -i "content-type")
+            echo "HTTP: $HTTP"
+            echo "Content-Type: $CTYPE"
+
+            echo "=== TEST PREVIEW API ==="
+            curl -s --max-time 5 "http://localhost:3001/api/tracks/250553/preview" || echo "3001 failed"
