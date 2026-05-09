@@ -7,13 +7,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Upload patch script to server
+      - name: Upload scripts to server
         uses: appleboy/scp-action@v0.1.7
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          source: scripts/patch-wma.py
+          source: "scripts/patch-wma.py,scripts/inspect-preview.py"
           target: /tmp/
       - name: Inspect preview route pattern
         uses: appleboy/ssh-action@v1.0.3
@@ -21,15 +21,5 @@ jobs:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          script: |
-            echo "=== Inspect /music/ patterns in backup ==="
-            python3 -c "
-import re
-with open('/root/novastream/dist/index.js.bak','r') as f:
-    code = f.read()
-# Find all /music/ occurrences with context
-for m in re.finditer(r'.{0,300}/music/.{0,300}', code):
-    print('MATCH:', repr(m.group()))
-    print()
-"
+          script: python3 /tmp/scripts/inspect-preview.py
           command_timeout: 30s
