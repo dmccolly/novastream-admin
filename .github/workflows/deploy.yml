@@ -13,31 +13,13 @@ jobs:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          source: "scripts/patch-wma.py,scripts/inspect-preview.py"
+          source: "scripts/patch-wma.py,scripts/inspect-preview.py,scripts/inspect-nowplaying.py"
           target: /tmp/
-      - name: Run WMA patch and restart novastream
+      - name: Inspect Now Playing patterns
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          script: |
-            echo "=== Running WMA patch ==="
-            python3 /tmp/scripts/patch-wma.py
-            echo "=== Restarting novastream ==="
-            pm2 restart novastream
-            sleep 3
-            pm2 list
-            echo "=== Health ==="
-            curl -s http://localhost:3001/api/health && echo " OK" || echo " FAIL"
-            echo "=== Stream test 185103 (WMA path, MP3 on disk) ==="
-            curl -s http://localhost:3001/api/tracks/185103/stream --max-time 5 | head -c 4 | xxd
-            echo "=== Preview test 185103 (should return /api/tracks/185103/stream) ==="
-            curl -s http://localhost:3001/api/tracks/185103/preview
-            echo ""
-            echo "=== Stream test 212504 (DRM WMA - should be 404) ==="
-            curl -s http://localhost:3001/api/tracks/212504/stream --max-time 12
-            echo ""
-            echo "=== Public URL stream test 185103 ==="
-            curl -s https://api.danielmccolly.com/api/tracks/185103/stream --max-time 5 | head -c 4 | xxd
-          command_timeout: 60s
+          script: python3 /tmp/scripts/inspect-nowplaying.py
+          command_timeout: 30s
