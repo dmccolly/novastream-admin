@@ -17,7 +17,7 @@ with open(dist_file, 'r') as f:
     code = f.read()
 
 # ---- PATCH 1: Fix the stream 404 block to handle WMA ----
-# NOTE: Uses 'spawn' (already imported at top of bundle), NOT require('child_process')
+# Uses 'spawn' (already imported at top of bundle via ES import)
 marker = 'Audio file not found on server'
 idx = code.find(marker)
 if idx < 0:
@@ -63,16 +63,17 @@ new_block = (
     "            res.setHeader('Accept-Ranges', 'none');\n"
     "            res.setHeader('Access-Control-Allow-Origin', '*');\n"
     "          }\n"
+    "          if (wmaBytesWritten <= 4096) { return; }\n"
     "          res.write(chunk);\n"
     "        });\n"
     "        ffProc.stdout.on('end', function() {\n"
-    "          if (wmaBytesWritten < 1000) {\n"
-    "            if (!wmaHeadersSent) {\n"
+    "          if (wmaBytesWritten < 10000) {\n"
+    "            if (!res.headersSent) {\n"
     "              try { res.status(404).json({ error: 'Audio not available (DRM or unsupported)' }); } catch(e) {}\n"
     "            } else { try { res.end(); } catch(e) {} }\n"
     "          } else { try { res.end(); } catch(e) {} }\n"
     "        });\n"
-    "        ffProc.on('error', function() { try { if (!wmaHeadersSent) { res.status(404).json({ error: 'Audio conversion failed' }); } else { res.end(); } } catch(e) {} });\n"
+    "        ffProc.on('error', function() { try { if (!res.headersSent) { res.status(404).json({ error: 'Audio conversion failed' }); } else { res.end(); } } catch(e) {} });\n"
     "        req.on('close', function() { try { ffProc.kill(); } catch(e) {} });\n"
     "        return;\n"
     "      }"
@@ -90,6 +91,42 @@ if old_catch in code:
     print('PATCH 2 OK: try/catch fixed')
 else:
     print('PATCH 2 SKIP: catch pattern not found (may already be patched)')
+
+# ---- PATCH 3: Fix preview route to return /stream for WMA files ----
+# The preview route returns /music/filename.wma - redirect to /stream instead
+old_preview = 'return res.json({ url: `/music/${path2.basename(track.filepath)}` });'
+new_preview = (
+    "var previewWmaExt = path.extname(track.filepath).toLowerCase();\n"
+    "        if (previewWmaExt === '.wma') {\n"
+    "          return res.json({ url: `/api/tracks/${id}/stream` });\n"
+    "        }\n"
+    "        return res.json({ url: `/music/${path2.basename(track.filepath)}` });"
+)
+
+if old_preview in code:
+    code = code.replace(old_preview, new_preview, 1)
+    print('PATCH 3 OK: preview route fixed for WMA')
+else:
+    # Try alternate pattern
+    old_preview2 = "return res.json({ url: `/music/${path.basename(track.filepath)}` });"
+    if old_preview2 in code:
+        new_preview2 = (
+            "var previewWmaExt = path.extname(track.filepath).toLowerCase();\n"
+            "        if (previewWmaExt === '.wma') {\n"
+            "          return res.json({ url: `/api/tracks/${id}/stream` });\n"
+            "        }\n"
+            "        return res.json({ url: `/music/${path.basename(track.filepath)}` });"
+        )
+        code = code.replace(old_preview2, new_preview2, 1)
+        print('PATCH 3 OK (alt pattern): preview route fixed for WMA')
+    else:
+        # Find any /music/ return in preview context
+        music_idx = code.find('return res.json({ url: `/music/')
+        if music_idx >= 0:
+            print('PATCH 3 WARN: found /music/ return at', music_idx)
+            print('Context:', repr(code[music_idx-100:music_idx+100]))
+        else:
+            print('PATCH 3 FAILED: preview pattern not found')
 
 with open(dist_file, 'w') as f:
     f.write(code)
