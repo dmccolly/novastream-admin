@@ -3,12 +3,12 @@ on:
   push:
     branches: [main]
 jobs:
-  fix-tracks:
+  fix-categories:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check track statuses and fix clock
+      - name: Assign categories to tracks and verify stream
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -18,39 +18,24 @@ jobs:
           script: |
             DB=/root/novastream-admin/radio.db
 
-            echo "=== TRACK STATUS BREAKDOWN ==="
-            sqlite3 $DB "SELECT status, COUNT(*) as count FROM tracks GROUP BY status ORDER BY count DESC;"
+            echo "=== ASSIGNING CATEGORY 1 (Music) TO ALL READY TRACKS WITH NULL CATEGORY ==="
+            sqlite3 $DB "UPDATE tracks SET category_id=1 WHERE status='ready' AND (category_id IS NULL OR category_id='');"
+            echo "Updated: $(sqlite3 $DB "SELECT changes();")"
 
             echo ""
-            echo "=== TRACK CATEGORY BREAKDOWN ==="
-            sqlite3 $DB "SELECT category_id, COUNT(*) as count FROM tracks GROUP BY category_id ORDER BY count DESC LIMIT 10;"
+            echo "=== VERIFY: Ready tracks with category 1 ==="
+            sqlite3 $DB "SELECT COUNT(*) FROM tracks WHERE status='ready' AND category_id=1 AND filepath IS NOT NULL;"
 
             echo ""
-            echo "=== SAMPLE TRACKS WITH FILEPATH ==="
-            sqlite3 $DB "SELECT id, title, artist, status, category_id, filepath FROM tracks WHERE filepath IS NOT NULL LIMIT 5;"
-
-            echo ""
-            echo "=== TRACKS WITH FILEPATH (any status) ==="
-            sqlite3 $DB "SELECT COUNT(*) FROM tracks WHERE filepath IS NOT NULL;"
-
-            echo ""
-            echo "=== FIX: Update clock_items to use correct category and fix status check ==="
-            # Get the most populated category
-            TOP_CAT=$(sqlite3 $DB "SELECT category_id FROM tracks WHERE filepath IS NOT NULL GROUP BY category_id ORDER BY COUNT(*) DESC LIMIT 1;")
-            echo "Top category by track count: $TOP_CAT"
-            TOP_CAT_NAME=$(sqlite3 $DB "SELECT name FROM categories WHERE id=$TOP_CAT;")
-            echo "Category name: $TOP_CAT_NAME"
-            TOP_STATUS=$(sqlite3 $DB "SELECT status FROM tracks WHERE filepath IS NOT NULL AND category_id=$TOP_CAT GROUP BY status ORDER BY COUNT(*) DESC LIMIT 1;")
-            echo "Most common status for that category: $TOP_STATUS"
-
-            # Update clock items to use the top category
-            sqlite3 $DB "UPDATE clock_items SET category_id=$TOP_CAT;"
-            echo "Updated clock items to category $TOP_CAT"
-
-            echo ""
-            echo "=== TESTING NEXT-TRACK API AFTER FIX ==="
+            echo "=== TESTING NEXT-TRACK API ==="
             sleep 1
-            curl -s http://localhost:3006/api/stream/next-track | head -c 500
+            RESPONSE=$(curl -s http://localhost:3006/api/stream/next-track)
+            echo "Response: $RESPONSE" | head -c 500
             echo ""
+
+            echo ""
+            echo "=== STREAM BYTES FROM ICECAST ==="
+            BYTES=$(curl -s http://localhost:8000/stream --max-time 4 | wc -c)
+            echo "Bytes in 4s: $BYTES"
 
             echo "DONE"
