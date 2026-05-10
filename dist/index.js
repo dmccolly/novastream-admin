@@ -227,6 +227,16 @@ db.exec(`
     last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (current_clock_id) REFERENCES clocks(id) ON DELETE SET NULL
   );
+
+  -- Current Playing State (Updated by Liquidsoap on_track callback)
+  CREATE TABLE IF NOT EXISTS current_playing (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    track_id INTEGER,
+    title TEXT,
+    artist TEXT,
+    filepath TEXT,
+    started_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // server/auth.ts
@@ -1701,20 +1711,49 @@ function registerRoutes(app2) {
       res.status(500).json({ error: e.message });
     }
   });
+  app2.post("/api/stream/now-playing", (req, res) => {
+    try {
+      const { filepath } = req.body || {};
+      if (!filepath) return res.status(400).json({ error: "filepath required" });
+      const track = db.prepare(
+        "SELECT id, title, artist FROM tracks WHERE filepath = ? OR filepath LIKE ?"
+      ).get(filepath, `%${path2.basename(filepath)}`);
+      const title = track?.title || path2.basename(filepath, path2.extname(filepath));
+      const artist = track?.artist || "Unknown Artist";
+      const trackId = track?.id || null;
+      db.prepare(`
+        INSERT INTO current_playing (id, track_id, title, artist, filepath, started_at)
+        VALUES (1, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(id) DO UPDATE SET
+          track_id = excluded.track_id,
+          title = excluded.title,
+          artist = excluded.artist,
+          filepath = excluded.filepath,
+          started_at = excluded.started_at
+      `).run(trackId, title, artist, filepath);
+      res.json({ ok: true, title, artist });
+    } catch (err) {
+      console.error("[POST /api/stream/now-playing]", err);
+      res.status(500).json({ error: "unavailable" });
+    }
+  });
   app2.get("/api/stream/now", (req, res) => {
     try {
-      const rows = db.prepare(`
-        SELECT title, artist, played_at
+      const current = db.prepare(
+        "SELECT title, artist FROM current_playing WHERE id = 1"
+      ).get();
+      const recentRows = db.prepare(`
+        SELECT title, artist
         FROM play_history
         ORDER BY played_at DESC
-        LIMIT 4
+        LIMIT 10
       `).all();
-      const [current, ...history] = rows;
+      const recent = recentRows.filter((r) => !current || r.title !== current.title).slice(0, 3);
       res.set("Cache-Control", "no-store");
       res.json({
         current: current ? { title: current.title, artist: current.artist } : null,
         next: null,
-        recent: history.slice(0, 3).map((r) => ({ title: r.title, artist: r.artist }))
+        recent
       });
     } catch (err) {
       console.error("[/api/stream/now]", err);

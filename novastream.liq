@@ -10,11 +10,11 @@ settings.log.level := 3
 # Function to get next track from API
 def get_next_track() =
   # Call external script that fetches and parses track data
-  # Returns: filepath|cue_in|cue_out|segue_duration
+  # Returns: filepath###cue_in###cue_out###segue_duration
   track_data = string.trim(process.read("/root/get_next_track.sh"))
   
   if track_data != "" then
-    # Split the pipe-delimited data
+    # Split the ###-delimited data (using ### avoids regex pipe issue)
     parts = string.split(separator="###", track_data)
     filepath = list.nth(parts, 0)
     cue_in_str = list.nth(parts, 1)
@@ -22,9 +22,6 @@ def get_next_track() =
     segue_str = list.nth(parts, 3)
     
     print("Got track: #{filepath}")
-    
-    # Log to play history
-    ignore(process.run("curl -s -X POST -H 'Content-Type: application/json' -d '{\"filepath\":\"" ^ filepath ^ "\"}' http://localhost:3001/api/stream/now-playing"))
     
     # Build annotations list
     ann_parts = ref([])
@@ -63,6 +60,16 @@ end
 
 # Create dynamic source
 radio = request.dynamic(id="main", get_next_track)
+
+# on_track fires when a track ACTUALLY starts playing (not at pre-fetch time)
+# This drives the Now Playing display with accurate timing
+radio = source.on_track(radio, fun(m) ->
+  filepath = m["filename"]
+  if filepath != "" then
+    ignore(process.run("curl -s -X POST -H 'Content-Type: application/json' -d '{\"filepath\":\"" ^ filepath ^ "\"}' http://localhost:3001/api/stream/now-playing"))
+    print("Now playing: #{filepath}")
+  end
+end)
 
 # Apply crossfade using liq_fade_in and liq_fade_out from track metadata
 radio = crossfade(radio)

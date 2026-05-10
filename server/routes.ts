@@ -1642,23 +1642,67 @@ export function registerRoutes(app: Express): Server {
     }
   });
 
+  // --- Liquidsoap on_track callback: fires when a track ACTUALLY starts playing ---
+  app.post("/api/stream/now-playing", (req, res) => {
+    try {
+      const { filepath } = req.body || {};
+      if (!filepath) return res.status(400).json({ error: "filepath required" });
+
+      // Look up track metadata by filepath
+      const track = db.prepare(
+        "SELECT id, title, artist FROM tracks WHERE filepath = ? OR filepath LIKE ?"
+      ).get(filepath, `%${path.basename(filepath)}`) as any;
+
+      const title = track?.title || path.basename(filepath, path.extname(filepath));
+      const artist = track?.artist || "Unknown Artist";
+      const trackId = track?.id || null;
+
+      // Upsert current_playing (single-row table, id always = 1)
+      db.prepare(`
+        INSERT INTO current_playing (id, track_id, title, artist, filepath, started_at)
+        VALUES (1, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(id) DO UPDATE SET
+          track_id = excluded.track_id,
+          title = excluded.title,
+          artist = excluded.artist,
+          filepath = excluded.filepath,
+          started_at = excluded.started_at
+      `).run(trackId, title, artist, filepath);
+
+      res.json({ ok: true, title, artist });
+    } catch (err) {
+      console.error("[POST /api/stream/now-playing]", err);
+      res.status(500).json({ error: "unavailable" });
+    }
+  });
+
   // --- Public Now Playing endpoint (for player strip) ---
   app.get("/api/stream/now", (req, res) => {
     try {
-      const rows = db.prepare(`
-        SELECT title, artist, played_at
+      // Current track: from current_playing (updated by Liquidsoap on_track - fires at actual playback)
+      const current = db.prepare(
+        "SELECT title, artist FROM current_playing WHERE id = 1"
+      ).get() as { title: string; artist: string } | undefined;
+
+      // Recent tracks: from play_history (last 3 before the current one)
+      // We exclude the current title to avoid duplication
+      const recentRows = db.prepare(`
+        SELECT title, artist
         FROM play_history
         ORDER BY played_at DESC
-        LIMIT 4
-      `).all() as { title: string; artist: string; played_at: string }[];
+        LIMIT 10
+      `).all() as { title: string; artist: string }[];
 
-      const [current, ...history] = rows;
+      // Filter out the current track title from recent list
+      const recent = recentRows
+        .filter((r) => !current || r.title !== current.title)
+        .slice(0, 3);
 
       res.set("Cache-Control", "no-store");
       res.json({
         current: current ? { title: current.title, artist: current.artist } : null,
         next: null,
-        recent: history.slice(0, 3).map((r) => ({ title: r.title, artist: r.artist })),
+        recent,
       });
     } catch (err) {
       console.error("[/api/stream/now]", err);

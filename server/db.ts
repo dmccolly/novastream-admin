@@ -253,4 +253,14 @@ db.exec(`
     last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (current_clock_id) REFERENCES clocks(id) ON DELETE SET NULL
   );
+
+  -- Current Playing State (Updated by Liquidsoap on_track callback)
+  CREATE TABLE IF NOT EXISTS current_playing (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    track_id INTEGER,
+    title TEXT,
+    artist TEXT,
+    filepath TEXT,
+    started_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
