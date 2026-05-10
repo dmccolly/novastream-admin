@@ -80,7 +80,7 @@ output.icecast(
   %mp3(bitrate=192),
   host="localhost",
   port=8000,
-  password="Nv9xK2mP7q",
+  password="NvS!ream_2026",
   mount="stream",
   radio
 )
