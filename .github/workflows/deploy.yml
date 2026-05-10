@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Full diagnostic
+      - name: Full diagnostic and fix
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -19,35 +19,23 @@ jobs:
             echo "=== PM2 status ==="
             pm2 list 2>&1 | grep -E "name|novastream|online|stopped|errored"
 
-            echo "=== Liquidsoap PID and uptime ==="
-            ps aux | grep liquidsoap | grep -v grep | awk '{print $1,$2,$3,$11,$12}' | head -3
+            echo "=== Liquidsoap process ==="
+            ps aux | grep liquidsoap | grep -v grep | head -3
 
             echo "=== Recent play_history ==="
             sqlite3 /root/novastream/radio.db "SELECT title, artist, played_at FROM play_history ORDER BY played_at DESC LIMIT 3;"
 
             echo "=== Icecast status ==="
-            curl -s --max-time 5 http://localhost:8000/status-json.xsl | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-src=d.get('icestats',{}).get('source',{})
-if isinstance(src,list): src=src[0]
-print('playing:', src.get('title','?'))
-print('listeners:', src.get('listeners','?'))
-" 2>&1
+            curl -s --max-time 5 http://localhost:8000/status-json.xsl | head -5
 
             echo "=== Test next-track ==="
-            curl -s --max-time 5 http://localhost:3001/api/stream/next-track 2>&1 | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-t=d.get('track',{}) or {}
-print('title:', t.get('title','?'))
-print('filepath:', str(t.get('filepath','?'))[:80])
-print('cue_in:', t.get('cue_in'), 'cue_out:', t.get('cue_out'))
-print('segue:', t.get('segue_duration'))
-" 2>&1
+            curl -s --max-time 5 http://localhost:3001/api/stream/next-track | head -200
 
             echo "=== novastream error log ==="
             pm2 logs novastream --lines 10 --err --nostream 2>&1 | tail -15
 
             echo "=== nginx music route ==="
-            grep -A3 "location /music" /etc/nginx/sites-enabled/novastream 2>/dev/null || echo "no music route found"
+            grep -A3 "location /music" /etc/nginx/sites-enabled/novastream 2>/dev/null || echo "no music route"
+
+            echo "=== novastream dist routes ==="
+            grep -n "now-playing\|now_playing\|play_history" /root/novastream/dist/index.js | head -10
