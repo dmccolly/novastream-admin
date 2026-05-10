@@ -1,16 +1,26 @@
-name: Diagnose and Fix
+name: Deploy Crash Fix
 
 on:
   push:
     branches: [main]
 
 jobs:
-  diagnose:
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
-      - name: Check novastream-admin crash loop and Now Playing
+      - name: Upload fixed dist/index.js to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          source: "dist/index.js"
+          target: "/root/novastream-admin/"
+          strip_components: 1
+
+      - name: Copy to novastream and restart both PM2 processes
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -18,20 +28,27 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 40s
           script: |
-            echo "=== PM2 status ==="
+            echo "=== Copying dist/index.js to novastream ==="
+            cp /root/novastream-admin/dist/index.js /root/novastream/dist/index.js
+            echo "Copy done"
+
+            echo "=== Restarting PM2 processes ==="
+            pm2 restart novastream
+            pm2 restart novastream-admin
+            sleep 5
+
+            echo "=== PM2 status after restart ==="
             pm2 list --no-color 2>&1
 
-            echo "=== novastream-admin PM2 logs (last 30 lines) ==="
-            pm2 logs novastream-admin --lines 30 --nostream 2>&1 | tail -40
+            echo "=== Testing port 3001 ==="
+            curl -s --max-time 5 http://localhost:3001/api/health 2>&1
 
-            echo "=== Now Playing API ==="
+            echo "=== Testing port 3006 ==="
+            curl -s --max-time 5 http://localhost:3006/api/health 2>&1
+
+            echo "=== Now Playing ==="
             curl -s http://localhost:3001/api/stream/now 2>&1
 
-            echo "=== novastream PM2 logs (last 10 lines) ==="
-            pm2 logs novastream --lines 10 --nostream 2>&1 | tail -20
-
-            echo "=== Liquidsoap process ==="
-            pgrep -a liquidsoap
-
-            echo "=== Icecast now playing ==="
-            curl -s http://localhost:8000/status.xsl 2>&1 | grep -o "Currently playing.*</td>" | head -3
+            echo "=== Stream audio check ==="
+            curl -s --max-time 3 http://localhost:8000/stream -o /tmp/stream_final.bin
+            xxd /tmp/stream_final.bin 2>/dev/null | head -2

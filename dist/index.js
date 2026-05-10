@@ -1859,8 +1859,16 @@ app.use(express2.urlencoded({ extended: false }));
   app.use((err, _req, res, _next) => {
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";
-    res.status(status).json({ message });
-    throw err;
+    console.error("[ERROR]", status, message, err.stack || "");
+    if (!res.headersSent) {
+      res.status(status).json({ message });
+    }
+  });
+  process.on("unhandledRejection", (reason) => {
+    console.error("[UNHANDLED REJECTION]", reason);
+  });
+  process.on("uncaughtException", (err) => {
+    console.error("[UNCAUGHT EXCEPTION]", err.message, err.stack);
   });
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
   app.listen(PORT, "0.0.0.0", () => {

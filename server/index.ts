@@ -101,9 +101,18 @@ app.use((req, res, next) => {
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";
+    console.error("[ERROR]", status, message, err.stack || "");
+    if (!res.headersSent) {
+      res.status(status).json({ message });
+    }
+  });
 
-    res.status(status).json({ message });
-    throw err;
+  // Prevent crashes from unhandled promise rejections or exceptions
+  process.on("unhandledRejection", (reason: any) => {
+    console.error("[UNHANDLED REJECTION]", reason);
+  });
+  process.on("uncaughtException", (err: Error) => {
+    console.error("[UNCAUGHT EXCEPTION]", err.message, err.stack);
   });
 
   // Allow port configuration via environment variable and fall back to 3001.
