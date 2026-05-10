@@ -1,43 +1,87 @@
-name: Check Dropbox Env
+name: Fix Dropbox Token
 
 on:
   push:
     branches: [main]
 
 jobs:
-  check:
+  fix:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
-      - name: Check Dropbox credentials and env
+      - name: Fix Dropbox tokens in both databases and env files
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 30s
+          command_timeout: 60s
           script: |
-            echo "=== novastream-admin .env ==="
-            cat /root/novastream-admin/.env 2>/dev/null || echo "NO .env FILE"
+            REFRESH_TOKEN="yPqlkX-WgPIAAAAAAAAAATJ8gU1N_rpm9gVEA6GfysrUcYPcxr9UsioS97izW8Tn"
+            APP_KEY="caancy1ps7n1jgs"
+            APP_SECRET="4l407bcy1is10xr"
 
-            echo "=== novastream .env ==="
-            cat /root/novastream/.env 2>/dev/null || echo "NO .env FILE"
+            echo "=== Step 1: Get fresh access token ==="
+            ACCESS_TOKEN=$(curl -s -X POST "https://api.dropboxapi.com/oauth2/token" \
+              -u "${APP_KEY}:${APP_SECRET}" \
+              -d "grant_type=refresh_token&refresh_token=${REFRESH_TOKEN}" | \
+              python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
+            echo "Got access token: ${ACCESS_TOKEN:0:30}..."
 
-            echo "=== novastream-admin DB settings ==="
-            sqlite3 /root/novastream-admin/radio.db "SELECT key, value FROM settings WHERE key LIKE 'dropbox%';" 2>&1
+            echo "=== Step 2: Fix novastream-admin DB ==="
+            sqlite3 /root/novastream-admin/radio.db "INSERT OR REPLACE INTO settings (key, value) VALUES ('dropbox_refresh_token', '${REFRESH_TOKEN}');"
+            sqlite3 /root/novastream-admin/radio.db "INSERT OR REPLACE INTO settings (key, value) VALUES ('dropbox_access_token', '${ACCESS_TOKEN}');"
+            echo "novastream-admin DB updated"
 
-            echo "=== novastream DB settings ==="
-            sqlite3 /root/novastream/radio.db "SELECT key, value FROM settings WHERE key LIKE 'dropbox%';" 2>&1
+            echo "=== Step 3: Fix novastream DB ==="
+            sqlite3 /root/novastream/radio.db "INSERT OR REPLACE INTO settings (key, value) VALUES ('dropbox_refresh_token', '${REFRESH_TOKEN}');"
+            sqlite3 /root/novastream/radio.db "INSERT OR REPLACE INTO settings (key, value) VALUES ('dropbox_access_token', '${ACCESS_TOKEN}');"
+            echo "novastream DB updated"
 
-            echo "=== novastream-admin ecosystem.config ==="
-            cat /root/novastream-admin/ecosystem.config.cjs 2>/dev/null
+            echo "=== Step 4: Fix novastream-admin .env ==="
+            cat > /root/novastream-admin/.env << 'ENVEOF'
+DROPBOX_APP_KEY=caancy1ps7n1jgs
+DROPBOX_APP_SECRET=4l407bcy1is10xr
+DROPBOX_REFRESH_TOKEN=yPqlkX-WgPIAAAAAAAAAATJ8gU1N_rpm9gVEA6GfysrUcYPcxr9UsioS97izW8Tn
+PORT=3006
+DB_PATH=/root/novastream-admin/radio.db
+MUSIC_DIR=/root/novastream-admin/storage/music
+ENVEOF
+            echo "novastream-admin .env updated"
 
-            echo "=== novastream PM2 env ==="
-            pm2 env 7 2>&1 | grep -i dropbox || echo "No dropbox env in PM2"
+            echo "=== Step 5: Fix novastream .env ==="
+            cat > /root/novastream/.env << 'ENVEOF'
+DROPBOX_APP_KEY=caancy1ps7n1jgs
+DROPBOX_APP_SECRET=4l407bcy1is10xr
+DROPBOX_REFRESH_TOKEN=yPqlkX-WgPIAAAAAAAAAATJ8gU1N_rpm9gVEA6GfysrUcYPcxr9UsioS97izW8Tn
+PORT=3001
+DB_PATH=/root/novastream/radio.db
+MUSIC_DIR=/root/novastream/storage/music
+ENVEOF
+            echo "novastream .env updated"
 
-            echo "=== Auth URL test from admin ==="
-            curl -s http://localhost:3006/api/auth/dropbox/url 2>&1
+            echo "=== Step 6: Restart both PM2 apps ==="
+            pm2 restart novastream --update-env
+            pm2 restart novastream-admin --update-env
+            sleep 5
 
-            echo "=== Auth URL test from novastream ==="
-            curl -s http://localhost:3001/api/auth/dropbox/url 2>&1
+            echo "=== Step 7: Verify tokens in both DBs ==="
+            echo "novastream-admin DB:"
+            sqlite3 /root/novastream-admin/radio.db "SELECT key, substr(value,1,40) FROM settings WHERE key LIKE 'dropbox%';"
+            echo "novastream DB:"
+            sqlite3 /root/novastream/radio.db "SELECT key, substr(value,1,40) FROM settings WHERE key LIKE 'dropbox%';"
+
+            echo "=== Step 8: Test Dropbox API with fresh token ==="
+            curl -s -X POST "https://api.dropboxapi.com/2/users/get_current_account" \
+              -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "null" | python3 -c "import json,sys; d=json.load(sys.stdin); print('Dropbox account:', d.get('email','?'), d.get('name',{}).get('display_name','?'))" 2>&1
+
+            echo "=== Step 9: Test preview endpoint ==="
+            sleep 3
+            curl -s http://localhost:3001/api/tracks/250553/preview 2>&1
+            curl -s http://localhost:3006/api/tracks/250553/preview 2>&1
+
+            echo "=== Step 10: PM2 status ==="
+            pm2 list --no-color 2>&1
