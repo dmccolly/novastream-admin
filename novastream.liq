@@ -9,9 +9,9 @@ settings.log.level := 3
 
 # Function to get next track from API
 def get_next_track() =
-  # Fetch track data once and extract all fields in one synchronous call
-  # Format: filepath|cue_in|cue_out|segue_duration
-  track_data = string.trim(process.read("curl -s --max-time 5 http://localhost:3001/api/stream/next-track | jq -r 'if .track.filepath then (.track.filepath + \"|\" + (.track.cue_in // 0 | tostring) + \"|\" + (.track.cue_out // \"\" | tostring) + \"|\" + (.track.segue_duration // 3 | tostring)) else empty end'"))
+  # Call external script that fetches and parses track data
+  # Returns: filepath|cue_in|cue_out|segue_duration
+  track_data = string.trim(process.read("/root/get_next_track.sh"))
   
   if track_data != "" then
     # Split the pipe-delimited data
@@ -35,7 +35,7 @@ def get_next_track() =
     end
     
     # Add cue_out if set
-    if cue_out_str != "" and cue_out_str != "null" and cue_out_str != "null" then
+    if cue_out_str != "" and cue_out_str != "null" then
       ann_parts := list.append(ann_parts(), ["liq_cue_out=\"" ^ cue_out_str ^ "\""])
     end
     

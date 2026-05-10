@@ -8,32 +8,72 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check state and restart Liquidsoap if needed
+      - name: Upload scripts and fix Icecast password
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          source: "novastream.liq,get_next_track.sh"
+          target: /root/
+          strip_components: 0
+
+      - name: Check Icecast config and fix connection
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 25s
+          command_timeout: 20s
           script: |
-            echo "=== Liquidsoap processes ==="
-            ps aux | grep liquidsoap | grep -v grep || echo "NO LIQUIDSOAP RUNNING"
+            echo "=== Icecast source password ==="
+            grep -E "source-password|<source" /etc/icecast2/icecast.xml | head -5
 
-            echo "=== Restart log ==="
-            cat /tmp/restart_liq2.log 2>/dev/null || echo "no restart log"
-            cat /tmp/liq_restart2_status.txt 2>/dev/null || echo "no status"
+            echo "=== Fix get_next_track.sh permissions ==="
+            chmod +x /root/get_next_track.sh
+            echo "Script permissions set"
 
-            echo "=== Liquidsoap log last 10 ==="
-            tail -10 /var/log/liquidsoap.log
+            echo "=== Test get_next_track.sh ==="
+            /root/get_next_track.sh | head -c 100
+
+            echo "=== Kill old Liquidsoap ==="
+            pkill -f liquidsoap_watchdog 2>/dev/null || true
+            pkill -9 -f liquidsoap 2>/dev/null || true
+            sleep 2
+            echo "Killed"
+
+            echo "=== Write restart script ==="
+            cat > /tmp/restart_liq3.sh << 'SCRIPT'
+            #!/bin/bash
+            sleep 2
+            nohup /usr/bin/liquidsoap /root/novastream.liq >> /var/log/liquidsoap.log 2>&1 &
+            LIQ_PID=$!
+            sleep 8
+            nohup bash /root/liquidsoap_watchdog.sh >> /var/log/liquidsoap_watchdog.log 2>&1 &
+            echo "restart3 done at $(date), liq PID=$LIQ_PID" >> /tmp/liq_restart3_status.txt
+            SCRIPT
+            chmod +x /tmp/restart_liq3.sh
+            setsid nohup bash /tmp/restart_liq3.sh > /tmp/restart_liq3.log 2>&1 &
+            echo "Restart launched PID: $!"
+
+      - name: Verify audio
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          command_timeout: 35s
+          script: |
+            sleep 25
+
+            echo "=== Restart status ==="
+            cat /tmp/liq_restart3_status.txt 2>/dev/null || echo "no status yet"
+
+            echo "=== Liquidsoap log last 8 ==="
+            tail -8 /var/log/liquidsoap.log
 
             echo "=== Icecast sources ==="
             curl -s --max-time 3 http://localhost:8000/status-json.xsl | grep -o '"mount":"[^"]*"' || echo "no sources"
 
-            echo "=== If not running, start now ==="
-            if ! pgrep -f liquidsoap > /dev/null; then
-              echo "Starting Liquidsoap..."
-              nohup /usr/bin/liquidsoap /root/novastream.liq >> /var/log/liquidsoap.log 2>&1 &
-              echo "Started PID: $!"
-            else
-              echo "Liquidsoap is running"
-            fi
+            echo "=== Stream bytes ==="
+            curl -s --max-time 3 http://localhost:8000/stream | head -c 8 | xxd
