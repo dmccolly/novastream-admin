@@ -1,46 +1,16 @@
-name: Deploy Stop-Error and Recently Played Fixes
+name: Verify Recently Played Filter
 
 on:
   push:
     branches: [main]
 
 jobs:
-  deploy:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
-      - name: Upload dist/index.js to novastream (port 3001)
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          source: "dist/index.js"
-          target: "/root/novastream/dist/"
-          strip_components: 1
-
-      - name: Upload dist/index.js to novastream-admin (port 3006)
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          source: "dist/index.js"
-          target: "/root/novastream-admin/dist/"
-          strip_components: 1
-
-      - name: Upload fixed player HTML
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          source: "player/index.html"
-          target: "/var/www/html/"
-          strip_components: 1
-
-      - name: Restart both apps and verify
+      - name: Check deployed bundle and live DB
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -48,18 +18,14 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 30s
           script: |
-            pm2 restart novastream novastream-admin
-            sleep 5
-            echo "=== PM2 status ==="
-            pm2 list --no-color | grep novastream
-            echo "=== Now Playing (port 3001) ==="
+            echo "=== Check if filter is in deployed bundle ==="
+            grep -c "Unknown Artist" /root/novastream/dist/index.js || echo "NOT FOUND"
+
+            echo "=== Last 10 play_history rows (port 3001 DB) ==="
+            sqlite3 /root/novastream/radio.db "SELECT title, artist, played_at FROM play_history ORDER BY played_at DESC LIMIT 10;"
+
+            echo "=== Now Playing API (port 3001) ==="
             curl -s http://localhost:3001/api/stream/now
-            echo ""
-            echo "=== Now Playing (port 3006) ==="
-            curl -s http://localhost:3006/api/stream/now
-            echo ""
-            echo "=== Player HTML stop fix check ==="
-            grep -c "onerror = null" /var/www/html/index.html
-            echo "=== Health ==="
-            curl -s http://localhost:3001/api/health
-            curl -s http://localhost:3006/api/health
+
+            echo "=== current_playing table ==="
+            sqlite3 /root/novastream/radio.db "SELECT * FROM current_playing;"
