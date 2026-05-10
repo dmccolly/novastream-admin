@@ -1684,16 +1684,21 @@ export function registerRoutes(app: Express): Server {
         "SELECT title, artist FROM current_playing WHERE id = 1"
       ).get() as { title: string; artist: string } | undefined;
 
-      // Recent tracks: from play_history (last 3 before the current one)
-      // We exclude the current title to avoid duplication
+      // Recent tracks: only tracks that were pre-fetched BEFORE the current track started
+      // This prevents future pre-fetched (not-yet-played) tracks from appearing in the list
+      const currentStarted = (db.prepare(
+        "SELECT started_at FROM current_playing WHERE id = 1"
+      ).get() as { started_at: string } | undefined)?.started_at;
+
       const recentRows = db.prepare(`
         SELECT title, artist
         FROM play_history
+        WHERE played_at <= COALESCE(?, datetime('now'))
         ORDER BY played_at DESC
         LIMIT 10
-      `).all() as { title: string; artist: string }[];
+      `).all(currentStarted ?? null) as { title: string; artist: string }[];
 
-      // Filter out the current track title from recent list
+      // Filter out the current track title to avoid duplication
       const recent = recentRows
         .filter((r) => !current || r.title !== current.title)
         .slice(0, 3);
