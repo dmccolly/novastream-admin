@@ -1,26 +1,16 @@
-name: Deploy Crash Fix
+name: Verify Stability
 
 on:
   push:
     branches: [main]
 
 jobs:
-  deploy:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
-      - name: Upload fixed dist/index.js to server
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          source: "dist/index.js"
-          target: "/root/novastream-admin/"
-          strip_components: 1
-
-      - name: Copy to novastream and restart both PM2 processes
+      - name: Check PM2 stability and Now Playing accuracy
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -28,27 +18,25 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 40s
           script: |
-            echo "=== Copying dist/index.js to novastream ==="
-            cp /root/novastream-admin/dist/index.js /root/novastream/dist/index.js
-            echo "Copy done"
-
-            echo "=== Restarting PM2 processes ==="
-            pm2 restart novastream
-            pm2 restart novastream-admin
-            sleep 5
-
-            echo "=== PM2 status after restart ==="
+            echo "=== PM2 status (check restart counts) ==="
             pm2 list --no-color 2>&1
 
-            echo "=== Testing port 3001 ==="
-            curl -s --max-time 5 http://localhost:3001/api/health 2>&1
-
-            echo "=== Testing port 3006 ==="
-            curl -s --max-time 5 http://localhost:3006/api/health 2>&1
-
-            echo "=== Now Playing ==="
+            echo "=== Now Playing check 1 ==="
             curl -s http://localhost:3001/api/stream/now 2>&1
 
+            echo "=== Icecast now playing ==="
+            curl -s http://localhost:8000/status.xsl 2>&1 | grep -o "Currently playing.*</td>" | head -2
+
+            echo "=== novastream-admin error log (last 5 lines) ==="
+            tail -5 /root/.pm2/logs/novastream-admin-error.log 2>/dev/null || echo "No error log"
+
+            echo "=== novastream error log (last 5 lines) ==="
+            tail -5 /root/.pm2/logs/novastream-error.log 2>/dev/null || echo "No error log"
+
             echo "=== Stream audio check ==="
-            curl -s --max-time 3 http://localhost:8000/stream -o /tmp/stream_final.bin
-            xxd /tmp/stream_final.bin 2>/dev/null | head -2
+            curl -s --max-time 3 http://localhost:8000/stream -o /tmp/sv.bin
+            ls -la /tmp/sv.bin
+            xxd /tmp/sv.bin 2>/dev/null | head -2
+
+            echo "=== Preview endpoint check ==="
+            curl -s http://localhost:3001/api/tracks/250553/preview 2>&1
