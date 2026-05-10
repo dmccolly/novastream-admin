@@ -1,26 +1,16 @@
-name: Deploy Liquidsoap Fix
+name: Debug Port 3001
 
 on:
   push:
     branches: [main]
 
 jobs:
-  deploy:
+  debug:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
-      - name: Upload fixed Liquidsoap script
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          source: novastream.liq,get_next_track.sh
-          target: /root/
-          strip_components: 0
-
-      - name: Check syntax and restart Liquidsoap
+      - name: Check port 3001 and get_next_track.sh
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -28,29 +18,16 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 40s
           script: |
-            echo "=== Syntax check ==="
-            /usr/bin/liquidsoap --check /root/novastream.liq 2>&1 | head -10
-            SYNTAX_OK=$?
+            echo "=== Port 3001 check ==="
+            curl -sv --max-time 5 http://localhost:3001/api/stream/next-track 2>&1 | tail -20
 
-            if [ $SYNTAX_OK -eq 0 ]; then
-              echo "Syntax OK - restarting Liquidsoap"
-              nohup bash -c 'sleep 1; pkill -f liquidsoap; sleep 5; /usr/bin/liquidsoap /root/novastream.liq >> /var/log/liquidsoap.log 2>&1 &' > /tmp/liq_restart.log 2>&1 &
-              echo "Restart scheduled"
-            else
-              echo "SYNTAX ERROR - not restarting"
-            fi
+            echo "=== PM2 status ==="
+            pm2 list --no-color 2>&1 | grep -E "name|novastream"
 
-      - name: Verify after restart
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 30s
-          script: |
-            sleep 20
-            echo "=== Icecast sources ==="
-            curl -s http://localhost:8000/status-json.xsl 2>/dev/null | grep -o '"title":"[^"]*"' | head -1 || echo 'NO SOURCES'
+            echo "=== get_next_track.sh output ==="
+            chmod +x /root/get_next_track.sh
+            timeout 8 /root/get_next_track.sh 2>&1
+            echo "Exit: $?"
 
-            echo "=== Last 5 log lines ==="
-            tail -5 /var/log/liquidsoap.log
+            echo "=== Liquidsoap log tail ==="
+            tail -15 /var/log/liquidsoap.log
