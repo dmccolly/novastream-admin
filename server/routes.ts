@@ -1473,6 +1473,7 @@ export function registerRoutes(app: Express): Server {
         WHERE (category_id = ? OR subcategory_id = ?) 
         AND filepath IS NOT NULL
         AND status = 'ready'
+        AND filepath NOT LIKE '%.wma'
       `;
       const params: any[] = [currentItem.category_id, currentItem.category_id];
       
@@ -1506,6 +1507,7 @@ export function registerRoutes(app: Express): Server {
           WHERE (category_id = ? OR subcategory_id = ?) 
           AND filepath IS NOT NULL
           AND status = 'ready'
+          AND filepath NOT LIKE '%.wma'
         `;
         const fallbackParams: any[] = [currentItem.category_id, currentItem.category_id];
         if (recentTrackIds.length > 0) {
@@ -1534,6 +1536,7 @@ export function registerRoutes(app: Express): Server {
           WHERE (t.category_id = ? OR t.subcategory_id = ?)
           AND t.filepath IS NOT NULL
           AND t.status = 'ready'
+          AND t.filepath NOT LIKE '%.wma'
           ORDER BY ph.last_played ASC NULLS FIRST
           LIMIT 1
         `).get(currentItem.category_id, currentItem.category_id) as any;
