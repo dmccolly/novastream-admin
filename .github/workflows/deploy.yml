@@ -1,31 +1,60 @@
-name: Verify Recently Played Filter
+name: Patch Stream Server Recently Played Filter
 
 on:
   push:
     branches: [main]
 
 jobs:
-  verify:
+  patch:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
-      - name: Check deployed bundle and live DB
+      - name: Find the exact query string in the stream server bundle
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 30s
+          command_timeout: 60s
           script: |
-            echo "=== Check if filter is in deployed bundle ==="
-            grep -c "Unknown Artist" /root/novastream/dist/index.js || echo "NOT FOUND"
+            echo "=== Find the /api/stream/now query ==="
+            grep -o "FROM play_history[^L]*LIMIT [0-9]*" /root/novastream/dist/index.js | head -3
 
-            echo "=== Last 10 play_history rows (port 3001 DB) ==="
-            sqlite3 /root/novastream/radio.db "SELECT title, artist, played_at FROM play_history ORDER BY played_at DESC LIMIT 10;"
+            echo "=== Check if Unknown Artist filter already in stream bundle ==="
+            grep -c "Unknown Artist" /root/novastream/dist/index.js && echo "FILTER PRESENT" || echo "FILTER MISSING"
 
-            echo "=== Now Playing API (port 3001) ==="
+            echo "=== Backup original ==="
+            cp /root/novastream/dist/index.js /root/novastream/dist/index.js.bak.$(date +%s)
+
+            echo "=== Apply patch: add Unknown Artist filter to recently played query ==="
+            python3 - << 'PYEOF'
+import re
+
+with open('/root/novastream/dist/index.js', 'r') as f:
+    content = f.read()
+
+old = "FROM play_history WHERE played_at <= COALESCE(?, datetime('now')) ORDER BY played_at DESC LIMIT 10"
+new = "FROM play_history WHERE played_at <= COALESCE(?, datetime('now')) AND artist IS NOT NULL AND artist != '' AND artist != 'Unknown Artist' AND title IS NOT NULL AND title != '' ORDER BY played_at DESC LIMIT 10"
+
+if old in content:
+    content = content.replace(old, new, 1)
+    with open('/root/novastream/dist/index.js', 'w') as f:
+        f.write(content)
+    print("PATCH APPLIED SUCCESSFULLY")
+else:
+    print("OLD STRING NOT FOUND - checking what query exists:")
+    matches = re.findall(r'FROM play_history[^L]{0,200}LIMIT \d+', content)
+    for m in matches[:3]:
+        print(repr(m))
+PYEOF
+
+            echo "=== Verify patch ==="
+            grep -c "Unknown Artist" /root/novastream/dist/index.js && echo "Filter confirmed" || echo "Filter missing"
+
+            echo "=== Restart novastream ==="
+            pm2 restart novastream
+            sleep 5
+
+            echo "=== Test API ==="
             curl -s http://localhost:3001/api/stream/now
-
-            echo "=== current_playing table ==="
-            sqlite3 /root/novastream/radio.db "SELECT * FROM current_playing;"
