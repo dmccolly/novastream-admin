@@ -1,46 +1,16 @@
-name: Deploy Now Playing Fix
+name: Check and Restart Liquidsoap
 
 on:
   push:
     branches: [main]
 
 jobs:
-  deploy:
+  check-restart:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
-      - name: Upload dist to novastream app
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          source: dist/index.js
-          target: /root/novastream/dist/
-          strip_components: 1
-
-      - name: Upload dist to novastream-admin app
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          source: dist/index.js
-          target: /root/novastream-admin/dist/
-          strip_components: 1
-
-      - name: Upload Liquidsoap script
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          source: novastream.liq
-          target: /root/
-          strip_components: 0
-
-      - name: Restart Node apps and verify
+      - name: Check Liquidsoap and restart if needed
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -48,38 +18,26 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 40s
           script: |
-            pm2 restart novastream novastream-admin
-            sleep 6
+            echo "=== Liquidsoap processes ==="
+            pgrep -a liquidsoap || echo "NOT RUNNING"
 
-            echo "=== Verify now-playing route in dist ==="
-            grep -c "now-playing" /root/novastream/dist/index.js
+            echo "=== Icecast sources ==="
+            curl -s http://localhost:8000/status-json.xsl | python3 -c "import json,sys; d=json.load(sys.stdin); src=d.get('icestats',{}).get('source'); print('Source:', src.get('title') if src and not isinstance(src,list) else (src[0].get('title') if src else 'NONE'))" 2>/dev/null || echo "Icecast check failed"
 
-            echo "=== Verify current_playing table in dist ==="
-            grep -c "current_playing" /root/novastream/dist/index.js
+            echo "=== Last 20 lines of Liquidsoap log ==="
+            tail -20 /var/log/liquidsoap.log 2>/dev/null || echo "No log file"
 
-            echo "=== Verify on_track in Liquidsoap script ==="
+            echo "=== Verify on_track in deployed script ==="
             grep -c "on_track" /root/novastream.liq
 
-            echo "=== Test POST now-playing ==="
-            curl -s -X POST -H 'Content-Type: application/json' \
-              -d '{"filepath":"/root/novastream/storage/music/250553_1778099320620.mp3"}' \
-              http://localhost:3001/api/stream/now-playing
+            echo "=== Starting Liquidsoap if not running ==="
+            if ! pgrep -f liquidsoap > /dev/null; then
+              /usr/bin/liquidsoap /root/novastream.liq >> /var/log/liquidsoap.log 2>&1 &
+              echo "Started Liquidsoap PID: $!"
+            else
+              echo "Liquidsoap already running"
+            fi
 
-            echo ""
-            echo "=== Test GET now ==="
-            curl -s http://localhost:3001/api/stream/now
-
-            echo ""
-            echo "=== PM2 status ==="
-            pm2 list --no-color | grep -E "novastream"
-
-      - name: Restart Liquidsoap detached
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 15s
-          script: |
-            nohup bash -c 'sleep 2; pkill -f liquidsoap; sleep 5; /usr/bin/liquidsoap /root/novastream.liq >> /var/log/liquidsoap.log 2>&1 &' > /tmp/liq_restart.log 2>&1 &
-            echo "Liquidsoap restart scheduled"
+            sleep 8
+            echo "=== Icecast sources after restart ==="
+            curl -s http://localhost:8000/status-json.xsl | python3 -c "import json,sys; d=json.load(sys.stdin); src=d.get('icestats',{}).get('source'); print('Source:', src.get('title') if src and not isinstance(src,list) else (src[0].get('title') if src else 'NONE'))" 2>/dev/null || echo "check failed"
