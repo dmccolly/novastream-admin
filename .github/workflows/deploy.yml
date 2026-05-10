@@ -1,69 +1,43 @@
-name: Diagnose Broken
+name: Check Dropbox Env
 
 on:
   push:
     branches: [main]
 
 jobs:
-  diagnose:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
-      - name: Full system diagnosis
+      - name: Check Dropbox credentials and env
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 60s
+          command_timeout: 30s
           script: |
-            echo "=== PM2 status ==="
-            pm2 list --no-color 2>&1
+            echo "=== novastream-admin .env ==="
+            cat /root/novastream-admin/.env 2>/dev/null || echo "NO .env FILE"
 
-            echo "=== Port 3001 health ==="
-            curl -s --max-time 5 http://localhost:3001/api/health 2>&1
+            echo "=== novastream .env ==="
+            cat /root/novastream/.env 2>/dev/null || echo "NO .env FILE"
 
-            echo "=== Port 3006 health ==="
-            curl -s --max-time 5 http://localhost:3006/api/health 2>&1
+            echo "=== novastream-admin DB settings ==="
+            sqlite3 /root/novastream-admin/radio.db "SELECT key, value FROM settings WHERE key LIKE 'dropbox%';" 2>&1
 
-            echo "=== Now Playing ==="
-            curl -s --max-time 5 http://localhost:3001/api/stream/now 2>&1
+            echo "=== novastream DB settings ==="
+            sqlite3 /root/novastream/radio.db "SELECT key, value FROM settings WHERE key LIKE 'dropbox%';" 2>&1
 
-            echo "=== Stream audio ==="
-            curl -s --max-time 3 http://localhost:8000/stream -o /tmp/diag.bin
-            ls -la /tmp/diag.bin
-            xxd /tmp/diag.bin 2>/dev/null | head -2
+            echo "=== novastream-admin ecosystem.config ==="
+            cat /root/novastream-admin/ecosystem.config.cjs 2>/dev/null
 
-            echo "=== Icecast now playing ==="
-            curl -s http://localhost:8000/status.xsl 2>&1 | grep -o "Currently playing.*</td>" | head -2
+            echo "=== novastream PM2 env ==="
+            pm2 env 7 2>&1 | grep -i dropbox || echo "No dropbox env in PM2"
 
-            echo "=== Liquidsoap process ==="
-            pgrep -a liquidsoap || echo "NO LIQUIDSOAP"
+            echo "=== Auth URL test from admin ==="
+            curl -s http://localhost:3006/api/auth/dropbox/url 2>&1
 
-            echo "=== novastream error log (last 20 lines) ==="
-            tail -20 /root/.pm2/logs/novastream-error.log 2>/dev/null || echo "No log"
-
-            echo "=== novastream-admin error log (last 20 lines) ==="
-            tail -20 /root/.pm2/logs/novastream-admin-error.log 2>/dev/null || echo "No log"
-
-            echo "=== novastream out log (last 10 lines) ==="
-            tail -10 /root/.pm2/logs/novastream-out.log 2>/dev/null || echo "No log"
-
-            echo "=== novastream-admin out log (last 10 lines) ==="
-            tail -10 /root/.pm2/logs/novastream-admin-out.log 2>/dev/null || echo "No log"
-
-            echo "=== Liquidsoap log (last 10 lines) ==="
-            tail -10 /var/log/liquidsoap.log 2>/dev/null || echo "No log"
-
-            echo "=== Preview endpoint test ==="
-            curl -s --max-time 5 http://localhost:3001/api/tracks/250553/preview 2>&1
-
-            echo "=== Dropbox token in DB ==="
-            sqlite3 /root/novastream/radio.db "SELECT key, substr(value,1,20) FROM settings WHERE key LIKE 'dropbox%';" 2>&1
-
-            echo "=== Recently played titles ==="
-            sqlite3 /root/novastream/radio.db "SELECT title, artist, played_at FROM play_history ORDER BY played_at DESC LIMIT 5;" 2>&1
-
-            echo "=== Current playing table ==="
-            sqlite3 /root/novastream/radio.db "SELECT * FROM current_playing;" 2>&1
+            echo "=== Auth URL test from novastream ==="
+            curl -s http://localhost:3001/api/auth/dropbox/url 2>&1
