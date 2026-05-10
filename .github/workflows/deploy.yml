@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check port 3001 vs 3006 routing
+      - name: Check novastream app structure and fix WMA issue
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,28 +16,22 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 30s
           script: |
-            echo "=== What is on port 3001 ==="
-            ss -tlnp | grep 3001
-            ss -tlnp | grep 3006
+            echo "=== novastream app structure ==="
+            ls /root/novastream/
+            ls /root/novastream/src/ 2>/dev/null || echo "no src dir"
+            ls /root/novastream/server/ 2>/dev/null || echo "no server dir"
 
-            echo "=== PM2 ecosystem ==="
-            cat /root/.pm2/dump.pm2 2>/dev/null | grep -A5 "novastream" | head -30
-            cat /root/ecosystem.config.js 2>/dev/null | head -30
+            echo "=== next-track route in port 3001 dist ==="
+            grep -n "next-track\|wma\|WMA\|status.*ready\|filepath.*LIKE" /root/novastream/dist/index.js | head -20
 
-            echo "=== Port 3001 next-track ==="
-            curl -s --max-time 5 http://localhost:3001/api/stream/next-track | head -100
+            echo "=== WMA tracks in port 3001 DB ==="
+            sqlite3 /root/novastream/radio.db "SELECT COUNT(*) FROM tracks WHERE filepath LIKE '%.wma' AND status='ready';"
+            sqlite3 /root/novastream/radio.db "SELECT COUNT(*) FROM tracks WHERE status='ready' AND (filepath LIKE '%.mp3' OR filepath LIKE '%.wav');"
 
-            echo "=== Port 3006 next-track ==="
-            curl -s --max-time 5 http://localhost:3006/api/stream/next-track | head -100
+            echo "=== Check if novastream has package.json with build script ==="
+            cat /root/novastream/package.json 2>/dev/null | head -20
 
-            echo "=== Port 3001 stream/now ==="
-            curl -s --max-time 5 http://localhost:3001/api/stream/now | head -100
-
-            echo "=== Port 3006 stream/now ==="
-            curl -s --max-time 5 http://localhost:3006/api/stream/now | head -100
-
-            echo "=== Which DB does port 3001 use ==="
-            grep -n "radio.db\|novastream.db\|database" /root/novastream/dist/index.js | head -10
-
-            echo "=== Which DB does port 3006 use ==="
-            grep -n "radio.db\|novastream.db\|database" /root/novastream-admin/dist/index.js 2>/dev/null | head -10
+            echo "=== Liquidsoap log (find it) ==="
+            find /root /tmp /var/log -name "liquidsoap*.log" 2>/dev/null | head -5
+            cat /root/.pm2/logs/liquidsoap-out.log 2>/dev/null | tail -20 || echo "no pm2 liquidsoap log"
+            pm2 list 2>&1 | grep liquidsoap
