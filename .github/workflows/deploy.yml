@@ -1,4 +1,4 @@
-name: Deploy Recently Played Fix
+name: Deploy Stop-Error and Recently Played Fixes
 
 on:
   push:
@@ -10,18 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Deploy and restart
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 60s
-          script: |
-            echo "=== Pre-deploy Now Playing ==="
-            curl -s http://localhost:3001/api/stream/now
-
-      - name: Upload dist via SCP
+      - name: Upload dist/index.js to novastream (port 3001)
         uses: appleboy/scp-action@v0.1.7
         with:
           host: 137.184.12.217
@@ -31,7 +20,27 @@ jobs:
           target: "/root/novastream/dist/"
           strip_components: 1
 
-      - name: Restart and verify
+      - name: Upload dist/index.js to novastream-admin (port 3006)
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          source: "dist/index.js"
+          target: "/root/novastream-admin/dist/"
+          strip_components: 1
+
+      - name: Upload fixed player HTML
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          source: "player/index.html"
+          target: "/var/www/html/"
+          strip_components: 1
+
+      - name: Restart both apps and verify
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -39,11 +48,18 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 30s
           script: |
-            pm2 restart novastream
+            pm2 restart novastream novastream-admin
             sleep 5
             echo "=== PM2 status ==="
             pm2 list --no-color | grep novastream
-            echo "=== Post-deploy Now Playing ==="
+            echo "=== Now Playing (port 3001) ==="
             curl -s http://localhost:3001/api/stream/now
+            echo ""
+            echo "=== Now Playing (port 3006) ==="
+            curl -s http://localhost:3006/api/stream/now
+            echo ""
+            echo "=== Player HTML stop fix check ==="
+            grep -c "onerror = null" /var/www/html/index.html
             echo "=== Health ==="
             curl -s http://localhost:3001/api/health
+            curl -s http://localhost:3006/api/health

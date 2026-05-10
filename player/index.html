@@ -160,8 +160,16 @@
         }
 
         function playStream() {
-            // Tear down any existing instance
-            if (audio) { audio.pause(); audio.src = ''; audio = null; }
+            // Tear down any existing instance cleanly (null handlers first to avoid spurious errors)
+            if (audio) {
+                audio.onerror = null;
+                audio.onended = null;
+                audio.onwaiting = null;
+                audio.onplaying = null;
+                audio.pause();
+                audio.src = '';
+                audio = null;
+            }
 
             setStatus('Connecting…', 'connecting');
 
@@ -192,7 +200,16 @@
         }
 
         function stopStream() {
-            if (audio) { audio.pause(); audio.src = ''; audio = null; }
+            if (audio) {
+                // Remove error handler BEFORE clearing src to prevent spurious error display
+                audio.onerror = null;
+                audio.onended = null;
+                audio.onwaiting = null;
+                audio.onplaying = null;
+                audio.pause();
+                audio.src = '';
+                audio = null;
+            }
             setStatus('Stopped', 'stopped');
         }
 

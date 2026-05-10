@@ -1694,6 +1694,11 @@ export function registerRoutes(app: Express): Server {
         SELECT title, artist
         FROM play_history
         WHERE played_at <= COALESCE(?, datetime('now'))
+          AND artist IS NOT NULL
+          AND artist != ''
+          AND artist != 'Unknown Artist'
+          AND title IS NOT NULL
+          AND title != ''
         ORDER BY played_at DESC
         LIMIT 10
       `).all(currentStarted ?? null) as { title: string; artist: string }[];
