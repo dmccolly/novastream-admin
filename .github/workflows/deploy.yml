@@ -13,9 +13,9 @@ jobs:
       - name: Upload dist to novastream app
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.SERVER_HOST }}
+          host: 137.184.12.217
           username: root
-          key: ${{ secrets.SERVER_SSH_KEY }}
+          key: ${{ secrets.DO_SSH_KEY }}
           source: dist/index.js
           target: /root/novastream/dist/
           strip_components: 1
@@ -23,9 +23,9 @@ jobs:
       - name: Upload dist to novastream-admin app
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.SERVER_HOST }}
+          host: 137.184.12.217
           username: root
-          key: ${{ secrets.SERVER_SSH_KEY }}
+          key: ${{ secrets.DO_SSH_KEY }}
           source: dist/index.js
           target: /root/novastream-admin/dist/
           strip_components: 1
@@ -33,9 +33,9 @@ jobs:
       - name: Upload Liquidsoap script
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.SERVER_HOST }}
+          host: 137.184.12.217
           username: root
-          key: ${{ secrets.SERVER_SSH_KEY }}
+          key: ${{ secrets.DO_SSH_KEY }}
           source: novastream.liq
           target: /root/
           strip_components: 0
@@ -43,9 +43,9 @@ jobs:
       - name: Restart Node apps and verify
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.SERVER_HOST }}
+          host: 137.184.12.217
           username: root
-          key: ${{ secrets.SERVER_SSH_KEY }}
+          key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 40s
           script: |
             pm2 restart novastream novastream-admin
@@ -76,9 +76,9 @@ jobs:
       - name: Restart Liquidsoap detached
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.SERVER_HOST }}
+          host: 137.184.12.217
           username: root
-          key: ${{ secrets.SERVER_SSH_KEY }}
+          key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 15s
           script: |
             nohup bash -c 'sleep 2; pkill -f liquidsoap; sleep 5; /usr/bin/liquidsoap /root/novastream.liq >> /var/log/liquidsoap.log 2>&1 &' > /tmp/liq_restart.log 2>&1 &
