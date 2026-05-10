@@ -1,16 +1,16 @@
-name: Fix Stream
+name: Diagnose and Fix
 
 on:
   push:
     branches: [main]
 
 jobs:
-  fix:
+  diagnose:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
-      - name: Check Liquidsoap and restart if needed
+      - name: Check novastream-admin crash loop and Now Playing
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -18,32 +18,20 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 40s
           script: |
-            echo "=== Liquidsoap process check ==="
-            pgrep -a liquidsoap || echo "NO LIQUIDSOAP PROCESS"
+            echo "=== PM2 status ==="
+            pm2 list --no-color 2>&1
 
-            echo "=== Icecast status ==="
-            curl -s http://localhost:8000/status.xsl 2>&1 | grep -E "mount|listeners|title" | head -10
+            echo "=== novastream-admin PM2 logs (last 30 lines) ==="
+            pm2 logs novastream-admin --lines 30 --nostream 2>&1 | tail -40
 
-            echo "=== Stream audio check ==="
-            curl -s --max-time 3 http://localhost:8000/stream -o /tmp/stream_check.bin
-            xxd /tmp/stream_check.bin 2>/dev/null | head -3
+            echo "=== Now Playing API ==="
+            curl -s http://localhost:3001/api/stream/now 2>&1
 
-            echo "=== Watchdog check ==="
-            ls -la /root/liquidsoap_watchdog.sh 2>/dev/null || echo "NO WATCHDOG"
-            cat /proc/$(pgrep -f liquidsoap_watchdog | head -1)/status 2>/dev/null | grep State || echo "Watchdog not running"
+            echo "=== novastream PM2 logs (last 10 lines) ==="
+            pm2 logs novastream --lines 10 --nostream 2>&1 | tail -20
 
-            echo "=== Liquidsoap log tail ==="
-            tail -20 /var/log/liquidsoap.log
+            echo "=== Liquidsoap process ==="
+            pgrep -a liquidsoap
 
-            echo "=== Restarting Liquidsoap ==="
-            pkill -f liquidsoap_watchdog 2>/dev/null || true
-            pkill -f "liquidsoap /root" 2>/dev/null || true
-            sleep 2
-            nohup bash -c 'sleep 1; liquidsoap /root/novastream.liq >> /var/log/liquidsoap.log 2>&1' > /dev/null 2>&1 &
-            sleep 5
-            echo "=== After restart - Liquidsoap process ==="
-            pgrep -a liquidsoap || echo "STILL NO LIQUIDSOAP"
-            echo "=== After restart - stream check ==="
-            sleep 5
-            curl -s --max-time 4 http://localhost:8000/stream -o /tmp/stream_after.bin
-            xxd /tmp/stream_after.bin 2>/dev/null | head -3
+            echo "=== Icecast now playing ==="
+            curl -s http://localhost:8000/status.xsl 2>&1 | grep -o "Currently playing.*</td>" | head -3
