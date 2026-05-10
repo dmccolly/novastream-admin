@@ -61,15 +61,16 @@ end
 # Create dynamic source
 radio = request.dynamic(id="main", get_next_track)
 
-# on_track fires when a track ACTUALLY starts playing (not at pre-fetch time)
+# on_metadata fires when a track ACTUALLY starts playing (not at pre-fetch time)
 # This drives the Now Playing display with accurate timing
-radio = source.on_track(radio, fun(m) ->
+def notify_now_playing(m) =
   filepath = m["filename"]
   if filepath != "" then
     ignore(process.run("curl -s -X POST -H 'Content-Type: application/json' -d '{\"filepath\":\"" ^ filepath ^ "\"}' http://localhost:3001/api/stream/now-playing"))
     print("Now playing: #{filepath}")
   end
-end)
+end
+radio = source.on_metadata(radio, notify_now_playing)
 
 # Apply crossfade using liq_fade_in and liq_fade_out from track metadata
 radio = crossfade(radio)

@@ -1,16 +1,26 @@
-name: Debug Liquidsoap Script
+name: Deploy Liquidsoap Fix
 
 on:
   push:
     branches: [main]
 
 jobs:
-  debug:
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
-      - name: Check Liquidsoap version and test script
+      - name: Upload fixed Liquidsoap script
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          source: novastream.liq,get_next_track.sh
+          target: /root/
+          strip_components: 0
+
+      - name: Check syntax and restart Liquidsoap
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -18,20 +28,29 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 40s
           script: |
-            echo "=== Liquidsoap version ==="
-            /usr/bin/liquidsoap --version 2>&1 | head -3
+            echo "=== Syntax check ==="
+            /usr/bin/liquidsoap --check /root/novastream.liq 2>&1 | head -10
+            SYNTAX_OK=$?
 
-            echo "=== Check script syntax ==="
-            /usr/bin/liquidsoap --check /root/novastream.liq 2>&1 | head -30
+            if [ $SYNTAX_OK -eq 0 ]; then
+              echo "Syntax OK - restarting Liquidsoap"
+              nohup bash -c 'sleep 1; pkill -f liquidsoap; sleep 5; /usr/bin/liquidsoap /root/novastream.liq >> /var/log/liquidsoap.log 2>&1 &' > /tmp/liq_restart.log 2>&1 &
+              echo "Restart scheduled"
+            else
+              echo "SYNTAX ERROR - not restarting"
+            fi
 
-            echo "=== Liquidsoap stderr log (last 30 lines) ==="
-            tail -30 /var/log/liquidsoap.log 2>/dev/null
+      - name: Verify after restart
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 137.184.12.217
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          command_timeout: 30s
+          script: |
+            sleep 20
+            echo "=== Icecast sources ==="
+            curl -s http://localhost:8000/status-json.xsl 2>/dev/null | grep -o '"title":"[^"]*"' | head -1 || echo 'NO SOURCES'
 
-            echo "=== Current Liquidsoap processes ==="
-            pgrep -a liquidsoap 2>/dev/null || echo "NOT RUNNING"
-
-            echo "=== Check if source.on_track exists ==="
-            /usr/bin/liquidsoap 'source.on_track' 2>&1 | head -5
-
-            echo "=== Test get_next_track.sh ==="
-            timeout 5 /root/get_next_track.sh 2>&1 || echo "Script failed or timed out"
+            echo "=== Last 5 log lines ==="
+            tail -5 /var/log/liquidsoap.log
