@@ -1,16 +1,16 @@
-name: Debug Port 3001
+name: Fix Stream
 
 on:
   push:
     branches: [main]
 
 jobs:
-  debug:
+  fix:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
-      - name: Check port 3001 and get_next_track.sh
+      - name: Check Liquidsoap and restart if needed
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -18,16 +18,32 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 40s
           script: |
-            echo "=== Port 3001 check ==="
-            curl -sv --max-time 5 http://localhost:3001/api/stream/next-track 2>&1 | tail -20
+            echo "=== Liquidsoap process check ==="
+            pgrep -a liquidsoap || echo "NO LIQUIDSOAP PROCESS"
 
-            echo "=== PM2 status ==="
-            pm2 list --no-color 2>&1 | grep -E "name|novastream"
+            echo "=== Icecast status ==="
+            curl -s http://localhost:8000/status.xsl 2>&1 | grep -E "mount|listeners|title" | head -10
 
-            echo "=== get_next_track.sh output ==="
-            chmod +x /root/get_next_track.sh
-            timeout 8 /root/get_next_track.sh 2>&1
-            echo "Exit: $?"
+            echo "=== Stream audio check ==="
+            curl -s --max-time 3 http://localhost:8000/stream -o /tmp/stream_check.bin
+            xxd /tmp/stream_check.bin 2>/dev/null | head -3
+
+            echo "=== Watchdog check ==="
+            ls -la /root/liquidsoap_watchdog.sh 2>/dev/null || echo "NO WATCHDOG"
+            cat /proc/$(pgrep -f liquidsoap_watchdog | head -1)/status 2>/dev/null | grep State || echo "Watchdog not running"
 
             echo "=== Liquidsoap log tail ==="
-            tail -15 /var/log/liquidsoap.log
+            tail -20 /var/log/liquidsoap.log
+
+            echo "=== Restarting Liquidsoap ==="
+            pkill -f liquidsoap_watchdog 2>/dev/null || true
+            pkill -f "liquidsoap /root" 2>/dev/null || true
+            sleep 2
+            nohup bash -c 'sleep 1; liquidsoap /root/novastream.liq >> /var/log/liquidsoap.log 2>&1' > /dev/null 2>&1 &
+            sleep 5
+            echo "=== After restart - Liquidsoap process ==="
+            pgrep -a liquidsoap || echo "STILL NO LIQUIDSOAP"
+            echo "=== After restart - stream check ==="
+            sleep 5
+            curl -s --max-time 4 http://localhost:8000/stream -o /tmp/stream_after.bin
+            xxd /tmp/stream_after.bin 2>/dev/null | head -3
