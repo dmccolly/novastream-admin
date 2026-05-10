@@ -8,56 +8,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Write restart script to server
+      - name: Check current Liquidsoap state
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 20s
+          command_timeout: 30s
           script: |
-            cat > /tmp/restart_liq.sh << 'SCRIPT'
-            #!/bin/bash
-            sleep 2
-            pkill -f liquidsoap_watchdog.sh 2>/dev/null
-            pkill -9 -f liquidsoap 2>/dev/null
-            sleep 3
-            nohup liquidsoap /root/novastream.liq >> /var/log/liquidsoap.log 2>&1 &
-            sleep 5
-            nohup bash /root/liquidsoap_watchdog.sh >> /var/log/liquidsoap_watchdog.log 2>&1 &
-            echo "restart done at $(date)" >> /tmp/liq_restart_status.txt
-            SCRIPT
-            chmod +x /tmp/restart_liq.sh
-            echo "Script written OK"
-
-      - name: Execute restart in background then check
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 50s
-          script: |
-            echo "=== Launch restart script detached ==="
-            setsid nohup bash /tmp/restart_liq.sh > /tmp/restart_liq.log 2>&1 &
-            echo "Restart script launched, PID: $!"
-            echo "=== Waiting 25s for Liquidsoap to start ==="
-            sleep 25
-
-            echo "=== Restart status ==="
-            cat /tmp/liq_restart_status.txt 2>/dev/null || echo "no status yet"
-
-            echo "=== Liquidsoap process ==="
+            echo "=== Liquidsoap processes ==="
             ps aux | grep liquidsoap | grep -v grep
 
-            echo "=== New Liquidsoap log lines ==="
-            tail -10 /var/log/liquidsoap.log
+            echo "=== Restart script status ==="
+            cat /tmp/liq_restart_status.txt 2>/dev/null || echo "no status file"
+            cat /tmp/restart_liq.log 2>/dev/null || echo "no restart log"
 
-            echo "=== Icecast stream title ==="
-            curl -s --max-time 5 http://localhost:8000/status-json.xsl | grep -o '"title":"[^"]*"' | head -1
+            echo "=== Liquidsoap log last 30 lines ==="
+            tail -30 /var/log/liquidsoap.log
 
-            echo "=== Sample stream bytes (first 16) ==="
-            curl -s --max-time 4 http://localhost:8000/stream | head -c 16 | xxd
+            echo "=== play_history last 5 ==="
+            sqlite3 /root/novastream/radio.db "SELECT title, artist, played_at FROM play_history ORDER BY played_at DESC LIMIT 5;"
 
-            echo "=== play_history recent ==="
-            sqlite3 /root/novastream/radio.db "SELECT title, artist, played_at FROM play_history ORDER BY played_at DESC LIMIT 3;"
+            echo "=== Stream bytes ==="
+            curl -s --max-time 3 http://localhost:8000/stream | head -c 8 | xxd
