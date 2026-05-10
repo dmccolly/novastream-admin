@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Upload fixed Liquidsoap script and helper
+      - name: Upload fixed scripts
         uses: appleboy/scp-action@v0.1.7
         with:
           host: 137.184.12.217
@@ -18,7 +18,7 @@ jobs:
           target: /root/
           strip_components: 0
 
-      - name: Deploy and restart Liquidsoap
+      - name: Restart Liquidsoap with fixed scripts
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -26,15 +26,16 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 20s
           script: |
-            echo "=== Set permissions ==="
             chmod +x /root/get_next_track.sh
-            echo "Permissions set"
 
-            echo "=== Verify password in script ==="
-            grep "password" /root/novastream.liq
+            echo "=== Test get_next_track.sh ==="
+            /root/get_next_track.sh
 
-            echo "=== Write restart script ==="
-            cat > /tmp/restart_liq4.sh << 'SCRIPT'
+            echo "=== Verify delimiter in liq script ==="
+            grep "separator" /root/novastream.liq
+
+            echo "=== Write detached restart ==="
+            cat > /tmp/restart_liq5.sh << 'SCRIPT'
             #!/bin/bash
             pkill -f liquidsoap_watchdog 2>/dev/null
             pkill -9 -f liquidsoap 2>/dev/null
@@ -43,16 +44,13 @@ jobs:
             LIQ_PID=$!
             sleep 10
             nohup bash /root/liquidsoap_watchdog.sh >> /var/log/liquidsoap_watchdog.log 2>&1 &
-            echo "restart4 done at $(date), liq PID=$LIQ_PID" > /tmp/liq_restart4_status.txt
+            echo "restart5 done at $(date), liq PID=$LIQ_PID" > /tmp/liq_restart5_status.txt
             SCRIPT
-            chmod +x /tmp/restart_liq4.sh
+            chmod +x /tmp/restart_liq5.sh
+            setsid nohup bash /tmp/restart_liq5.sh > /tmp/restart_liq5.log 2>&1 &
+            echo "Restart launched"
 
-            echo "=== Launch detached restart ==="
-            setsid nohup bash /tmp/restart_liq4.sh > /tmp/restart_liq4.log 2>&1 &
-            echo "Restart launched PID: $!"
-            echo "Done"
-
-      - name: Verify audio is flowing
+      - name: Verify audio
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -61,14 +59,12 @@ jobs:
           command_timeout: 35s
           script: |
             sleep 25
+
             echo "=== Restart status ==="
-            cat /tmp/liq_restart4_status.txt 2>/dev/null || echo "no status yet"
+            cat /tmp/liq_restart5_status.txt 2>/dev/null || echo "pending"
 
-            echo "=== Liquidsoap processes ==="
-            ps aux | grep liquidsoap | grep -v grep | awk '{print $1,$2,$11}'
-
-            echo "=== Liquidsoap log last 8 ==="
-            tail -8 /var/log/liquidsoap.log
+            echo "=== Liquidsoap log last 10 ==="
+            tail -10 /var/log/liquidsoap.log
 
             echo "=== Icecast mount ==="
             curl -s --max-time 3 http://localhost:8000/status-json.xsl | grep -o '"mount":"[^"]*"' || echo "no mount"

@@ -15,7 +15,7 @@ def get_next_track() =
   
   if track_data != "" then
     # Split the pipe-delimited data
-    parts = string.split(separator="|", track_data)
+    parts = string.split(separator="###", track_data)
     filepath = list.nth(parts, 0)
     cue_in_str = list.nth(parts, 1)
     cue_out_str = list.nth(parts, 2)
