@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Full diagnostic and fix
+      - name: Check port 3001 vs 3006 routing
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -16,26 +16,28 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 30s
           script: |
-            echo "=== PM2 status ==="
-            pm2 list 2>&1 | grep -E "name|novastream|online|stopped|errored"
+            echo "=== What is on port 3001 ==="
+            ss -tlnp | grep 3001
+            ss -tlnp | grep 3006
 
-            echo "=== Liquidsoap process ==="
-            ps aux | grep liquidsoap | grep -v grep | head -3
+            echo "=== PM2 ecosystem ==="
+            cat /root/.pm2/dump.pm2 2>/dev/null | grep -A5 "novastream" | head -30
+            cat /root/ecosystem.config.js 2>/dev/null | head -30
 
-            echo "=== Recent play_history ==="
-            sqlite3 /root/novastream/radio.db "SELECT title, artist, played_at FROM play_history ORDER BY played_at DESC LIMIT 3;"
+            echo "=== Port 3001 next-track ==="
+            curl -s --max-time 5 http://localhost:3001/api/stream/next-track | head -100
 
-            echo "=== Icecast status ==="
-            curl -s --max-time 5 http://localhost:8000/status-json.xsl | head -5
+            echo "=== Port 3006 next-track ==="
+            curl -s --max-time 5 http://localhost:3006/api/stream/next-track | head -100
 
-            echo "=== Test next-track ==="
-            curl -s --max-time 5 http://localhost:3001/api/stream/next-track | head -200
+            echo "=== Port 3001 stream/now ==="
+            curl -s --max-time 5 http://localhost:3001/api/stream/now | head -100
 
-            echo "=== novastream error log ==="
-            pm2 logs novastream --lines 10 --err --nostream 2>&1 | tail -15
+            echo "=== Port 3006 stream/now ==="
+            curl -s --max-time 5 http://localhost:3006/api/stream/now | head -100
 
-            echo "=== nginx music route ==="
-            grep -A3 "location /music" /etc/nginx/sites-enabled/novastream 2>/dev/null || echo "no music route"
+            echo "=== Which DB does port 3001 use ==="
+            grep -n "radio.db\|novastream.db\|database" /root/novastream/dist/index.js | head -10
 
-            echo "=== novastream dist routes ==="
-            grep -n "now-playing\|now_playing\|play_history" /root/novastream/dist/index.js | head -10
+            echo "=== Which DB does port 3006 use ==="
+            grep -n "radio.db\|novastream.db\|database" /root/novastream-admin/dist/index.js 2>/dev/null | head -10
