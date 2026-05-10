@@ -8,29 +8,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies and build
-        run: |
-          npm install
-          npm run build:server
-
-      - name: Deploy to server
+      - name: Backup current dist on server
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 60s
+          command_timeout: 30s
           script: |
-            echo "=== Backing up current dist ==="
             cp /root/novastream/dist/index.js /root/novastream/dist/index.js.bak
             cp /root/novastream-admin/dist/index.js /root/novastream-admin/dist/index.js.bak
+            echo "Backups done"
 
-      - name: Upload new dist to server
+      - name: Upload new dist to novastream
         uses: appleboy/scp-action@v0.1.7
         with:
           host: 137.184.12.217
@@ -56,6 +46,9 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
+            echo "=== Verify WMA fix in deployed dist ==="
+            grep -c "NOT LIKE" /root/novastream/dist/index.js
+
             echo "=== Restarting novastream apps ==="
             pm2 restart novastream
             pm2 restart novastream-admin
@@ -67,20 +60,20 @@ jobs:
             echo "=== Test next-track returns MP3 (not WMA) ==="
             curl -s --max-time 5 http://localhost:3001/api/stream/next-track | grep -o '"filepath":"[^"]*"' | head -1
 
-            echo "=== Trigger WMA conversion ==="
+            echo "=== Trigger WMA to MP3 conversion ==="
             curl -s -X POST --max-time 10 http://localhost:3001/api/admin/convert-wma
 
-            echo "=== Restart Liquidsoap ==="
+            echo "=== Restart Liquidsoap to unstick from WMA file ==="
             pkill -f liquidsoap || true
-            sleep 3
+            sleep 5
             ps aux | grep liquidsoap | grep -v grep | head -3
 
             echo "=== Wait for Liquidsoap watchdog to restart it ==="
-            sleep 10
+            sleep 15
             ps aux | grep liquidsoap | grep -v grep | head -3
 
-            echo "=== Check Icecast is still streaming ==="
-            curl -s --max-time 5 http://localhost:8000/status-json.xsl | grep -o '"title":"[^"]*"' | head -1
-
             echo "=== Check play_history updated ==="
-            sqlite3 /root/novastream/radio.db "SELECT title, artist, played_at FROM play_history ORDER BY played_at DESC LIMIT 3;"
+            sqlite3 /root/novastream/radio.db "SELECT title, artist, played_at FROM play_history ORDER BY played_at DESC LIMIT 5;"
+
+            echo "=== Check Icecast stream title ==="
+            curl -s --max-time 5 http://localhost:8000/status-json.xsl | grep -o '"title":"[^"]*"' | head -1

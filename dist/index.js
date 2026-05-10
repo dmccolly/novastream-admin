@@ -71,10 +71,13 @@ function initDb() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       clock_id INTEGER NOT NULL,
       position INTEGER NOT NULL,
-      category_id INTEGER NOT NULL, -- What to play (can be a subcategory)
-      duration_target INTEGER, -- Optional target duration in seconds
+      slot_type TEXT DEFAULT 'category',
+      category_id INTEGER, -- Nullable: NULL for track slots
+      track_id INTEGER,    -- Set for pinned track slots
+      duration_target INTEGER,
       FOREIGN KEY (clock_id) REFERENCES clocks(id) ON DELETE CASCADE,
-      FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
+      FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE,
+      FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE SET NULL
     );
 
     -- Schedule Grid (Weekly)
@@ -150,6 +153,55 @@ function initDb() {
     insertCat.run("News", contentId, "content", "#22d3ee");
     insertCat.run("Segments", contentId, "content", "#22d3ee");
     insertCat.run("ID", null, "id", "#64748b");
+  }
+  const clockItemCols = db.pragma("table_info(clock_items)");
+  const catCol = clockItemCols.find((col) => col.name === "category_id");
+  const needsRebuild = catCol && catCol.notnull === 1;
+  if (needsRebuild) {
+    console.log("[migration] Rebuilding clock_items table to allow nullable category_id...");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS clock_items_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        clock_id INTEGER NOT NULL,
+        position INTEGER NOT NULL,
+        slot_type TEXT DEFAULT 'category',
+        category_id INTEGER,
+        track_id INTEGER,
+        duration_target INTEGER,
+        FOREIGN KEY (clock_id) REFERENCES clocks(id) ON DELETE CASCADE,
+        FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE,
+        FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE SET NULL
+      );
+      INSERT INTO clock_items_new (id, clock_id, position, slot_type, category_id, track_id, duration_target)
+        SELECT id, clock_id, position,
+          COALESCE(slot_type, 'category'),
+          category_id,
+          NULL,
+          duration_target
+        FROM clock_items;
+      DROP TABLE clock_items;
+      ALTER TABLE clock_items_new RENAME TO clock_items;
+    `);
+    console.log("[migration] clock_items rebuilt successfully");
+  } else {
+    if (!clockItemCols.some((col) => col.name === "slot_type")) {
+      console.log("[migration] Adding slot_type column to clock_items...");
+      db.exec("ALTER TABLE clock_items ADD COLUMN slot_type TEXT DEFAULT 'category'");
+    }
+    if (!clockItemCols.some((col) => col.name === "track_id")) {
+      console.log("[migration] Adding track_id column to clock_items...");
+      db.exec("ALTER TABLE clock_items ADD COLUMN track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL");
+    }
+  }
+  const clockCols = db.pragma("table_info(clocks)");
+  if (!clockCols.some((col) => col.name === "mode")) {
+    console.log("[migration] Adding mode column to clocks...");
+    db.exec("ALTER TABLE clocks ADD COLUMN mode TEXT DEFAULT 'loop'");
+  }
+  const trackCols2 = db.pragma("table_info(tracks)");
+  if (!trackCols2.some((col) => col.name === "tags")) {
+    console.log("[migration] Added tags column to tracks table");
+    db.exec("ALTER TABLE tracks ADD COLUMN tags TEXT DEFAULT ''");
   }
   console.log("Database initialized at", dbPath);
 }
@@ -275,7 +327,7 @@ async function syncDropbox() {
 }
 function isAudioFile(filename) {
   const ext = filename.split(".").pop()?.toLowerCase();
-  return ["mp3", "wav", "m4a", "flac", "aac", "ogg"].includes(ext || "");
+  return ["mp3", "wav", "m4a", "flac", "aac", "ogg", "wma", "aiff", "aif"].includes(ext || "");
 }
 function parseFilename(filename) {
   const name = filename.substring(0, filename.lastIndexOf("."));
@@ -293,6 +345,7 @@ function parseFilename(filename) {
 }
 
 // server/routes.ts
+import { spawn as spawn2 } from "child_process";
 import cors from "cors";
 import path2 from "path";
 import fs from "fs";
@@ -499,13 +552,21 @@ function registerRoutes(app2) {
         return res.status(404).json({ error: "Track not found" });
       }
       if (track.filepath) {
-        const localUrl = `/music/${path2.basename(track.filepath)}`;
-        console.log("[PREVIEW] Track has filepath, returning local URL:", localUrl);
+        const ext = path2.extname(track.filepath).toLowerCase();
+        const needsTranscode = [".wma", ".ogg", ".flac", ".aiff", ".aif"].includes(ext);
+        const localUrl = needsTranscode ? `/api/tracks/${id}/stream` : `/music/${path2.basename(track.filepath)}`;
+        console.log(`[PREVIEW] Track has filepath (${ext}), returning URL:`, localUrl);
         return res.json({ url: localUrl });
       }
       if (!track.source_url) {
         console.log("[PREVIEW] Track has no source_url, returning 400");
         return res.status(400).json({ error: "Track has no source URL" });
+      }
+      const cloudExt = path2.extname(track.source_url).toLowerCase();
+      const cloudNeedsTranscode = [".wma", ".ogg", ".flac", ".aiff", ".aif"].includes(cloudExt);
+      if (cloudNeedsTranscode) {
+        console.log(`[PREVIEW] Cloud file is ${cloudExt}, routing through transcode stream`);
+        return res.json({ url: `/api/tracks/${id}/stream-cloud` });
       }
       console.log("[PREVIEW] Getting Dropbox client...");
       const dbx = await getDropboxClient();
@@ -516,6 +577,54 @@ function registerRoutes(app2) {
     } catch (error) {
       console.error("[PREVIEW] Error getting preview link:", error);
       res.status(500).json({ error: "Failed to get preview link" });
+    }
+  });
+  app2.get("/api/tracks/:id/stream-cloud", async (req, res) => {
+    const { id } = req.params;
+    try {
+      const track = db.prepare("SELECT source_url FROM tracks WHERE id = ?").get(id);
+      if (!track || !track.source_url) {
+        return res.status(404).json({ error: "Track not found or has no source URL" });
+      }
+      const dbx = await getDropboxClient();
+      const response = await dbx.filesGetTemporaryLink({ path: track.source_url });
+      const dropboxUrl = response.result.link;
+      console.log(`[STREAM-CLOUD] Transcoding cloud file for track ${id}: ${track.source_url}`);
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Content-Type", "audio/mpeg");
+      res.setHeader("Cache-Control", "no-cache");
+      res.writeHead(200);
+      const ffmpeg = spawn2("ffmpeg", [
+        "-i",
+        dropboxUrl,
+        "-vn",
+        "-acodec",
+        "libmp3lame",
+        "-ab",
+        "192k",
+        "-ar",
+        "44100",
+        "-f",
+        "mp3",
+        "pipe:1"
+      ], { stdio: ["ignore", "pipe", "pipe"] });
+      ffmpeg.stdout.pipe(res);
+      ffmpeg.stderr.on("data", (data) => {
+      });
+      ffmpeg.on("error", (err) => {
+        console.error("[STREAM-CLOUD] ffmpeg spawn error:", err);
+        if (!res.headersSent) {
+          res.status(500).json({ error: "Transcoding failed" });
+        }
+      });
+      req.on("close", () => {
+        ffmpeg.kill("SIGKILL");
+      });
+    } catch (error) {
+      console.error("[STREAM-CLOUD] Error:", error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Failed to stream cloud track" });
+      }
     }
   });
   app2.post("/api/tracks/:id/download", async (req, res) => {
@@ -537,10 +646,54 @@ function registerRoutes(app2) {
       res.status(500).json({ error: "Failed to start download" });
     }
   });
+  async function convertToMp3(inputPath) {
+    return new Promise((resolve) => {
+      const outputPath = inputPath.replace(/\.[^.]+$/, ".mp3");
+      console.log(`[CONVERT] Converting ${inputPath} -> ${outputPath}`);
+      const ffmpeg = spawn2("ffmpeg", [
+        "-y",
+        // overwrite output if exists
+        "-i",
+        inputPath,
+        "-vn",
+        "-acodec",
+        "libmp3lame",
+        "-ab",
+        "192k",
+        "-ar",
+        "44100",
+        "-f",
+        "mp3",
+        outputPath
+      ], { stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = "";
+      ffmpeg.stderr.on("data", (d) => {
+        stderr += d.toString();
+      });
+      ffmpeg.on("close", (code) => {
+        if (code === 0 && fs.existsSync(outputPath)) {
+          try {
+            fs.unlinkSync(inputPath);
+          } catch {
+          }
+          console.log(`[CONVERT] Conversion successful: ${outputPath}`);
+          resolve(outputPath);
+        } else {
+          console.error(`[CONVERT] ffmpeg exited with code ${code}:`, stderr.slice(-500));
+          resolve(null);
+        }
+      });
+      ffmpeg.on("error", (err) => {
+        console.error("[CONVERT] ffmpeg spawn error:", err);
+        resolve(null);
+      });
+    });
+  }
   async function downloadFromDropbox(trackId, dropboxPath) {
     try {
       const dbx = await getDropboxClient();
-      const filename = `${trackId}_${Date.now()}.mp3`;
+      const srcExt = path2.extname(dropboxPath).toLowerCase() || ".mp3";
+      const filename = `${trackId}_${Date.now()}${srcExt}`;
       const filepath = path2.join(musicDir, filename);
       console.log(`Downloading ${dropboxPath} to ${filepath}...`);
       const response = await dbx.filesDownload({ path: dropboxPath });
@@ -550,7 +703,19 @@ function registerRoutes(app2) {
       }
       fs.writeFileSync(filepath, fileBinary);
       console.log(`Download ${trackId} completed successfully.`);
-      const duration = await extractDuration(filepath);
+      const needsConvert = [".wma", ".ogg", ".flac", ".aiff", ".aif"].includes(srcExt);
+      let finalPath = filepath;
+      if (needsConvert) {
+        console.log(`[Download] ${srcExt.toUpperCase()} detected for track ${trackId}, converting to MP3...`);
+        const converted = await convertToMp3(filepath);
+        if (converted) {
+          finalPath = converted;
+          console.log(`[Download] Track ${trackId} converted to MP3: ${finalPath}`);
+        } else {
+          console.warn(`[Download] Conversion failed for track ${trackId}, keeping original ${srcExt} file`);
+        }
+      }
+      const duration = await extractDuration(finalPath);
       if (duration) {
         console.log(`[Download] Extracted duration for track ${trackId}: ${duration}s`);
         const track = db.prepare("SELECT category_id FROM tracks WHERE id = ?").get(trackId);
@@ -565,10 +730,10 @@ function registerRoutes(app2) {
         }
         db.prepare(
           "UPDATE tracks SET status = 'ready', filepath = ?, duration = ?, cue_out = ? WHERE id = ?"
-        ).run(filepath, duration, defaultCueOut, trackId);
+        ).run(finalPath, duration, defaultCueOut, trackId);
       } else {
         console.warn(`[Download] Could not extract duration for track ${trackId}, setting without duration`);
-        db.prepare("UPDATE tracks SET status = 'ready', filepath = ? WHERE id = ?").run(filepath, trackId);
+        db.prepare("UPDATE tracks SET status = 'ready', filepath = ? WHERE id = ?").run(finalPath, trackId);
       }
     } catch (error) {
       console.error(`Download ${trackId} failed:`, error);
@@ -728,37 +893,81 @@ function registerRoutes(app2) {
       if (!track || !track.filepath) {
         return res.status(404).json({ error: "Track not found or not downloaded" });
       }
-      if (!fs.existsSync(track.filepath)) {
-        return res.status(404).json({ error: "Audio file not found on server" });
+      let resolvedPath = track.filepath;
+      if (!fs.existsSync(resolvedPath)) {
+        const filename = path2.basename(track.filepath);
+        const localStoragePath = path2.join(__dirname2, "..", "storage", "music", filename);
+        if (fs.existsSync(localStoragePath)) {
+          resolvedPath = localStoragePath;
+        } else {
+          return res.status(404).json({ error: "Audio file not found on server" });
+        }
       }
-      const stat = fs.statSync(track.filepath);
-      const fileSize = stat.size;
-      const range = req.headers.range;
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "Range");
       res.setHeader("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges, Content-Length");
+      const ext = path2.extname(resolvedPath).toLowerCase();
+      if (ext === ".wma" || ext === ".ogg" || ext === ".flac" || ext === ".aiff" || ext === ".aif") {
+        console.log(`[STREAM] Transcoding ${ext} file to MP3: ${resolvedPath}`);
+        res.setHeader("Content-Type", "audio/mpeg");
+        res.setHeader("Cache-Control", "no-cache");
+        res.writeHead(200);
+        const ffmpeg = spawn2("ffmpeg", [
+          "-i",
+          resolvedPath,
+          "-vn",
+          // no video
+          "-acodec",
+          "libmp3lame",
+          "-ab",
+          "192k",
+          "-ar",
+          "44100",
+          "-f",
+          "mp3",
+          "pipe:1"
+          // output to stdout
+        ], { stdio: ["ignore", "pipe", "pipe"] });
+        ffmpeg.stdout.pipe(res);
+        ffmpeg.stderr.on("data", (data) => {
+        });
+        ffmpeg.on("error", (err) => {
+          console.error("[STREAM] ffmpeg spawn error:", err);
+          if (!res.headersSent) {
+            res.status(500).json({ error: "Transcoding failed" });
+          }
+        });
+        req.on("close", () => {
+          ffmpeg.kill("SIGKILL");
+        });
+        return;
+      }
+      const stat = fs.statSync(resolvedPath);
+      const fileSize = stat.size;
+      const range = req.headers.range;
+      const mimeType = ext === ".mp3" ? "audio/mpeg" : ext === ".aac" || ext === ".m4a" ? "audio/aac" : ext === ".wav" ? "audio/wav" : "audio/mpeg";
       if (range) {
         const parts = range.replace(/bytes=/, "").split("-");
         const start = parseInt(parts[0], 10);
         const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
         const chunksize = end - start + 1;
-        const file = fs.createReadStream(track.filepath, { start, end });
+        const file = fs.createReadStream(resolvedPath, { start, end });
         const head = {
           "Content-Range": `bytes ${start}-${end}/${fileSize}`,
           "Accept-Ranges": "bytes",
           "Content-Length": chunksize,
-          "Content-Type": "audio/mpeg"
+          "Content-Type": mimeType
         };
         res.writeHead(206, head);
         file.pipe(res);
       } else {
         const head = {
           "Content-Length": fileSize,
-          "Content-Type": "audio/mpeg"
+          "Content-Type": mimeType
         };
         res.writeHead(200, head);
-        fs.createReadStream(track.filepath).pipe(res);
+        fs.createReadStream(resolvedPath).pipe(res);
       }
     } catch (error) {
       console.error("Error streaming track:", error);
@@ -1047,12 +1256,23 @@ function registerRoutes(app2) {
     }
   });
   app2.post("/api/clocks", (req, res) => {
-    const { name, color } = req.body;
+    const { name, color, mode } = req.body;
     try {
-      const result = db.prepare("INSERT INTO clocks (name, color) VALUES (?, ?)").run(name, color);
-      res.json({ id: result.lastInsertRowid, name, color });
+      const result = db.prepare("INSERT INTO clocks (name, color, mode) VALUES (?, ?, ?)").run(name, color, mode || "loop");
+      res.json({ id: result.lastInsertRowid, name, color, mode: mode || "loop" });
     } catch (error) {
       res.status(500).json({ error: "Failed to create clock" });
+    }
+  });
+  app2.put("/api/clocks/:id", (req, res) => {
+    const { id } = req.params;
+    const { name, color, mode } = req.body;
+    try {
+      db.prepare("UPDATE clocks SET name = COALESCE(?, name), color = COALESCE(?, color), mode = COALESCE(?, mode) WHERE id = ?").run(name || null, color || null, mode || null, id);
+      const updated = db.prepare("SELECT * FROM clocks WHERE id = ?").get(id);
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to update clock" });
     }
   });
   app2.get("/api/clocks/:id", (req, res) => {
@@ -1061,10 +1281,13 @@ function registerRoutes(app2) {
       const clock = db.prepare("SELECT * FROM clocks WHERE id = ?").get(id);
       if (!clock) return res.status(404).json({ error: "Clock not found" });
       const items = db.prepare(`
-        SELECT ci.*, c.name as category_name, c.color as category_color 
-        FROM clock_items ci 
-        JOIN categories c ON ci.category_id = c.id 
-        WHERE ci.clock_id = ? 
+        SELECT ci.*,
+          c.name as category_name, c.color as category_color,
+          t.title as track_title, t.artist as track_artist, t.duration as track_duration
+        FROM clock_items ci
+        LEFT JOIN categories c ON ci.category_id = c.id
+        LEFT JOIN tracks t ON ci.track_id = t.id
+        WHERE ci.clock_id = ?
         ORDER BY ci.position
       `).all(id);
       res.json({ ...clock, items });
@@ -1075,12 +1298,17 @@ function registerRoutes(app2) {
   app2.post("/api/clocks/:id/items", (req, res) => {
     const { id } = req.params;
     const { items } = req.body;
-    const insert = db.prepare("INSERT INTO clock_items (clock_id, position, category_id, duration_target) VALUES (?, ?, ?, ?)");
+    const insert = db.prepare(
+      "INSERT INTO clock_items (clock_id, position, slot_type, category_id, track_id, duration_target) VALUES (?, ?, ?, ?, ?, ?)"
+    );
     const deleteOld = db.prepare("DELETE FROM clock_items WHERE clock_id = ?");
     const transaction = db.transaction((clockId, newItems) => {
       deleteOld.run(clockId);
       newItems.forEach((item, index) => {
-        insert.run(clockId, index, item.category_id, item.duration_target || null);
+        const slotType = item.slot_type || "category";
+        const categoryId = slotType === "category" ? item.category_id || null : null;
+        const trackId = slotType === "track" ? item.track_id || null : null;
+        insert.run(clockId, index, slotType, categoryId, trackId, item.duration_target || null);
       });
     });
     try {
@@ -1153,10 +1381,16 @@ function registerRoutes(app2) {
     const { clock_id } = req.body;
     try {
       const items = db.prepare(`
-        SELECT ci.*, c.name as category_name 
-        FROM clock_items ci 
-        JOIN categories c ON ci.category_id = c.id 
-        WHERE ci.clock_id = ? 
+        SELECT ci.*,
+               c.name as category_name,
+               t.title as pinned_title,
+               t.artist as pinned_artist,
+               t.duration as pinned_duration,
+               t.status as pinned_status
+        FROM clock_items ci
+        LEFT JOIN categories c ON ci.category_id = c.id
+        LEFT JOIN tracks t ON ci.track_id = t.id
+        WHERE ci.clock_id = ?
         ORDER BY ci.position
       `).all(clock_id);
       if (items.length === 0) {
@@ -1165,32 +1399,61 @@ function registerRoutes(app2) {
       const log = [];
       let currentTime = 0;
       for (const item of items) {
-        const track = db.prepare(`
-          SELECT * FROM tracks 
-          WHERE (category_id = ? OR subcategory_id = ?) 
-          AND status = 'ready'
-          ORDER BY RANDOM() 
-          LIMIT 1
-        `).get(item.category_id, item.category_id);
-        if (track) {
-          log.push({
-            position: item.position,
-            time_offset: currentTime,
-            track: {
-              title: track.title,
-              artist: track.artist,
-              duration: track.duration,
-              category: item.category_name
-            }
-          });
-          currentTime += track.duration || 180;
+        const slotType = item.slot_type || "category";
+        if (slotType === "track") {
+          if (item.pinned_title) {
+            log.push({
+              position: item.position,
+              time_offset: currentTime,
+              slot_type: "track",
+              track: {
+                title: item.pinned_title,
+                artist: item.pinned_artist || "Unknown Artist",
+                duration: item.pinned_duration,
+                category: "\u{1F4CC} Pinned"
+              }
+            });
+            currentTime += item.pinned_duration || 180;
+          } else {
+            log.push({
+              position: item.position,
+              time_offset: currentTime,
+              slot_type: "track",
+              track: null,
+              message: "Pinned track not found (may have been deleted)"
+            });
+          }
         } else {
-          log.push({
-            position: item.position,
-            time_offset: currentTime,
-            track: null,
-            message: `No track found for category: ${item.category_name}`
-          });
+          const track = db.prepare(`
+            SELECT * FROM tracks
+            WHERE (category_id = ? OR subcategory_id = ?)
+            AND status = 'ready'
+            ORDER BY RANDOM()
+            LIMIT 1
+          `).get(item.category_id, item.category_id);
+          if (track) {
+            log.push({
+              position: item.position,
+              time_offset: currentTime,
+              slot_type: "category",
+              track: {
+                title: track.title,
+                artist: track.artist,
+                duration: track.duration,
+                category: item.category_name || "Unknown Category"
+              }
+            });
+            currentTime += track.duration || 180;
+          } else {
+            log.push({
+              position: item.position,
+              time_offset: currentTime,
+              slot_type: "category",
+              track: null,
+              message: `No ready track found for category: ${item.category_name || "(unknown)"}`
+            });
+            currentTime += 180;
+          }
         }
       }
       res.json({ log });
@@ -1201,17 +1464,46 @@ function registerRoutes(app2) {
   });
   app2.get("/api/stream/next-track", (req, res) => {
     try {
-      const clock = db.prepare("SELECT id FROM clocks ORDER BY id LIMIT 1").get();
+      let state = db.prepare("SELECT * FROM playback_state WHERE id = 1").get();
+      const now = /* @__PURE__ */ new Date();
+      const dayOfWeek = now.getDay();
+      const hour = now.getHours();
+      const scheduledEntry = db.prepare(
+        "SELECT sg.clock_id FROM schedule_grid sg WHERE sg.day_of_week = ? AND sg.hour = ?"
+      ).get(dayOfWeek, hour);
+      let activeClockId = null;
+      if (state && state.current_clock_id) {
+        const runningClock = db.prepare("SELECT * FROM clocks WHERE id = ?").get(state.current_clock_id);
+        if (runningClock && runningClock.mode === "sequential") {
+          const totalItems = db.prepare("SELECT COUNT(*) as cnt FROM clock_items WHERE clock_id = ?").get(state.current_clock_id).cnt;
+          if (state.current_position < totalItems) {
+            activeClockId = state.current_clock_id;
+          }
+        }
+      }
+      if (!activeClockId) {
+        if (scheduledEntry) {
+          activeClockId = scheduledEntry.clock_id;
+        } else {
+          const fallback = db.prepare("SELECT id FROM clocks ORDER BY id LIMIT 1").get();
+          if (!fallback) return res.json({ track: null, error: "No clock configured" });
+          activeClockId = fallback.id;
+        }
+      }
+      const clock = db.prepare("SELECT * FROM clocks WHERE id = ?").get(activeClockId);
       if (!clock) return res.json({ track: null, error: "No clock configured" });
       const clockItems = db.prepare(`
-        SELECT ci.*, c.name as category_name 
-        FROM clock_items ci 
-        JOIN categories c ON ci.category_id = c.id 
-        WHERE ci.clock_id = ? 
+        SELECT ci.*, c.name as category_name,
+          t.title as track_title, t.artist as track_artist,
+          t.filepath as track_filepath, t.duration as track_duration,
+          t.cue_in as track_cue_in, t.cue_out as track_cue_out
+        FROM clock_items ci
+        LEFT JOIN categories c ON ci.category_id = c.id
+        LEFT JOIN tracks t ON ci.track_id = t.id
+        WHERE ci.clock_id = ?
         ORDER BY ci.position
       `).all(clock.id);
       if (clockItems.length === 0) return res.json({ track: null, error: "No items in clock" });
-      let state = db.prepare("SELECT * FROM playback_state WHERE id = 1").get();
       if (!state) {
         db.prepare("INSERT INTO playback_state (id, current_clock_id, current_position) VALUES (1, ?, 0)").run(clock.id);
         state = { id: 1, current_clock_id: clock.id, current_position: 0 };
@@ -1221,10 +1513,31 @@ function registerRoutes(app2) {
         state.current_position = 0;
         state.current_clock_id = clock.id;
       }
-      const currentPosition = state.current_position % clockItems.length;
+      let currentPosition;
+      let nextPosition;
+      if (clock.mode === "sequential") {
+        currentPosition = state.current_position;
+        nextPosition = state.current_position + 1;
+      } else {
+        currentPosition = state.current_position % clockItems.length;
+        nextPosition = (state.current_position + 1) % clockItems.length;
+      }
       const currentItem = clockItems[currentPosition];
-      const nextPosition = (state.current_position + 1) % clockItems.length;
+      if (!currentItem) return res.json({ track: null, error: "Clock position out of bounds" });
       db.prepare("UPDATE playback_state SET current_position = ?, last_updated = datetime('now') WHERE id = 1").run(nextPosition);
+      if (currentItem.slot_type === "track" && currentItem.track_id) {
+        const pinnedTrack = db.prepare("SELECT * FROM tracks WHERE id = ?").get(currentItem.track_id);
+        if (!pinnedTrack) return res.json({ track: null, error: "Pinned track not found" });
+        db.prepare(`
+          INSERT INTO play_history (track_id, title, artist, category_id, played_at)
+          VALUES (?, ?, ?, ?, datetime('now'))
+        `).run(pinnedTrack.id, pinnedTrack.title, pinnedTrack.artist, pinnedTrack.category_id);
+        let calculatedCueOut2 = pinnedTrack.cue_out;
+        if (!calculatedCueOut2 && pinnedTrack.duration && pinnedTrack.duration > 3) {
+          calculatedCueOut2 = pinnedTrack.duration - 0.5;
+        }
+        return res.json({ track: { ...pinnedTrack, cue_out: calculatedCueOut2 }, clock_position: currentPosition, category: "Pinned Track" });
+      }
       const rule = db.prepare("SELECT * FROM rules WHERE category_id = ?").get(currentItem.category_id);
       const minSeparationMinutes = rule?.min_separation || 120;
       const recentArtists = db.prepare(`
@@ -1249,6 +1562,7 @@ function registerRoutes(app2) {
         WHERE (category_id = ? OR subcategory_id = ?) 
         AND filepath IS NOT NULL
         AND status = 'ready'
+        AND filepath NOT LIKE '%.wma'
       `;
       const params = [currentItem.category_id, currentItem.category_id];
       if (recentTrackIds.length > 0) {
@@ -1272,6 +1586,7 @@ function registerRoutes(app2) {
           WHERE (category_id = ? OR subcategory_id = ?) 
           AND filepath IS NOT NULL
           AND status = 'ready'
+          AND filepath NOT LIKE '%.wma'
         `;
         const fallbackParams = [currentItem.category_id, currentItem.category_id];
         if (recentTrackIds.length > 0) {
@@ -1296,6 +1611,7 @@ function registerRoutes(app2) {
           WHERE (t.category_id = ? OR t.subcategory_id = ?)
           AND t.filepath IS NOT NULL
           AND t.status = 'ready'
+          AND t.filepath NOT LIKE '%.wma'
           ORDER BY ph.last_played ASC NULLS FIRST
           LIMIT 1
         `).get(currentItem.category_id, currentItem.category_id);
@@ -1384,6 +1700,63 @@ function registerRoutes(app2) {
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
+  });
+  app2.get("/api/stream/now", (req, res) => {
+    try {
+      const rows = db.prepare(`
+        SELECT title, artist, played_at
+        FROM play_history
+        ORDER BY played_at DESC
+        LIMIT 4
+      `).all();
+      const [current, ...history] = rows;
+      res.set("Cache-Control", "no-store");
+      res.json({
+        current: current ? { title: current.title, artist: current.artist } : null,
+        next: null,
+        recent: history.slice(0, 3).map((r) => ({ title: r.title, artist: r.artist }))
+      });
+    } catch (err) {
+      console.error("[/api/stream/now]", err);
+      res.status(500).json({ error: "unavailable" });
+    }
+  });
+  app2.post("/api/admin/convert-wma", async (req, res) => {
+    const { secret } = req.body || {};
+    if (secret !== "novastream-setup-2026") {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const wmaTracksList = db.prepare(
+      "SELECT id, filepath FROM tracks WHERE filepath IS NOT NULL AND filepath LIKE '%.wma'"
+    ).all();
+    res.json({ message: `Starting background conversion of ${wmaTracksList.length} WMA files`, count: wmaTracksList.length });
+    (async () => {
+      let converted = 0, failed = 0, skipped = 0;
+      for (const t of wmaTracksList) {
+        if (!fs.existsSync(t.filepath)) {
+          console.log(`[MIGRATE] File not found, skipping track ${t.id}: ${t.filepath}`);
+          skipped++;
+          continue;
+        }
+        console.log(`[MIGRATE] Converting track ${t.id}: ${t.filepath}`);
+        const mp3Path = await convertToMp3(t.filepath);
+        if (mp3Path) {
+          const dur = await extractDuration(mp3Path);
+          if (dur) {
+            db.prepare("UPDATE tracks SET filepath = ?, duration = ? WHERE id = ?").run(mp3Path, dur, t.id);
+          } else {
+            db.prepare("UPDATE tracks SET filepath = ? WHERE id = ?").run(mp3Path, t.id);
+          }
+          console.log(`[MIGRATE] Track ${t.id} converted OK -> ${mp3Path}`);
+          converted++;
+        } else {
+          console.warn(`[MIGRATE] Conversion failed for track ${t.id}`);
+          failed++;
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      console.log(`[MIGRATE] Done: ${converted} converted, ${failed} failed, ${skipped} skipped`);
+    })();
   });
   const httpServer = createServer(app2);
   return httpServer;
