@@ -9,17 +9,19 @@ settings.log.level := 3
 
 # Function to get next track from API
 def get_next_track() =
-  # Write JSON to temp file, then parse it
-  ignore(process.run("curl -s http://localhost:3001/api/stream/next-track > /tmp/next_track.json"))
+  # Fetch track data once and extract all fields in one synchronous call
+  # Format: filepath|cue_in|cue_out|segue_duration
+  track_data = string.trim(process.read("curl -s --max-time 5 http://localhost:3001/api/stream/next-track | jq -r 'if .track.filepath then (.track.filepath + \"|\" + (.track.cue_in // 0 | tostring) + \"|\" + (.track.cue_out // \"\" | tostring) + \"|\" + (.track.segue_duration // 3 | tostring)) else empty end'"))
   
-  # Extract filepath using jq from file
-  filepath = string.trim(process.read("jq -r '.track.filepath // empty' /tmp/next_track.json"))
-  
-  if filepath != "" then
-    # Extract cue points and metadata
-    cue_in_str = string.trim(process.read("jq -r '.track.cue_in // \"0\"' /tmp/next_track.json"))
-    cue_out_str = string.trim(process.read("jq -r '.track.cue_out // empty' /tmp/next_track.json"))
-    segue_str = string.trim(process.read("jq -r '.track.segue_duration // \"3\"' /tmp/next_track.json"))
+  if track_data != "" then
+    # Split the pipe-delimited data
+    parts = string.split(separator="|", track_data)
+    filepath = list.nth(parts, 0)
+    cue_in_str = list.nth(parts, 1)
+    cue_out_str = list.nth(parts, 2)
+    segue_str = list.nth(parts, 3)
+    
+    print("Got track: #{filepath}")
     
     # Log to play history
     ignore(process.run("curl -s -X POST -H 'Content-Type: application/json' -d '{\"filepath\":\"" ^ filepath ^ "\"}' http://localhost:3001/api/stream/now-playing"))
@@ -28,22 +30,19 @@ def get_next_track() =
     ann_parts = ref([])
     
     # Add cue_in if set and not 0
-    if cue_in_str != "" and cue_in_str != "null" and cue_in_str != "0" then
+    if cue_in_str != "" and cue_in_str != "null" and cue_in_str != "0" and cue_in_str != "0.0" then
       ann_parts := list.append(ann_parts(), ["liq_cue_in=\"" ^ cue_in_str ^ "\""])
     end
     
     # Add cue_out if set
-    if cue_out_str != "" and cue_out_str != "null" then
+    if cue_out_str != "" and cue_out_str != "null" and cue_out_str != "null" then
       ann_parts := list.append(ann_parts(), ["liq_cue_out=\"" ^ cue_out_str ^ "\""])
     end
     
-    # CRITICAL FIX: Use liq_fade_out and liq_fade_in instead of liq_segue_duration
-    # liq_fade_out = segue_duration (how long to fade out the outgoing track)
-    # liq_fade_in = 0 (tracks start COLD at full volume)
+    # Use liq_fade_out for segue duration, liq_fade_in=0 (tracks start cold)
     if segue_str != "" and segue_str != "null" then
       ann_parts := list.append(ann_parts(), ["liq_fade_out=\"" ^ segue_str ^ "\""])
     end
-    # Always set fade_in to 0 - tracks start cold
     ann_parts := list.append(ann_parts(), ["liq_fade_in=\"0\""])
     
     # Build URI with annotations
@@ -65,11 +64,7 @@ end
 # Create dynamic source
 radio = request.dynamic(id="main", get_next_track)
 
-# Cue points are automatically respected by the request system via annotations
-# No need for cue_cut operator in this version
-
-# Apply crossfade - it will automatically use liq_fade_in and liq_fade_out from each track's metadata
-# No need to specify duration, fade_in, fade_out here - they come from metadata now!
+# Apply crossfade using liq_fade_in and liq_fade_out from track metadata
 radio = crossfade(radio)
 
 # Audio processing for consistent volume
