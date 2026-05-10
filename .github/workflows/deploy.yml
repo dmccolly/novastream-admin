@@ -8,37 +8,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Backup current dist on server
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 30s
-          script: |
-            cp /root/novastream/dist/index.js /root/novastream/dist/index.js.bak
-            cp /root/novastream-admin/dist/index.js /root/novastream-admin/dist/index.js.bak
-            echo "Backups done"
-
-      - name: Upload new dist to novastream
+      - name: Upload dist to server tmp
         uses: appleboy/scp-action@v0.1.7
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           source: dist/index.js
-          target: /root/novastream/dist/
+          target: /tmp/novastream_deploy/
 
-      - name: Upload new dist to novastream-admin
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          source: dist/index.js
-          target: /root/novastream-admin/dist/
-
-      - name: Restart services and fix WMA
+      - name: Deploy dist and fix everything
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -46,34 +25,41 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 60s
           script: |
-            echo "=== Verify WMA fix in deployed dist ==="
+            echo "=== Copy dist to both apps ==="
+            cp /tmp/novastream_deploy/dist/index.js /root/novastream/dist/index.js
+            cp /tmp/novastream_deploy/dist/index.js /root/novastream-admin/dist/index.js
+
+            echo "=== Verify WMA fix ==="
             grep -c "NOT LIKE" /root/novastream/dist/index.js
 
-            echo "=== Restarting novastream apps ==="
+            echo "=== Restart novastream ==="
             pm2 restart novastream
-            pm2 restart novastream-admin
-            sleep 5
+            sleep 3
 
-            echo "=== Verifying apps are running ==="
+            echo "=== Restart novastream-admin ==="
+            pm2 restart novastream-admin
+            sleep 3
+
+            echo "=== PM2 status ==="
             pm2 list | grep -E "novastream|online|stopped"
 
-            echo "=== Test next-track returns MP3 (not WMA) ==="
+            echo "=== Test next-track returns MP3 ==="
             curl -s --max-time 5 http://localhost:3001/api/stream/next-track | grep -o '"filepath":"[^"]*"' | head -1
 
-            echo "=== Trigger WMA to MP3 conversion ==="
-            curl -s -X POST --max-time 10 http://localhost:3001/api/admin/convert-wma
+            echo "=== Trigger WMA conversion on port 3006 ==="
+            curl -s -X POST --max-time 10 http://localhost:3006/api/admin/convert-wma
 
-            echo "=== Restart Liquidsoap to unstick from WMA file ==="
+            echo "=== Restart Liquidsoap ==="
             pkill -f liquidsoap || true
-            sleep 5
-            ps aux | grep liquidsoap | grep -v grep | head -3
+            sleep 3
+            ps aux | grep liquidsoap | grep -v grep | head -2
 
-            echo "=== Wait for Liquidsoap watchdog to restart it ==="
+            echo "=== Wait for watchdog to restart Liquidsoap ==="
             sleep 15
-            ps aux | grep liquidsoap | grep -v grep | head -3
+            ps aux | grep liquidsoap | grep -v grep | head -2
 
-            echo "=== Check play_history updated ==="
+            echo "=== play_history recent ==="
             sqlite3 /root/novastream/radio.db "SELECT title, artist, played_at FROM play_history ORDER BY played_at DESC LIMIT 5;"
 
-            echo "=== Check Icecast stream title ==="
+            echo "=== Icecast title ==="
             curl -s --max-time 5 http://localhost:8000/status-json.xsl | grep -o '"title":"[^"]*"' | head -1
