@@ -1,73 +1,96 @@
-name: Deploy to DigitalOcean
+name: Backup - Collect Server Configs
+
 on:
   push:
     branches: [main]
+
 jobs:
-  deploy:
+  collect:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Upload fixed scripts
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          source: "novastream.liq,get_next_track.sh"
-          target: /root/
-          strip_components: 0
-
-      - name: Restart Liquidsoap with fixed scripts
+      - name: Collect nginx, icecast, env, scripts
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 20s
+          port: 22
+          command_timeout: 55s
           script: |
-            chmod +x /root/get_next_track.sh
+            echo "=== NGINX_NOVASTREAM ==="
+            cat /etc/nginx/sites-enabled/novastream
+            echo "=== NGINX_DANIELMCCOLLY ==="
+            cat /etc/nginx/sites-enabled/danielmccolly 2>/dev/null || echo "NOT FOUND"
+            echo "=== NGINX_STREAMOFDAN ==="
+            cat /etc/nginx/sites-enabled/streamofdan 2>/dev/null || echo "NOT FOUND"
+            echo "=== NGINX_DEFAULT ==="
+            cat /etc/nginx/sites-enabled/default 2>/dev/null || echo "NOT FOUND"
+            echo "=== ICECAST_XML ==="
+            cat /etc/icecast2/icecast.xml
+            echo "=== LIQUIDSOAP_SCRIPT ==="
+            cat /root/novastream.liq
+            echo "=== GET_NEXT_TRACK ==="
+            cat /root/get_next_track.sh
+            echo "=== WATCHDOG ==="
+            cat /root/liquidsoap_watchdog.sh 2>/dev/null || echo "NOT FOUND"
+            echo "=== ENV_NOVASTREAM ==="
+            cat /root/novastream/.env 2>/dev/null || echo "NOT FOUND"
+            echo "=== ENV_NOVASTREAM_ADMIN ==="
+            cat /root/novastream-admin/.env 2>/dev/null || echo "NOT FOUND"
+            echo "=== ENV_NOVASTREAM_BACKEND ==="
+            cat /root/novastream-backend/.env 2>/dev/null || echo "NOT FOUND"
+            echo "=== PM2_LIST ==="
+            pm2 list
+            echo "=== PM2_DUMP ==="
+            cat /root/.pm2/dump.pm2 2>/dev/null || echo "NOT FOUND"
+            echo "=== CRONTAB ==="
+            crontab -l 2>/dev/null || echo "none"
+            echo "=== SYSTEMD_SERVICES ==="
+            systemctl list-units --type=service --state=running 2>/dev/null | grep -v "@"
+            echo "=== OPEN_PORTS ==="
+            ss -tlnp
+            echo "=== SSL_CERTS ==="
+            ls /etc/letsencrypt/live/ 2>/dev/null
+            echo "=== PACKAGES ==="
+            dpkg -l | grep -E "nginx|icecast|liquidsoap|nodejs|npm|ffmpeg|jq|sqlite" | awk '{print $2, $3}'
+            node --version 2>/dev/null
+            liquidsoap --version 2>/dev/null
+            echo "=== DIR_STRUCTURE ==="
+            find /root/novastream /root/novastream-admin /root/novastream-backend -maxdepth 4 -not -path "*/node_modules/*" -not -path "*/storage/music/*" -not -path "*/.git/*" -not -path "*/storage/uploads/*" 2>/dev/null | sort
 
-            echo "=== Test get_next_track.sh ==="
-            /root/get_next_track.sh
-
-            echo "=== Verify delimiter in liq script ==="
-            grep "separator" /root/novastream.liq
-
-            echo "=== Write detached restart ==="
-            cat > /tmp/restart_liq5.sh << 'SCRIPT'
-            #!/bin/bash
-            pkill -f liquidsoap_watchdog 2>/dev/null
-            pkill -9 -f liquidsoap 2>/dev/null
-            sleep 3
-            nohup /usr/bin/liquidsoap /root/novastream.liq >> /var/log/liquidsoap.log 2>&1 &
-            LIQ_PID=$!
-            sleep 10
-            nohup bash /root/liquidsoap_watchdog.sh >> /var/log/liquidsoap_watchdog.log 2>&1 &
-            echo "restart5 done at $(date), liq PID=$LIQ_PID" > /tmp/liq_restart5_status.txt
-            SCRIPT
-            chmod +x /tmp/restart_liq5.sh
-            setsid nohup bash /tmp/restart_liq5.sh > /tmp/restart_liq5.log 2>&1 &
-            echo "Restart launched"
-
-      - name: Verify audio
+      - name: Collect DB schemas and settings
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 35s
+          port: 22
+          command_timeout: 55s
           script: |
-            sleep 25
-
-            echo "=== Restart status ==="
-            cat /tmp/liq_restart5_status.txt 2>/dev/null || echo "pending"
-
-            echo "=== Liquidsoap log last 10 ==="
-            tail -10 /var/log/liquidsoap.log
-
-            echo "=== Icecast mount ==="
-            curl -s --max-time 3 http://localhost:8000/status-json.xsl | grep -o '"mount":"[^"]*"' || echo "no mount"
-
-            echo "=== Stream bytes ==="
-            curl -s --max-time 3 http://localhost:8000/stream | head -c 8 | xxd
+            echo "=== DB_NOVASTREAM_SCHEMA ==="
+            sqlite3 /root/novastream/radio.db ".schema" 2>/dev/null || echo "NOT FOUND"
+            echo "=== DB_NOVASTREAM_COUNTS ==="
+            sqlite3 /root/novastream/radio.db "SELECT 'tracks', COUNT(*) FROM tracks;" 2>/dev/null
+            sqlite3 /root/novastream/radio.db "SELECT 'play_history', COUNT(*) FROM play_history;" 2>/dev/null
+            sqlite3 /root/novastream/radio.db "SELECT 'settings', COUNT(*) FROM settings;" 2>/dev/null
+            echo "=== DB_NOVASTREAM_SETTINGS ==="
+            sqlite3 /root/novastream/radio.db "SELECT * FROM settings;" 2>/dev/null
+            echo "=== DB_NOVASTREAM_SAMPLE_TRACKS ==="
+            sqlite3 /root/novastream/radio.db "SELECT id, title, artist, filepath, status, duration, cue_in, cue_out, segue_point FROM tracks WHERE status='ready' LIMIT 10;" 2>/dev/null
+            echo "=== DB_BACKEND_SCHEMA ==="
+            sqlite3 /root/novastream-backend/radio.db ".schema" 2>/dev/null || echo "NOT FOUND"
+            echo "=== DB_ADMIN_SCHEMA ==="
+            sqlite3 /root/novastream-admin/radio.db ".schema" 2>/dev/null || echo "NOT FOUND"
+            echo "=== DB_ADMIN_TABLES ==="
+            sqlite3 /root/novastream-admin/radio.db ".tables" 2>/dev/null
+            echo "=== DB_ADMIN_SETTINGS ==="
+            sqlite3 /root/novastream-admin/radio.db "SELECT * FROM settings;" 2>/dev/null
+            echo "=== NOVASTREAM_PKG ==="
+            cat /root/novastream/package.json 2>/dev/null || echo "NOT FOUND"
+            echo "=== NOVASTREAM_ADMIN_PKG ==="
+            cat /root/novastream-admin/package.json 2>/dev/null || echo "NOT FOUND"
+            echo "=== NOVASTREAM_BACKEND_PKG ==="
+            cat /root/novastream-backend/package.json 2>/dev/null || echo "NOT FOUND"
