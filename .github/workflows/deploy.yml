@@ -8,58 +8,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Upload dist to server tmp
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          source: dist/index.js
-          target: /tmp/novastream_deploy/
-
-      - name: Deploy dist and fix everything
+      - name: Diagnose Liquidsoap silence
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 60s
+          command_timeout: 45s
           script: |
-            echo "=== Copy dist to both apps ==="
-            cp /tmp/novastream_deploy/dist/index.js /root/novastream/dist/index.js
-            cp /tmp/novastream_deploy/dist/index.js /root/novastream-admin/dist/index.js
+            echo "=== Liquidsoap process ==="
+            ps aux | grep liquidsoap | grep -v grep
 
-            echo "=== Verify WMA fix ==="
-            grep -c "NOT LIKE" /root/novastream/dist/index.js
+            echo "=== Liquidsoap last 50 log lines ==="
+            tail -50 /var/log/liquidsoap.log 2>/dev/null || tail -50 /root/novastream/liquidsoap.log 2>/dev/null || find /var/log /root -name "*.log" 2>/dev/null | xargs grep -l liquidsoap 2>/dev/null | head -3
 
-            echo "=== Restart novastream ==="
-            pm2 restart novastream
-            sleep 3
+            echo "=== PM2 novastream logs last 20 ==="
+            pm2 logs novastream --lines 20 --nostream 2>/dev/null | tail -25
 
-            echo "=== Restart novastream-admin ==="
-            pm2 restart novastream-admin
-            sleep 3
-
-            echo "=== PM2 status ==="
-            pm2 list | grep -E "novastream|online|stopped"
-
-            echo "=== Test next-track returns MP3 ==="
+            echo "=== Test next-track ==="
             curl -s --max-time 5 http://localhost:3001/api/stream/next-track | grep -o '"filepath":"[^"]*"' | head -1
 
-            echo "=== Trigger WMA conversion on port 3006 ==="
-            curl -s -X POST --max-time 10 http://localhost:3006/api/admin/convert-wma
-
-            echo "=== Restart Liquidsoap ==="
-            pkill -f liquidsoap || true
-            sleep 3
-            ps aux | grep liquidsoap | grep -v grep | head -2
-
-            echo "=== Wait for watchdog to restart Liquidsoap ==="
-            sleep 15
-            ps aux | grep liquidsoap | grep -v grep | head -2
-
-            echo "=== play_history recent ==="
-            sqlite3 /root/novastream/radio.db "SELECT title, artist, played_at FROM play_history ORDER BY played_at DESC LIMIT 5;"
-
-            echo "=== Icecast title ==="
-            curl -s --max-time 5 http://localhost:8000/status-json.xsl | grep -o '"title":"[^"]*"' | head -1
+            echo "=== Test that file exists ==="
+            FILEPATH=$(curl -s --max-time 5 http://localhost:3001/api/stream/next-track | grep -o '"filepath":"[^"]*"' | sed 's/"filepath":"//;s/"//')
+            echo "filepath: $FILEPATH"
+            ls -la "$FILEPATH" 2>/dev/null || echo "FILE NOT FOUND"
+            file "$FILEPATH" 2>/dev/null || echo "cannot file"
