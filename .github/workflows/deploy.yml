@@ -7,53 +7,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Diagnose and fix all issues
+      - name: Test runner
+        run: echo "Runner is working"
+      - name: Fix via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 60s
+          command_timeout: 30s
           script: |
-            echo "=== PM2 status ==="
-            pm2 list 2>&1 | grep -E "name|novastream|online|stopped|errored"
-
-            echo "=== Liquidsoap process ==="
-            ps aux | grep liquidsoap | grep -v grep | head -3
-
-            echo "=== Liquidsoap log (last 30 lines) ==="
-            journalctl -u liquidsoap --no-pager -n 30 2>/dev/null || echo "no systemd liquidsoap"
-            cat /root/.pm2/logs/liquidsoap-out.log 2>/dev/null | tail -30 || echo "no pm2 liquidsoap log"
-
-            echo "=== Recent play_history ==="
-            sqlite3 /root/novastream/radio.db "SELECT title, artist, played_at FROM play_history ORDER BY played_at DESC LIMIT 3;"
-
-            echo "=== Test next-track ==="
-            curl -s --max-time 5 http://localhost:3001/api/stream/next-track 2>&1 | head -200
-
-            echo "=== Check Icecast ==="
-            curl -s --max-time 5 http://localhost:8000/status-json.xsl 2>&1 | python3 -c "
-import json,sys
-try:
-    d=json.load(sys.stdin)
-    src=d.get('icestats',{}).get('source',{})
-    if isinstance(src,list): src=src[0]
-    print('playing:', src.get('title','?'))
-    print('listeners:', src.get('listeners','?'))
-except Exception as e:
-    print('Error:', e)
-" 2>&1
-
-            echo "=== Check if Liquidsoap is stuck ==="
-            # Find the liquidsoap PID and check its open files
-            LIQ_PID=$(ps aux | grep liquidsoap | grep -v grep | awk '{print $2}' | head -1)
-            echo "Liquidsoap PID: $LIQ_PID"
-            if [ -n "$LIQ_PID" ]; then
-              ls -la /proc/$LIQ_PID/fd/ 2>/dev/null | grep -i "mp3\|wav\|music" | head -5
-              cat /proc/$LIQ_PID/cmdline 2>/dev/null | tr '\0' ' '
-              echo ""
-            fi
-
-            echo "=== Find liquidsoap log file ==="
-            find /root /tmp /var/log -name "*.log" 2>/dev/null | xargs grep -l -i "liquidsoap\|Playing\|next_track" 2>/dev/null | head -5
+            echo "SSH connected"
+            pm2 list 2>&1 | head -5
