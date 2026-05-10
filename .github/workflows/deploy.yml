@@ -8,28 +8,50 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Diagnose Liquidsoap silence
+      - name: Restart Liquidsoap and verify audio
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 45s
+          command_timeout: 60s
           script: |
-            echo "=== Liquidsoap process ==="
-            ps aux | grep liquidsoap | grep -v grep
-
-            echo "=== Liquidsoap last 50 log lines ==="
-            tail -50 /var/log/liquidsoap.log 2>/dev/null || tail -50 /root/novastream/liquidsoap.log 2>/dev/null || find /var/log /root -name "*.log" 2>/dev/null | xargs grep -l liquidsoap 2>/dev/null | head -3
-
-            echo "=== PM2 novastream logs last 20 ==="
-            pm2 logs novastream --lines 20 --nostream 2>/dev/null | tail -25
-
-            echo "=== Test next-track ==="
+            echo "=== Verify next-track API works before restart ==="
             curl -s --max-time 5 http://localhost:3001/api/stream/next-track | grep -o '"filepath":"[^"]*"' | head -1
 
-            echo "=== Test that file exists ==="
-            FILEPATH=$(curl -s --max-time 5 http://localhost:3001/api/stream/next-track | grep -o '"filepath":"[^"]*"' | sed 's/"filepath":"//;s/"//')
-            echo "filepath: $FILEPATH"
-            ls -la "$FILEPATH" 2>/dev/null || echo "FILE NOT FOUND"
-            file "$FILEPATH" 2>/dev/null || echo "cannot file"
+            echo "=== Kill Liquidsoap and watchdog ==="
+            pkill -f liquidsoap_watchdog.sh || true
+            pkill -f liquidsoap || true
+            sleep 5
+
+            echo "=== Confirm Liquidsoap stopped ==="
+            ps aux | grep liquidsoap | grep -v grep || echo "Liquidsoap stopped OK"
+
+            echo "=== Start Liquidsoap directly ==="
+            nohup liquidsoap /root/novastream.liq >> /var/log/liquidsoap.log 2>&1 &
+            LIQ_PID=$!
+            echo "Liquidsoap PID: $LIQ_PID"
+            sleep 8
+
+            echo "=== Start watchdog ==="
+            nohup bash /root/liquidsoap_watchdog.sh >> /var/log/liquidsoap_watchdog.log 2>&1 &
+            sleep 3
+
+            echo "=== Liquidsoap process check ==="
+            ps aux | grep liquidsoap | grep -v grep
+
+            echo "=== Liquidsoap new log lines ==="
+            tail -20 /var/log/liquidsoap.log
+
+            echo "=== Wait for stream to start ==="
+            sleep 15
+
+            echo "=== Check Icecast stream ==="
+            curl -s --max-time 5 http://localhost:8000/status-json.xsl | grep -o '"title":"[^"]*"' | head -1
+
+            echo "=== Sample stream bytes ==="
+            BYTES=$(curl -s --max-time 4 http://localhost:8000/stream | xxd | head -2)
+            echo "$BYTES"
+
+            echo "=== play_history recent ==="
+            sqlite3 /root/novastream/radio.db "SELECT title, artist, played_at FROM play_history ORDER BY played_at DESC LIMIT 3;"
