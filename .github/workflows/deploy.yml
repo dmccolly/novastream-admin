@@ -1,16 +1,16 @@
-name: Check and Restart Liquidsoap
+name: Debug Liquidsoap Script
 
 on:
   push:
     branches: [main]
 
 jobs:
-  check-restart:
+  debug:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
-      - name: Check Liquidsoap and restart if needed
+      - name: Check Liquidsoap version and test script
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
@@ -18,26 +18,20 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           command_timeout: 40s
           script: |
-            echo "=== Liquidsoap processes ==="
-            pgrep -a liquidsoap || echo "NOT RUNNING"
+            echo "=== Liquidsoap version ==="
+            /usr/bin/liquidsoap --version 2>&1 | head -3
 
-            echo "=== Icecast sources ==="
-            curl -s http://localhost:8000/status-json.xsl | python3 -c "import json,sys; d=json.load(sys.stdin); src=d.get('icestats',{}).get('source'); print('Source:', src.get('title') if src and not isinstance(src,list) else (src[0].get('title') if src else 'NONE'))" 2>/dev/null || echo "Icecast check failed"
+            echo "=== Check script syntax ==="
+            /usr/bin/liquidsoap --check /root/novastream.liq 2>&1 | head -30
 
-            echo "=== Last 20 lines of Liquidsoap log ==="
-            tail -20 /var/log/liquidsoap.log 2>/dev/null || echo "No log file"
+            echo "=== Liquidsoap stderr log (last 30 lines) ==="
+            tail -30 /var/log/liquidsoap.log 2>/dev/null
 
-            echo "=== Verify on_track in deployed script ==="
-            grep -c "on_track" /root/novastream.liq
+            echo "=== Current Liquidsoap processes ==="
+            pgrep -a liquidsoap 2>/dev/null || echo "NOT RUNNING"
 
-            echo "=== Starting Liquidsoap if not running ==="
-            if ! pgrep -f liquidsoap > /dev/null; then
-              /usr/bin/liquidsoap /root/novastream.liq >> /var/log/liquidsoap.log 2>&1 &
-              echo "Started Liquidsoap PID: $!"
-            else
-              echo "Liquidsoap already running"
-            fi
+            echo "=== Check if source.on_track exists ==="
+            /usr/bin/liquidsoap 'source.on_track' 2>&1 | head -5
 
-            sleep 8
-            echo "=== Icecast sources after restart ==="
-            curl -s http://localhost:8000/status-json.xsl | python3 -c "import json,sys; d=json.load(sys.stdin); src=d.get('icestats',{}).get('source'); print('Source:', src.get('title') if src and not isinstance(src,list) else (src[0].get('title') if src else 'NONE'))" 2>/dev/null || echo "check failed"
+            echo "=== Test get_next_track.sh ==="
+            timeout 5 /root/get_next_track.sh 2>&1 || echo "Script failed or timed out"
