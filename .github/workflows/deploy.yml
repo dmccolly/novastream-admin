@@ -8,68 +8,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Upload fixed Liquidsoap script
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          source: novastream.liq
-          target: /root/
-          strip_components: 0
-
-      - name: Write detached restart script
+      - name: Check state and restart Liquidsoap if needed
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 20s
+          command_timeout: 25s
           script: |
-            echo "=== Verify script uploaded ==="
-            grep "process.read" /root/novastream.liq | head -2
-
-            echo "=== Write restart script ==="
-            cat > /tmp/restart_liq2.sh << 'SCRIPT'
-            #!/bin/bash
-            sleep 2
-            pkill -f liquidsoap_watchdog.sh 2>/dev/null
-            pkill -9 -f liquidsoap 2>/dev/null
-            sleep 4
-            nohup /usr/bin/liquidsoap /root/novastream.liq >> /var/log/liquidsoap.log 2>&1 &
-            sleep 6
-            nohup bash /root/liquidsoap_watchdog.sh >> /var/log/liquidsoap_watchdog.log 2>&1 &
-            echo "restart2 done at $(date)" >> /tmp/liq_restart2_status.txt
-            SCRIPT
-            chmod +x /tmp/restart_liq2.sh
-            echo "Restart script written"
-
-            echo "=== Launch restart detached ==="
-            setsid nohup bash /tmp/restart_liq2.sh > /tmp/restart_liq2.log 2>&1 &
-            echo "Restart launched, PID: $!"
-
-      - name: Verify audio after restart
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 45s
-          script: |
-            echo "=== Waiting 30s for Liquidsoap to start and play ==="
-            sleep 30
-
-            echo "=== Restart status ==="
-            cat /tmp/liq_restart2_status.txt 2>/dev/null || echo "no status yet"
-
             echo "=== Liquidsoap processes ==="
-            ps aux | grep liquidsoap | grep -v grep
+            ps aux | grep liquidsoap | grep -v grep || echo "NO LIQUIDSOAP RUNNING"
 
-            echo "=== Liquidsoap log last 15 lines ==="
-            tail -15 /var/log/liquidsoap.log
+            echo "=== Restart log ==="
+            cat /tmp/restart_liq2.log 2>/dev/null || echo "no restart log"
+            cat /tmp/liq_restart2_status.txt 2>/dev/null || echo "no status"
 
-            echo "=== Stream bytes (should NOT be 0x55) ==="
-            curl -s --max-time 4 http://localhost:8000/stream | head -c 8 | xxd
+            echo "=== Liquidsoap log last 10 ==="
+            tail -10 /var/log/liquidsoap.log
 
-            echo "=== play_history recent ==="
-            sqlite3 /root/novastream/radio.db "SELECT title, artist, played_at FROM play_history ORDER BY played_at DESC LIMIT 3;"
+            echo "=== Icecast sources ==="
+            curl -s --max-time 3 http://localhost:8000/status-json.xsl | grep -o '"mount":"[^"]*"' || echo "no sources"
+
+            echo "=== If not running, start now ==="
+            if ! pgrep -f liquidsoap > /dev/null; then
+              echo "Starting Liquidsoap..."
+              nohup /usr/bin/liquidsoap /root/novastream.liq >> /var/log/liquidsoap.log 2>&1 &
+              echo "Started PID: $!"
+            else
+              echo "Liquidsoap is running"
+            fi
