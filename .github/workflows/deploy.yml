@@ -22,7 +22,9 @@ jobs:
           script: |
             set -e
             cd /root/novastream-admin
-            git pull origin main
+            git fetch origin
+            git reset --hard origin/main
+            git clean -fd --exclude=radio.db --exclude=.env --exclude=storage --exclude=node_modules
             npm install --legacy-peer-deps
             npm run build
             pm2 restart novastream-admin
