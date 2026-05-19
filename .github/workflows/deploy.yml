@@ -1,39 +1,29 @@
-name: Patch Stream Server Recently Played Filter
+name: Deploy to Production
 
 on:
   push:
     branches: [main]
 
 jobs:
-  patch:
+  deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Upload patch script to server
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 137.184.12.217
-          username: root
-          key: ${{ secrets.DO_SSH_KEY }}
-          source: "scripts/patch_recently_played.py"
-          target: "/root/novastream/"
-          strip_components: 1
-
-      - name: Run patch script and restart
+      - name: Deploy to DigitalOcean
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 137.184.12.217
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
-          command_timeout: 60s
+          port: 22
+          command_timeout: 120s
           script: |
-            echo "=== Running patch script ==="
-            python3 /root/novastream/patch_recently_played.py
-
-            echo "=== Restarting novastream ==="
-            pm2 restart novastream
-            sleep 5
-
-            echo "=== Testing API ==="
-            curl -s http://localhost:3001/api/stream/now
+            set -e
+            cd /root/novastream-admin
+            git pull origin main
+            npm install --legacy-peer-deps
+            npm run build
+            pm2 restart novastream-admin
+            echo "Deploy complete"

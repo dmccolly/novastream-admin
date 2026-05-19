@@ -15,7 +15,9 @@ export const db = new Database(dbPath);
 
 // Initialize database schema
 export function initDb() {
-  // Enable foreign keys
+  db.pragma('journal_mode = WAL');
+  db.pragma('synchronous = NORMAL');
+  db.pragma('cache_size = -32000');
   db.pragma('foreign_keys = ON');
 
   db.exec(`
@@ -170,6 +172,26 @@ export function initDb() {
     insertCat.run("ID", null, "id", "#64748b"); // Slate
   }
 
+  // Seed default rules for categories that have none
+  const insertRule = db.prepare(`
+    INSERT OR IGNORE INTO rules (category_id, min_separation, selection_mode)
+    SELECT c.id, ?, ? FROM categories c
+    WHERE c.name = ? AND c.type = ?
+      AND NOT EXISTS (SELECT 1 FROM rules r WHERE r.category_id = c.id)
+  `);
+  // type => [min_separation_minutes, selection_mode]
+  const ruleDefaults: [string, string, number, string][] = [
+    ["Music",      "music",      40,  "random"],
+    ["Commercial", "commercial", 20,  "oldest"],
+    ["Promo",      "promo",      60,  "random"],
+    ["Liner",      "liner",      30,  "random"],
+    ["Content",    "content",    90,  "random"],
+    ["ID",         "id",         15,  "random"],
+  ];
+  for (const [name, type, sep, mode] of ruleDefaults) {
+    insertRule.run(sep, mode, name, type);
+  }
+
   // Migration: Ensure clock_items has nullable category_id and track_id/slot_type columns
   // SQLite doesn't support ALTER COLUMN, so we recreate the table if category_id is NOT NULL
   const clockItemCols = db.pragma("table_info(clock_items)");
@@ -227,6 +249,16 @@ export function initDb() {
     db.exec("ALTER TABLE tracks ADD COLUMN tags TEXT DEFAULT ''");
   }
 
+  // Performance indexes
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_tracks_status_cat
+      ON tracks(status, category_id, filepath);
+    CREATE INDEX IF NOT EXISTS idx_tracks_status_subcat
+      ON tracks(status, subcategory_id, filepath);
+    CREATE INDEX IF NOT EXISTS idx_play_history_cat_time
+      ON play_history(category_id, played_at DESC);
+  `);
+
   console.log("Database initialized at", dbPath);
 }
 
@@ -252,15 +284,5 @@ db.exec(`
     current_position INTEGER DEFAULT 0,
     last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (current_clock_id) REFERENCES clocks(id) ON DELETE SET NULL
-  );
-
-  -- Current Playing State (Updated by Liquidsoap on_track callback)
-  CREATE TABLE IF NOT EXISTS current_playing (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    track_id INTEGER,
-    title TEXT,
-    artist TEXT,
-    filepath TEXT,
-    started_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
