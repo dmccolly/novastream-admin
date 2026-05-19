@@ -27,11 +27,17 @@ jobs:
             git clean -fd --exclude=radio.db --exclude=.env --exclude=storage --exclude=node_modules
             npm install --legacy-peer-deps
             npm run build:all
-            pm2 startOrRestart ecosystem.config.cjs --update-env
-            pm2 save
+
+            # Deploy built artifacts to the running app
+            cp dist/index.js /root/novastream/dist/index.js
+            rsync -a --delete dist/public/ /root/novastream/dist/public/
+
+            # Install any new runtime deps in the running app
+            cd /root/novastream
+            npm install dropbox cors dotenv --save --legacy-peer-deps 2>&1 | tail -3
+
+            # Restart the live app
+            pm2 restart novastream
             sleep 3
-            echo "=== PROCESS STATUS ==="
             pm2 list
-            echo "=== NOVASTREAM-ADMIN LOGS ==="
-            pm2 logs novastream-admin --lines 30 --nostream 2>&1 || true
             echo "Deploy complete"
