@@ -18,7 +18,7 @@ jobs:
           username: root
           key: ${{ secrets.DO_SSH_KEY }}
           port: 22
-          command_timeout: 120s
+          command_timeout: 180s
           script: |
             set -e
             cd /root/novastream-admin
@@ -26,6 +26,7 @@ jobs:
             git reset --hard origin/main
             git clean -fd --exclude=radio.db --exclude=.env --exclude=storage --exclude=node_modules
             npm install --legacy-peer-deps
-            npm run build
-            pm2 restart novastream-admin
+            npm run build:all
+            pm2 startOrRestart ecosystem.config.cjs --update-env
+            pm2 save
             echo "Deploy complete"
