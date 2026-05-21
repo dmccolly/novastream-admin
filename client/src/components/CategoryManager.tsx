@@ -9,7 +9,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Plus, Pencil, Trash2, Check, X, AlertTriangle } from "lucide-react";
+import { Plus, Pencil, Trash2, Check, X, AlertTriangle, Shuffle } from "lucide-react";
 import { categoriesApi, Category } from "@/lib/api";
 import { toast } from "sonner";
 
@@ -152,6 +152,15 @@ export default function CategoryManager({ open, onOpenChange, onChange }: Props)
     setDeleteTarget(null);
     setDeleteUsage(null);
     setMoveToId("");
+  };
+
+  const handleShuffle = async (c: Category) => {
+    try {
+      const result = await categoriesApi.shuffle(c.id);
+      toast.success(`Shuffled "${c.name}" (${result.queued} tracks queued)`);
+    } catch (e: any) {
+      toast.error(e.message || "Shuffle failed");
+    }
   };
 
   // Group: top-level, then children under each
@@ -302,6 +311,7 @@ export default function CategoryManager({ open, onOpenChange, onChange }: Props)
                           onSaveRename={saveRename}
                           onCancelRename={cancelRename}
                           onDelete={() => askDelete(parent)}
+                          onShuffle={() => handleShuffle(parent)}
                         />
                         {kids.length > 0 && (
                           <div className="ml-6 border-l border-border/50 pl-3 mt-1 mb-2 space-y-1">
@@ -316,6 +326,7 @@ export default function CategoryManager({ open, onOpenChange, onChange }: Props)
                                 onSaveRename={saveRename}
                                 onCancelRename={cancelRename}
                                 onDelete={() => askDelete(child)}
+                                onShuffle={() => handleShuffle(child)}
                               />
                             ))}
                           </div>
@@ -348,6 +359,7 @@ function CategoryRow({
   onSaveRename,
   onCancelRename,
   onDelete,
+  onShuffle,
 }: {
   category: Category;
   editingId: number | null;
@@ -357,6 +369,7 @@ function CategoryRow({
   onSaveRename: () => void;
   onCancelRename: () => void;
   onDelete: () => void;
+  onShuffle: () => void;
 }) {
   const isEditing = editingId === category.id;
   return (
@@ -421,6 +434,15 @@ function CategoryRow({
               title="Rename"
             >
               <Pencil className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 text-muted-foreground hover:text-amber-400"
+              onClick={onShuffle}
+              title="Shuffle this category (build a fresh rotation queue)"
+            >
+              <Shuffle className="h-3.5 w-3.5" />
             </Button>
             <Button
               variant="ghost"

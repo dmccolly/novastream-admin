@@ -217,6 +217,11 @@ export const categoriesApi = {
     if (!res.ok) throw new Error((await res.json()).error || "Delete failed");
     return res.json();
   },
+  shuffle: async (id: number | string) => {
+    const res = await fetch(`/api/categories/${id}/shuffle`, { method: "POST" });
+    if (!res.ok) throw new Error((await res.json()).error || "Shuffle failed");
+    return res.json() as Promise<{ success: boolean; queued: number }>;
+  },
 };
 
 export const tagsApi = {

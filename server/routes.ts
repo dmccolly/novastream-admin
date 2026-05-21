@@ -79,6 +79,94 @@ export function registerRoutes(app: Express): Server {
     }
   });
 
+  // ---- Per-category shuffle queue helpers ----
+  function rebuildCategoryQueue(categoryId: number, avoidFirstTrackId?: number): number {
+    const tracks = db
+      .prepare(
+        "SELECT id FROM tracks WHERE (category_id = ? OR subcategory_id = ?) " +
+          "AND status = 'ready' AND filepath IS NOT NULL AND filepath NOT LIKE '%.wma'"
+      )
+      .all(categoryId, categoryId) as { id: number }[];
+
+    if (tracks.length === 0) {
+      db.prepare("DELETE FROM category_play_queue WHERE category_id = ?").run(categoryId);
+      return 0;
+    }
+
+    const ids = tracks.map((t) => t.id);
+    for (let i = ids.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+    }
+    if (
+      avoidFirstTrackId != null &&
+      ids.length > 1 &&
+      ids[0] === avoidFirstTrackId
+    ) {
+      [ids[0], ids[1]] = [ids[1], ids[0]];
+    }
+
+    const insert = db.prepare(
+      "INSERT INTO category_play_queue (category_id, track_id, position, consumed) VALUES (?, ?, ?, 0)"
+    );
+    const wipe = db.prepare("DELETE FROM category_play_queue WHERE category_id = ?");
+    const tx = db.transaction((catId: number, list: number[]) => {
+      wipe.run(catId);
+      list.forEach((id, i) => insert.run(catId, id, i));
+    });
+    tx(categoryId, ids);
+    return ids.length;
+  }
+
+  function popFromCategoryQueue(categoryId: number): number | null {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const next = db
+        .prepare(
+          "SELECT cpq.id AS queue_id, cpq.track_id AS track_id " +
+            "FROM category_play_queue cpq " +
+            "JOIN tracks t ON cpq.track_id = t.id " +
+            "WHERE cpq.category_id = ? AND cpq.consumed = 0 " +
+            "AND t.filepath IS NOT NULL AND t.status = 'ready' AND t.filepath NOT LIKE '%.wma' " +
+            "ORDER BY cpq.position ASC LIMIT 1"
+        )
+        .get(categoryId) as { queue_id: number; track_id: number } | undefined;
+
+      if (next) {
+        db.prepare("UPDATE category_play_queue SET consumed = 1 WHERE id = ?").run(next.queue_id);
+        return next.track_id;
+      }
+
+      if (attempt === 0) {
+        const last = db
+          .prepare(
+            "SELECT track_id FROM category_play_queue WHERE category_id = ? AND consumed = 1 ORDER BY position DESC LIMIT 1"
+          )
+          .get(categoryId) as { track_id: number } | undefined;
+        const built = rebuildCategoryQueue(categoryId, last?.track_id);
+        if (built === 0) return null;
+      }
+    }
+    return null;
+  }
+
+  // POST /api/categories/:id/shuffle — (re)build shuffled rotation queue for one category
+  app.post("/api/categories/:id/shuffle", (req, res) => {
+    try {
+      const categoryId = parseInt(req.params.id, 10);
+      if (!Number.isFinite(categoryId)) {
+        return res.status(400).json({ error: "Invalid category id" });
+      }
+      const count = rebuildCategoryQueue(categoryId);
+      if (count === 0) {
+        return res.status(400).json({ error: "No eligible tracks in this category" });
+      }
+      res.json({ success: true, queued: count });
+    } catch (error) {
+      console.error("Shuffle failed:", error);
+      res.status(500).json({ error: "Shuffle failed" });
+    }
+  });
+
   // Sync Dropbox - Scan Dropbox for new files (full re-scan)
   app.post("/api/sync", async (_req, res) => {
     try {
@@ -1454,6 +1542,22 @@ export function registerRoutes(app: Express): Server {
       }
 
       // --- CATEGORY SLOT: pick a track from the category ---
+      let track: any = null;
+
+      // First: if a shuffled queue exists for this category, walk it (no repeats until cycle done)
+      const queueExists = db
+        .prepare("SELECT COUNT(*) as cnt FROM category_play_queue WHERE category_id = ?")
+        .get(currentItem.category_id) as { cnt: number };
+      if (queueExists.cnt > 0) {
+        const queuedTrackId = popFromCategoryQueue(currentItem.category_id);
+        if (queuedTrackId) {
+          track = db
+            .prepare("SELECT * FROM tracks WHERE id = ?")
+            .get(queuedTrackId) as any;
+        }
+      }
+
+      // Fall back to legacy random-with-separation if no queue or queue picks failed
       // Get separation rules for this category (default 40 minutes)
       const rule = db.prepare("SELECT * FROM rules WHERE category_id = ?").get(currentItem.category_id) as any;
       const minSeparationMinutes = rule?.min_separation || 40;
@@ -1502,7 +1606,9 @@ export function registerRoutes(app: Express): Server {
       
       trackQuery += " ORDER BY RANDOM() LIMIT 1";
       
-      let track = db.prepare(trackQuery).get(...params) as any;
+      if (!track) {
+        track = db.prepare(trackQuery).get(...params) as any;
+      }
       
       // Fallback 1: try without artist restriction but still respect title separation
       if (!track) {

@@ -277,6 +277,19 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_play_history_artist ON play_history(artist);
   CREATE INDEX IF NOT EXISTS idx_play_history_track_id ON play_history(track_id);
 
+  -- Per-category Shuffle Queue (rotation: walk through all tracks once before repeating)
+  CREATE TABLE IF NOT EXISTS category_play_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category_id INTEGER NOT NULL,
+    track_id INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    consumed INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE,
+    FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_cpq_lookup ON category_play_queue(category_id, consumed, position);
+
   -- Playback State (Persistent Clock Position)
   CREATE TABLE IF NOT EXISTS playback_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
