@@ -1536,13 +1536,9 @@ export function registerRoutes(app: Express): Server {
       if (currentItem.slot_type === 'track' && currentItem.track_id) {
         const pinnedTrack = db.prepare("SELECT * FROM tracks WHERE id = ?").get(currentItem.track_id) as any;
         if (!pinnedTrack) return res.json({ track: null, error: "Pinned track not found" });
-        
-        // Log to play history
-        db.prepare(`
-          INSERT INTO play_history (track_id, title, artist, category_id, played_at)
-          VALUES (?, ?, ?, ?, datetime('now'))
-        `).run(pinnedTrack.id, pinnedTrack.title, pinnedTrack.artist, pinnedTrack.category_id);
-        
+
+        // play_history is no longer written at fetch time — see /api/stream/now-playing.
+
         let calculatedCueOut = pinnedTrack.cue_out;
         if (!calculatedCueOut && pinnedTrack.duration && pinnedTrack.duration > 3) {
           calculatedCueOut = pinnedTrack.duration - 0.5;
@@ -1662,13 +1658,12 @@ export function registerRoutes(app: Express): Server {
       }
       
       if (!track) return res.json({ track: null, error: "No tracks available for category: " + currentItem.category_name });
-      
-      // Log to play history
-      db.prepare(`
-        INSERT INTO play_history (track_id, title, artist, category_id, played_at)
-        VALUES (?, ?, ?, ?, datetime('now'))
-      `).run(track.id, track.title, track.artist, track.category_id);
-      
+
+      // play_history is no longer written at fetch time. Liquidsoap may reject this
+      // candidate (decode error, missing file) and fetch again — logging here led
+      // to phantom rows. The on_metadata callback (POST /api/stream/now-playing)
+      // writes play_history when audio actually starts.
+
       // Calculate cue_out: use existing value, or calculate based on category type
       // Music gets 3 second segue (start next track 3 seconds before end)
       // Everything else gets 0.5 second segue
@@ -1771,8 +1766,8 @@ export function registerRoutes(app: Express): Server {
         return res.status(400).json({ error: "filepath required" });
       }
       const track = db
-        .prepare("SELECT id, title, artist FROM tracks WHERE filepath = ?")
-        .get(filepath) as { id: number; title: string; artist: string } | undefined;
+        .prepare("SELECT id, title, artist, category_id FROM tracks WHERE filepath = ?")
+        .get(filepath) as { id: number; title: string; artist: string; category_id: number | null } | undefined;
       if (!track) {
         // Still record the filepath so we don't get stuck on stale data
         db.prepare(`
@@ -1794,6 +1789,11 @@ export function registerRoutes(app: Express): Server {
           filepath = excluded.filepath,
           started_at = excluded.started_at
       `).run(track.id, track.title, track.artist, filepath);
+      // The authoritative record of what actually played (fires once per on-air track).
+      db.prepare(`
+        INSERT INTO play_history (track_id, title, artist, category_id, played_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
+      `).run(track.id, track.title, track.artist, track.category_id);
       res.json({ success: true, track_id: track.id });
     } catch (err) {
       console.error("[/api/stream/now-playing]", err);
@@ -1831,19 +1831,11 @@ export function registerRoutes(app: Express): Server {
 
       if (cpFresh && cp) {
         current = { title: cp.title!, artist: cp.artist || "" };
-        // next = most-recent play_history entry that differs from current
-        // (play_history is logged at fetch time, so the latest is the queued-ahead track)
-        for (const row of ph) {
-          if (row.title !== current.title || row.artist !== current.artist) {
-            next = { title: row.title, artist: row.artist };
-            break;
-          }
-        }
-      } else if (ph.length >= 2) {
-        // No fresh on_metadata signal yet — use 1-track-behind heuristic
-        current = { title: ph[1].title, artist: ph[1].artist };
-        next = { title: ph[0].title, artist: ph[0].artist };
+        // 'next' is no longer derivable from play_history: it now records what
+        // actually played (driven by on_metadata), not what's queued ahead.
       } else if (ph.length >= 1) {
+        // Fallback when current_playing is stale: most recent play_history row
+        // is the last on-air track (no longer a "one-ahead" record).
         current = { title: ph[0].title, artist: ph[0].artist };
       }
 
