@@ -1516,8 +1516,17 @@ export function registerRoutes(app: Express): Server {
         nextPosition = (state.current_position + 1) % clockItems.length;
       }
 
-      const currentItem = clockItems[currentPosition];
-      if (!currentItem) return res.json({ track: null, error: "Clock position out of bounds" });
+      let currentItem = clockItems[currentPosition];
+      if (!currentItem) {
+        // Defensive recovery: a sequential clock that ran past its end, or a
+        // sparse/out-of-bounds position from any cause, must NOT lock the stream.
+        // Restart the same clock from position 0 instead of erroring.
+        console.warn(`next-track: position ${currentPosition} out of bounds for clock ${clock.id} (mode=${clock.mode}, items=${clockItems.length}); resetting to 0`);
+        currentPosition = 0;
+        nextPosition = clock.mode === 'sequential' ? 1 : (1 % clockItems.length);
+        currentItem = clockItems[0];
+        if (!currentItem) return res.json({ track: null, error: "No items in clock" });
+      }
 
       // Advance position in DB
       db.prepare("UPDATE playback_state SET current_position = ?, last_updated = datetime('now') WHERE id = 1")

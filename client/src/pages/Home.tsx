@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
@@ -8,12 +8,18 @@ import {
   Clock,
   Play,
   RefreshCw,
+  Volume2,
+  VolumeX,
+  Headphones,
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { tracksApi } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+
+// Live HTTPS-proxied Icecast mount — works from both http and https admin contexts.
+const MONITOR_STREAM_URL = "https://streamofdan.com/stream";
 
 export default function Home() {
   const { toast } = useToast();
@@ -28,6 +34,62 @@ export default function Home() {
     current: { title: string; artist: string } | null;
     recent: { title: string; artist: string }[];
   }>({ current: null, recent: [] });
+
+  // ── Monitor player ───────────────────────────────────────────────────────
+  const monitorAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [monitorMuted, setMonitorMuted] = useState(true);
+  const [monitorVolume, setMonitorVolume] = useState(0.5);
+  const [monitorConnected, setMonitorConnected] = useState(false);
+
+  useEffect(() => {
+    const audio = new Audio();
+    audio.src = MONITOR_STREAM_URL;
+    audio.muted = true;
+    audio.volume = 0.5;
+    audio.preload = "none";
+    monitorAudioRef.current = audio;
+
+    const onPlaying = () => setMonitorConnected(true);
+    const onWaiting = () => setMonitorConnected(false);
+    const onError = () => setMonitorConnected(false);
+    const onPause = () => setMonitorConnected(false);
+    audio.addEventListener("playing", onPlaying);
+    audio.addEventListener("waiting", onWaiting);
+    audio.addEventListener("error", onError);
+    audio.addEventListener("pause", onPause);
+
+    audio.play().catch(() => {});
+
+    return () => {
+      audio.removeEventListener("playing", onPlaying);
+      audio.removeEventListener("waiting", onWaiting);
+      audio.removeEventListener("error", onError);
+      audio.removeEventListener("pause", onPause);
+      audio.pause();
+      audio.src = "";
+      monitorAudioRef.current = null;
+    };
+  }, []);
+
+  const toggleMonitorMute = useCallback(() => {
+    const audio = monitorAudioRef.current;
+    if (!audio) return;
+    const newMuted = !monitorMuted;
+    audio.muted = newMuted;
+    setMonitorMuted(newMuted);
+    if (!newMuted && audio.paused) {
+      audio.src = MONITOR_STREAM_URL + "?t=" + Date.now();
+      audio.play().catch(() => {});
+    }
+  }, [monitorMuted]);
+
+  const handleMonitorVolume = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const vol = parseFloat(e.target.value);
+    setMonitorVolume(vol);
+    if (monitorAudioRef.current) {
+      monitorAudioRef.current.volume = vol;
+    }
+  }, []);
 
   useEffect(() => {
     const loadStats = async () => {
@@ -74,9 +136,38 @@ export default function Home() {
               </span>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <Button 
-              variant="outline" 
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* ── Monitor Player Bar ── */}
+            <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border/50 bg-black/20 backdrop-blur-sm">
+              <Headphones className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+              <span className="text-xs font-mono text-muted-foreground">MONITOR</span>
+              <div className={`h-1.5 w-1.5 rounded-full flex-shrink-0 ${
+                monitorConnected && !monitorMuted ? "bg-green-500 animate-pulse" : "bg-gray-600"
+              }`} />
+              <button
+                onClick={toggleMonitorMute}
+                className="p-1.5 rounded hover:bg-white/10 transition-colors touch-manipulation"
+                title={monitorMuted ? "Unmute monitor" : "Mute monitor"}
+              >
+                {monitorMuted
+                  ? <VolumeX className="h-4 w-4 text-muted-foreground" />
+                  : <Volume2 className="h-4 w-4 text-green-400" />
+                }
+              </button>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={monitorVolume}
+                onChange={handleMonitorVolume}
+                className="w-20 h-1 accent-primary cursor-pointer"
+                title="Monitor volume"
+              />
+            </div>
+
+            <Button
+              variant="outline"
               className="border-primary/20 hover:border-primary hover:bg-primary/10"
               onClick={async () => {
                 try {
