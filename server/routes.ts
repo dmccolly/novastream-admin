@@ -1752,23 +1752,102 @@ export function registerRoutes(app: Express): Server {
   });
 
   // --- Public Now Playing endpoint (for player strip) ---
+  // POST /api/stream/now-playing — Liquidsoap on_metadata callback fires this when
+  // a track actually becomes audible (not when it was queued/fetched). Updates the
+  // current_playing table so the admin UI reflects what listeners are hearing.
+  app.post("/api/stream/now-playing", (req, res) => {
+    try {
+      const { filepath } = (req.body || {}) as { filepath?: string };
+      if (!filepath || typeof filepath !== "string") {
+        return res.status(400).json({ error: "filepath required" });
+      }
+      const track = db
+        .prepare("SELECT id, title, artist FROM tracks WHERE filepath = ?")
+        .get(filepath) as { id: number; title: string; artist: string } | undefined;
+      if (!track) {
+        // Still record the filepath so we don't get stuck on stale data
+        db.prepare(`
+          INSERT INTO current_playing (id, track_id, title, artist, filepath, started_at)
+          VALUES (1, NULL, NULL, NULL, ?, datetime('now'))
+          ON CONFLICT(id) DO UPDATE SET
+            track_id = NULL, title = NULL, artist = NULL,
+            filepath = excluded.filepath, started_at = excluded.started_at
+        `).run(filepath);
+        return res.status(404).json({ error: "track not found", filepath });
+      }
+      db.prepare(`
+        INSERT INTO current_playing (id, track_id, title, artist, filepath, started_at)
+        VALUES (1, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(id) DO UPDATE SET
+          track_id = excluded.track_id,
+          title = excluded.title,
+          artist = excluded.artist,
+          filepath = excluded.filepath,
+          started_at = excluded.started_at
+      `).run(track.id, track.title, track.artist, filepath);
+      res.json({ success: true, track_id: track.id });
+    } catch (err) {
+      console.error("[/api/stream/now-playing]", err);
+      res.status(500).json({ error: "failed" });
+    }
+  });
+
+  // GET /api/stream/now — what's actually on-air now (plus what's queued, plus recent).
+  // Prefers current_playing (driven by Liquidsoap on_metadata, accurate to audio output).
+  // Falls back to play_history[1] (second-most-recent) when current_playing is stale,
+  // since play_history is logged at fetch time and runs ~1 track ahead of audible playback.
   app.get("/api/stream/now", (req, res) => {
     try {
-      const rows = db.prepare(`
-        SELECT title, artist, played_at
-        FROM play_history
-        ORDER BY played_at DESC
-        LIMIT 4
-      `).all() as { title: string; artist: string; played_at: string }[];
+      const cp = db
+        .prepare(
+          "SELECT title, artist, started_at, " +
+            "(julianday('now') - julianday(started_at)) * 24 * 60 AS age_min " +
+            "FROM current_playing WHERE id = 1"
+        )
+        .get() as
+        | { title: string | null; artist: string | null; started_at: string; age_min: number }
+        | undefined;
 
-      const [current, ...history] = rows;
+      const ph = db
+        .prepare(
+          "SELECT title, artist, played_at FROM play_history ORDER BY played_at DESC LIMIT 5"
+        )
+        .all() as { title: string; artist: string; played_at: string }[];
+
+      const cpFresh =
+        cp && cp.title && cp.age_min != null && cp.age_min >= 0 && cp.age_min < 60;
+
+      let current: { title: string; artist: string } | null = null;
+      let next: { title: string; artist: string } | null = null;
+
+      if (cpFresh && cp) {
+        current = { title: cp.title!, artist: cp.artist || "" };
+        // next = most-recent play_history entry that differs from current
+        // (play_history is logged at fetch time, so the latest is the queued-ahead track)
+        for (const row of ph) {
+          if (row.title !== current.title || row.artist !== current.artist) {
+            next = { title: row.title, artist: row.artist };
+            break;
+          }
+        }
+      } else if (ph.length >= 2) {
+        // No fresh on_metadata signal yet — use 1-track-behind heuristic
+        current = { title: ph[1].title, artist: ph[1].artist };
+        next = { title: ph[0].title, artist: ph[0].artist };
+      } else if (ph.length >= 1) {
+        current = { title: ph[0].title, artist: ph[0].artist };
+      }
+
+      const recent: { title: string; artist: string }[] = [];
+      for (const row of ph) {
+        if (recent.length >= 3) break;
+        if (current && row.title === current.title && row.artist === current.artist) continue;
+        if (next && row.title === next.title && row.artist === next.artist) continue;
+        recent.push({ title: row.title, artist: row.artist });
+      }
 
       res.set("Cache-Control", "no-store");
-      res.json({
-        current: current ? { title: current.title, artist: current.artist } : null,
-        next: null,
-        recent: history.slice(0, 3).map((r) => ({ title: r.title, artist: r.artist })),
-      });
+      res.json({ current, next, recent });
     } catch (err) {
       console.error("[/api/stream/now]", err);
       res.status(500).json({ error: "unavailable" });
