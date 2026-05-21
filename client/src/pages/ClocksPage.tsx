@@ -109,7 +109,7 @@ function SortableItem({ id, item, onRemove }: { id: string; item: ClockItem; onR
       <Button
         variant="ghost"
         size="icon"
-        className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive flex-shrink-0"
+        className="h-7 w-7 opacity-60 hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive flex-shrink-0"
         onClick={() => onRemove(id)}
       >
         <Trash2 className="h-3 w-3" />

@@ -79,10 +79,23 @@ export function registerRoutes(app: Express): Server {
     }
   });
 
-  // Sync Dropbox - Scan Dropbox for new files
+  // Sync Dropbox - Scan Dropbox for new files (full re-scan)
   app.post("/api/sync", async (_req, res) => {
     try {
-      const result = await syncDropbox();
+      const result = await syncDropbox("full");
+      res.json(result);
+    } catch (error) {
+      console.error("Sync failed:", error);
+      res.status(500).json({ error: "Sync failed", details: (error as Error).message });
+    }
+  });
+
+  // Sync Dropbox with mode: { syncType: "full" | "incremental" }
+  // "incremental" uses stored cursor for delta-only scan; falls back to full on first run.
+  app.post("/api/tracks/sync", async (req, res) => {
+    try {
+      const requested = req.body?.syncType === "full" ? "full" : "incremental";
+      const result = await syncDropbox(requested);
       res.json(result);
     } catch (error) {
       console.error("Sync failed:", error);
