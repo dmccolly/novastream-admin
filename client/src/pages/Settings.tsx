@@ -23,12 +23,14 @@ interface SyncStatus {
   status: "idle" | "syncing" | "success" | "error";
   tracksAdded?: number;
   tracksUpdated?: number;
+  syncType?: "full" | "incremental";
   error?: string;
 }
 
 export default function Settings() {
   const [showToken, setShowToken] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({ status: "idle" });
+  const [syncType, setSyncType] = useState<"full" | "incremental">("incremental");
   const [settings, setSettings] = useState({
     dropboxToken: "sl.u.AGOq8c_r3akDKOGjf08b_xXzTHzz634OE1qRzRK0OSI02JQF6im4fuS3C_TycFaLAhaZAoRS5xxuygR1OqOwTuC7_dRUKXaqmaIckA7BfMLG2rFTFZx0hAiR6Cducnh7kk89OUMdWG_hxXQ_Uq3CAFxPRnt9LOZDqqKn4LKCEQb9sqY54WrUIJQ2yo85g0yN8E87cFitCrKKj_5OmTb67AZ2s9BIQTi9Nr0t7FS8F-SV2je1Mor6rTlTLVxAWH94iPs2Nf6GS_dqFSihgvZyzf3dmRtKxIKVMhsvo-c_ioKxsR2zOJlBIxlz7mMpokb1ar0vUfIHTh_uROX6tD4uhJZuo3MrtrU50Av68xF50y5Mut5APLTH9UVk0D0t5JH50A3va1ANsuJy9hr5xyWtNPztXUFxaRnzqCAg8WHULW1vnzG_zBK20fo3T0y8VpHqjKw5OkVyXBYM-fRhNsONWmp_vMsfqG_mz-eRAVR6akI2_0SBz8leNnG3Yo4PEjE-7IRoVQ-Z3Qkc-cf1jHx1VFLgZy3joC4kQNc2-UOcCa5gKQF1H3vy4EaTdBzY7Xo2bu8Ssn5Axf4PUdsqW43MecKUDIUI-QpAJ_b5VRoBONJT3nvR1K23PkUhsvAb8NI2hV48XqGEICCvUA2e9UmA9GO6cRM2LGPKBa3EhdbAAF5q2Jk2YHrwJH7snD_G-ehP5_Le5IE-cPRcws4NSjbDUEwczXUz2wiFcQ38uL9wz6gNHvfbrEMxof9tPYRawgzXgBS6xDwGEE1kHNM-WJz3kEpTcaTg0-C4YH8ww48ed9YG2BnXkk1Eh7VZfECc4s3w3EwrUaOSH1GkyLP288cs2kP27N9mkW03M0kn88oRty_oVEV_lm3LdYtvXIgqckpjEI-kHbVipY4HTEGqTVjSeC-yW_ofu5sAv1yF6ktVSULTvM3u3zcffp7jSzZixLsCeZ3Dz4xJC0lDV20RKKP_HZDjKJq-reW5yqMMTjP-clps6D-rvSlUsI9b555ZMwtV47fLtbJL1-kUXc4-uvKyiwVZr-L3r5XSKOz8t9GcBVsUWtEHCMpXzx6ywFztFiP5FEXpft67FpCnxYjAXUFIUA4nO9rQySNpsGr-Xh-BwpAC0NGh7eOF5IWrQZ39XoshtdovzPKvHhnG-E1xDh7W8em7ACufKemyho8C7tbFKJbL00hqi01upRScwzZy5EXDUlMFmim3GL9YHdKuhQfJ_6OIph7oYQ4f0BmWSZSeAqkmUis1YRZZjc__3Is44jNzx_o",
     musicFolder: "/Music",
@@ -39,19 +41,25 @@ export default function Settings() {
 
   const handleSyncNow = async () => {
     try {
-      setSyncStatus({ status: "syncing" });
-      const result = await tracksApi.sync("incremental");
-      
+      setSyncStatus({ status: "syncing", syncType });
+      const result = await tracksApi.sync(syncType);
+
       setSyncStatus({
         status: "success",
         lastSync: new Date().toLocaleString(),
         tracksAdded: result.added,
         tracksUpdated: result.updated,
+        syncType,
       });
-      toast.success("Sync completed successfully");
+      toast.success(
+        syncType === "full"
+          ? `Full re-index complete: +${result.added} added, ~${result.updated} updated`
+          : `Incremental sync complete: +${result.added} new, ~${result.updated} updated`
+      );
     } catch (error) {
-      setSyncStatus({ 
+      setSyncStatus({
         status: "error",
+        syncType,
         error: "Failed to sync with Dropbox"
       });
       toast.error("Sync failed");
@@ -186,13 +194,66 @@ export default function Settings() {
                 className="bg-primary text-primary-foreground hover:bg-primary/90"
               >
                 <RefreshCw className={`h-4 w-4 mr-2 ${syncStatus.status === "syncing" ? "animate-spin" : ""}`} />
-                {syncStatus.status === "syncing" ? "SYNCING..." : "SYNC NOW"}
+                {syncStatus.status === "syncing"
+                  ? "SYNCING..."
+                  : syncType === "full"
+                  ? "FULL RE-INDEX"
+                  : "SYNC NEW ONLY"}
               </Button>
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <label
+                className={`flex items-start gap-3 p-3 rounded border cursor-pointer transition-colors ${
+                  syncType === "incremental"
+                    ? "border-primary bg-primary/10"
+                    : "border-border/50 hover:border-primary/50"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="syncType"
+                  value="incremental"
+                  checked={syncType === "incremental"}
+                  onChange={() => setSyncType("incremental")}
+                  className="mt-1"
+                />
+                <div className="flex-1">
+                  <p className="text-sm font-bold text-foreground font-mono">Incremental</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Only new or changed files since last sync. Fast — uses Dropbox cursor.
+                  </p>
+                </div>
+              </label>
+              <label
+                className={`flex items-start gap-3 p-3 rounded border cursor-pointer transition-colors ${
+                  syncType === "full"
+                    ? "border-primary bg-primary/10"
+                    : "border-border/50 hover:border-primary/50"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="syncType"
+                  value="full"
+                  checked={syncType === "full"}
+                  onChange={() => setSyncType("full")}
+                  className="mt-1"
+                />
+                <div className="flex-1">
+                  <p className="text-sm font-bold text-foreground font-mono">Full re-index</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Walks the entire Dropbox folder. Slow. Use after restoring backups or when incremental looks wrong.
+                  </p>
+                </div>
+              </label>
+            </div>
+
             {syncStatus.status === "idle" && (
-              <p className="text-sm text-muted-foreground">Click "SYNC NOW" to start a manual sync</p>
+              <p className="text-sm text-muted-foreground">
+                Click "{syncType === "full" ? "FULL RE-INDEX" : "SYNC NEW ONLY"}" to start a manual sync.
+              </p>
             )}
 
             {syncStatus.status === "syncing" && (
@@ -206,7 +267,9 @@ export default function Settings() {
               <div className="space-y-3">
                 <div className="flex items-center gap-2 text-green-500">
                   <CheckCircle2 className="h-5 w-5" />
-                  <span className="font-mono text-sm">Sync completed successfully</span>
+                  <span className="font-mono text-sm">
+                    {syncStatus.syncType === "full" ? "Full re-index" : "Incremental sync"} completed successfully
+                  </span>
                 </div>
                 <div className="grid grid-cols-3 gap-4 text-sm">
                   <div>

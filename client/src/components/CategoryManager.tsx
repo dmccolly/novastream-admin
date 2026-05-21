@@ -402,7 +402,7 @@ function CategoryRow({
           </>
         )}
       </div>
-      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+      <div className="flex items-center gap-1 opacity-70 group-hover:opacity-100 transition-opacity">
         {isEditing ? (
           <>
             <Button
@@ -428,21 +428,22 @@ function CategoryRow({
           <>
             <Button
               variant="ghost"
+              size="sm"
+              className="h-7 px-2 gap-1.5 text-muted-foreground hover:text-amber-400"
+              onClick={onShuffle}
+              title="Shuffle this category (build a fresh rotation queue — every track plays once before any repeats)"
+            >
+              <Shuffle className="h-3.5 w-3.5" />
+              <span className="text-xs font-mono">Shuffle</span>
+            </Button>
+            <Button
+              variant="ghost"
               size="icon"
               className="h-7 w-7 text-muted-foreground hover:text-primary"
               onClick={onStartRename}
               title="Rename"
             >
               <Pencil className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 text-muted-foreground hover:text-amber-400"
-              onClick={onShuffle}
-              title="Shuffle this category (build a fresh rotation queue)"
-            >
-              <Shuffle className="h-3.5 w-3.5" />
             </Button>
             <Button
               variant="ghost"
