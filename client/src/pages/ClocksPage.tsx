@@ -199,7 +199,9 @@ export default function ClocksPage() {
   const handleCreateClock = async () => {
     if (!newClockName.trim()) return;
     try {
-      const newClock = await clocksApi.create({ name: newClockName, color: "#888888", mode: 'loop' });
+      const palette = ["#e74c3c", "#3498db", "#2ecc71", "#f39c12", "#9b59b6", "#16a085", "#e67e22", "#34495e"];
+      const color = palette[clocks.length % palette.length];
+      const newClock = await clocksApi.create({ name: newClockName, color, mode: 'loop' });
       setClocks([...clocks, newClock]);
       setSelectedClockId(newClock.id);
       setNewClockName("");

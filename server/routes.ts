@@ -57,6 +57,22 @@ function ensurePlaybackStateNextColumns() {
   }
 }
 
+function ensureClockColors() {
+  try {
+    const palette = ["#e74c3c", "#3498db", "#2ecc71", "#f39c12", "#9b59b6", "#16a085", "#e67e22", "#34495e"];
+    const grays = db
+      .prepare("SELECT id FROM clocks WHERE color IS NULL OR color = '' OR color = '#888888'")
+      .all() as { id: number }[];
+    for (const c of grays) {
+      const color = palette[(c.id - 1) % palette.length];
+      db.prepare("UPDATE clocks SET color = ? WHERE id = ?").run(color, c.id);
+    }
+    if (grays.length > 0) console.log(`[migration] Recolored ${grays.length} default-gray clocks from palette`);
+  } catch (e: any) {
+    console.error("[migration] ensureClockColors failed:", e.message);
+  }
+}
+
 function recordQueuedTrack(t: { id?: number; title?: string | null; artist?: string | null; filepath?: string | null }) {
   try {
     db.prepare(
@@ -72,6 +88,7 @@ export function registerRoutes(app: Express): Server {
   initDb();
   ensureTagsColumn();
   ensurePlaybackStateNextColumns();
+  ensureClockColors();
 
   app.use(cors());
   app.use(express.json());

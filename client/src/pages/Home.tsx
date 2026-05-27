@@ -260,8 +260,8 @@ export default function Home() {
             <div className="absolute inset-0 bg-gradient-to-r from-primary/5 to-transparent opacity-50" />
             <CardHeader>
               <div className="flex items-center gap-2">
-                <div className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
-                <span className="text-xs font-mono font-bold text-foreground uppercase tracking-wider">On Air</span>
+                <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
+                <span className="text-xs font-mono font-bold text-foreground uppercase tracking-wider">Automation</span>
               </div>
             </CardHeader>
             <CardContent className="relative z-10">

@@ -89,7 +89,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 </div>
                 <span className="flex items-center text-green-500 font-mono">
                   <span className="h-1.5 w-1.5 rounded-full bg-green-500 mr-1.5 animate-pulse"></span>
-                  LIVE
+                  ON-AIR
                 </span>
               </div>
               <div className="flex items-center justify-between text-xs">

@@ -125,13 +125,33 @@ export default function Scheduler() {
   const handleSaveGrid = async () => {
     setLoading(true);
     try {
-      const assignments = grid.map(cell => ({
-        day: cell.day_of_week,
-        hour: cell.hour,
-        clock_id: cell.clock_id
-      }));
+      let assignments;
+      if (isMasterClockMode) {
+        const mid = parseInt(masterClockId, 10);
+        if (!mid) {
+          toast.error("Pick a master clock first");
+          setLoading(false);
+          return;
+        }
+        // Fill every day/hour with the master clock
+        assignments = [];
+        for (let d = 0; d < 7; d++) {
+          for (let h = 0; h < 24; h++) {
+            assignments.push({ day: d, hour: h, clock_id: mid });
+          }
+        }
+      } else {
+        assignments = grid.map(cell => ({
+          day: cell.day_of_week,
+          hour: cell.hour,
+          clock_id: cell.clock_id
+        }));
+      }
       await scheduleApi.updateGrid(assignments);
-      toast.success("Schedule saved successfully");
+      // Refresh grid so the (now-hidden) state matches the server
+      const fresh = await scheduleApi.getGrid();
+      setGrid(fresh);
+      toast.success(isMasterClockMode ? "Master clock applied to all 168 hours" : "Schedule saved successfully");
     } catch (error) {
       toast.error("Failed to save schedule");
     } finally {
