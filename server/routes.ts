@@ -35,10 +35,43 @@ function ensureTagsColumn() {
   }
 }
 
+function ensurePlaybackStateNextColumns() {
+  try {
+    const cols = db.prepare("PRAGMA table_info(playback_state)").all() as any[];
+    const names = new Set(cols.map((c: any) => c.name));
+    const adds: [string, string][] = [
+      ["next_queued_track_id", "INTEGER"],
+      ["next_queued_title", "TEXT"],
+      ["next_queued_artist", "TEXT"],
+      ["next_queued_filepath", "TEXT"],
+      ["next_queued_at", "TEXT"],
+    ];
+    for (const [col, type] of adds) {
+      if (!names.has(col)) {
+        db.prepare(`ALTER TABLE playback_state ADD COLUMN ${col} ${type}`).run();
+        console.log(`[migration] Added ${col} to playback_state`);
+      }
+    }
+  } catch (e: any) {
+    console.error("[migration] ensurePlaybackStateNextColumns failed:", e.message);
+  }
+}
+
+function recordQueuedTrack(t: { id?: number; title?: string | null; artist?: string | null; filepath?: string | null }) {
+  try {
+    db.prepare(
+      "UPDATE playback_state SET next_queued_track_id = ?, next_queued_title = ?, next_queued_artist = ?, next_queued_filepath = ?, next_queued_at = datetime('now') WHERE id = 1"
+    ).run(t.id ?? null, t.title ?? null, t.artist ?? null, t.filepath ?? null);
+  } catch (e: any) {
+    console.error("[recordQueuedTrack] failed:", e.message);
+  }
+}
+
 export function registerRoutes(app: Express): Server {
   // Initialize DB
   initDb();
   ensureTagsColumn();
+  ensurePlaybackStateNextColumns();
 
   app.use(cors());
   app.use(express.json());
@@ -1543,6 +1576,7 @@ export function registerRoutes(app: Express): Server {
         if (!calculatedCueOut && pinnedTrack.duration && pinnedTrack.duration > 3) {
           calculatedCueOut = pinnedTrack.duration - 0.5;
         }
+        recordQueuedTrack(pinnedTrack);
         return res.json({ track: { ...pinnedTrack, cue_out: calculatedCueOut }, clock_position: currentPosition, category: 'Pinned Track' });
       }
 
@@ -1674,6 +1708,7 @@ export function registerRoutes(app: Express): Server {
         const segueOffset = (category?.type === 'music') ? 3.0 : 0.5;
         calculatedCueOut = track.duration - segueOffset;
       }
+      recordQueuedTrack(track);
       res.json({ track: { ...track, cue_out: calculatedCueOut }, clock_position: currentPosition, category: currentItem.category_name });
     } catch (error) {
       console.error("Next track API failed:", error);
@@ -1809,12 +1844,12 @@ export function registerRoutes(app: Express): Server {
     try {
       const cp = db
         .prepare(
-          "SELECT title, artist, started_at, " +
+          "SELECT title, artist, filepath, started_at, " +
             "(julianday('now') - julianday(started_at)) * 24 * 60 AS age_min " +
             "FROM current_playing WHERE id = 1"
         )
         .get() as
-        | { title: string | null; artist: string | null; started_at: string; age_min: number }
+        | { title: string | null; artist: string | null; filepath: string | null; started_at: string; age_min: number }
         | undefined;
 
       const ph = db
@@ -1838,6 +1873,25 @@ export function registerRoutes(app: Express): Server {
         // is the last on-air track (no longer a "one-ahead" record).
         current = { title: ph[0].title, artist: ph[0].artist };
       }
+
+      // UP NEXT: track most recently returned by /api/stream/next-track. While
+      // Liquidsoap is still playing the previous fetch, this row sits in its
+      // queue. Detect it's still waiting by comparing filepath to current_playing.
+      try {
+        const queued = db
+          .prepare(
+            "SELECT next_queued_title, next_queued_artist, next_queued_filepath FROM playback_state WHERE id = 1"
+          )
+          .get() as
+          | { next_queued_title: string | null; next_queued_artist: string | null; next_queued_filepath: string | null }
+          | undefined;
+        if (queued && queued.next_queued_title && queued.next_queued_filepath) {
+          const cpFp = cp?.filepath ?? null;
+          if (queued.next_queued_filepath !== cpFp) {
+            next = { title: queued.next_queued_title, artist: queued.next_queued_artist || "" };
+          }
+        }
+      } catch { /* swallow */ }
 
       const recent: { title: string; artist: string }[] = [];
       for (const row of ph) {
